@@ -26,12 +26,13 @@ app.use('/api/goals',        require('./routes/goals'));
 app.use('/api/whatsapp',     require('./routes/whatsapp'));
 
 // ── FRONTEND SPA fallback ─────────────────────────
-app.get('*', (req, res) => {
+app.use((req, res, next) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(__dirname, '../frontend/public/index.html'));
+  } else {
+    next();
   }
 });
-
 // ── ERROR HANDLER ─────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);
