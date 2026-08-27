@@ -8,7 +8,19 @@ const app = express();
 
 // ── MIDDLEWARE ─────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+app.use(cors({
+  origin: [
+    'https://wealthguard-rho.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:5500',
+    process.env.FRONTEND_URL,
+  ].filter(Boolean),
+  credentials: true,
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+}));
+// Handle preflight requests
+app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -24,15 +36,15 @@ app.use('/api/market',       require('./routes/market'));
 app.use('/api/brief',        require('./routes/brief'));
 app.use('/api/goals',        require('./routes/goals'));
 app.use('/api/whatsapp',     require('./routes/whatsapp'));
+app.use('/api/payments',     require('./routes/payments'));
 
 // ── FRONTEND SPA fallback ─────────────────────────
-app.use((req, res, next) => {
+app.get('*', (req, res) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(__dirname, '../frontend/public/index.html'));
-  } else {
-    next();
   }
 });
+
 // ── ERROR HANDLER ─────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);
