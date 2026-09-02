@@ -877,8 +877,8 @@ table.data-table{width:100%;border-collapse:collapse;}
    Leave blank to keep the homepage Track Record section in its
    honest "starting soon" empty state.
 ============================================================ */
-const SUPABASE_URL = '';       // e.g. 'https://xxxxx.supabase.co'
-const SUPABASE_ANON_KEY = '';  // e.g. 'eyJhbGciOi...'
+const SUPABASE_URL = 'https://mvuezfomqtgnxwrlnrvd.supabase.co';       // e.g. 'https://xxxxx.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12dWV6Zm9tcXRnbnh3cmxucnZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3MzM2MTAsImV4cCI6MjEwMzMwOTYxMH0.LVtJSB94mFSlpFudQWdKGI6r1zQa-UR0eavf-ticswM';  // e.g. 'eyJhbGciOi...'
 let sb = null;
 if (SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase) {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
