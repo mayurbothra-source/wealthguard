@@ -14,7 +14,9 @@ const NSE_HEADERS = {
 };
 
 const YAHOO_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
 };
 
 // ── DEMO DATA (used when live APIs unavailable) ────────
@@ -215,12 +217,21 @@ async function getYahooQuote(symbol) {
     );
     const result = data?.chart?.result?.[0];
     const meta = result?.meta;
-    if (!meta || meta.regularMarketPrice == null) throw new Error('No price in response');
+    if (!meta || meta.regularMarketPrice == null) throw new Error('No price in response body — got: ' + JSON.stringify(data).slice(0,200));
     const price = meta.regularMarketPrice;
     const prevClose = meta.previousClose || meta.chartPreviousClose;
     const change_pct = prevClose ? ((price - prevClose) / prevClose) * 100 : 0;
     return { symbol, price, change_pct: parseFloat(change_pct.toFixed(2)), source: 'yahoo_live' };
   } catch (err) {
+    // Previously this swallowed the error completely, making it impossible
+    // to tell WHY Yahoo failed (blocked? timeout? changed response shape?)
+    // from outside. Now it logs the real reason to Render's logs so we can
+    // actually diagnose instead of guessing.
+    const detail = err.response
+      ? `HTTP ${err.response.status} — ${JSON.stringify(err.response.data).slice(0,200)}`
+      : err.code === 'ECONNABORTED' ? 'Request timed out after 8s'
+      : err.message;
+    console.warn(`⚠️  Yahoo quote failed for ${symbol}: ${detail}`);
     return null; // caller decides the demo fallback — never silently invent a price here
   }
 }
