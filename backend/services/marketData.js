@@ -292,7 +292,21 @@ async function getSilverINR(usdInrRate) {
   return { price: parseFloat(inrPerUnit.toFixed(2)), unit: 'per kg', change_pct: demo.change_pct, source: 'demo', indicative: true };
 }
 
+// Simple in-memory cache — the actual fix for the 429 errors. Without this,
+// every page load (and every widget on a page) independently re-fetches
+// live data from NSE and Yahoo with zero throttling, which is exactly the
+// burst pattern that trips external rate limits. A short cache means rapid
+// repeat requests (multiple tabs, multiple components, a user refreshing)
+// get served instantly from memory instead of hammering upstream providers.
+let _snapshotCache = null;
+let _snapshotCacheTime = 0;
+const SNAPSHOT_CACHE_TTL_MS = 60 * 1000; // 60 seconds
+
 async function refreshAllMarketData() {
+  const now = Date.now();
+  if (_snapshotCache && (now - _snapshotCacheTime) < SNAPSHOT_CACHE_TTL_MS) {
+    return _snapshotCache;
+  }
   console.log('📊 Refreshing market data...');
   const [nifty, vix, flows, macro, sensex, usdInr] = await Promise.all([
     getNSEIndex('NIFTY 50'),
@@ -310,6 +324,8 @@ async function refreshAllMarketData() {
   const regime = classifyVIXRegime(vix);
   const snapshot = { nifty, vix, vixRegime: regime, flows, macro, sensex, usdInr, gold, silver, refreshedAt: new Date().toISOString() };
   console.log(`   Nifty: ${nifty.price} | Sensex: ${sensex.price} [${sensex.source}] | VIX: ${vix} [${regime.regime}]`);
+  _snapshotCache = snapshot;
+  _snapshotCacheTime = now;
   return snapshot;
 }
 
