@@ -19,8 +19,11 @@ app.use(cors({
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
-// Handle preflight requests
-app.options('*', cors());
+// NOTE: no separate app.options('*', cors()) here — the cors() middleware
+// above already handles OPTIONS preflight automatically for every route.
+// The explicit wildcard version was not only redundant, it's what crashed
+// the whole server: newer path-to-regexp (pulled in by Node 24) dropped
+// support for the bare '*' pattern and throws instead of matching it.
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -39,7 +42,11 @@ app.use('/api/whatsapp',     require('./routes/whatsapp'));
 app.use('/api/payments',     require('./routes/payments'));
 
 // ── FRONTEND SPA fallback ─────────────────────────
-app.get('*', (req, res) => {
+// Uses app.use() with no path pattern at all, instead of app.get('*', ...).
+// A bare '*' string has to be parsed as a route pattern by path-to-regexp,
+// which is exactly what crashed above — app.use() with no path never goes
+// through that parser, so this form is safe under any router version.
+app.use((req, res) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(__dirname, '../frontend/public/index.html'));
   }
