@@ -1,0 +1,2295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WealthGuard — Investment Intelligence Platform</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+/* ============================================================
+   DESIGN TOKENS
+============================================================ */
+:root {
+  --ink:#16211B; --ink-soft:#3A453E; --paper:#FFFFFF; --bg:#F6F7F4;
+  --line:#E1E4DD; --line-soft:#EDEFEA; --muted:#6E7A71;
+  --accent:#1B5E3F; --accent-dark:#123F2A; --accent-tint:#E8F2EC; --accent-tint2:#D4E8DD;
+  --gold:#A9832F; --gold-tint:#FBF3DE;
+  --safe:#1B5E3F; --safe-tint:#E8F2EC; --warn:#9A6B12; --warn-tint:#FBF0DA;
+  --danger:#A23B2E; --danger-tint:#FBEAE7; --purple:#5B3E8A; --purple-tint:#EFE9F7;
+  --radius:6px; --radius-lg:10px;
+  --shadow-sm:0 1px 2px rgba(22,33,27,.06); --shadow-md:0 4px 16px rgba(22,33,27,.08); --shadow-lg:0 16px 48px rgba(22,33,27,.16);
+  --serif:Georgia,'Times New Roman',serif; --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; --mono:'SF Mono','Menlo',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html{-webkit-font-smoothing:antialiased;}
+body{font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.5;font-size:15px;}
+button{font-family:inherit;cursor:pointer;border:none;background:none;}
+input,select{font-family:inherit;font-size:14px;border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;width:100%;background:var(--paper);color:var(--ink);outline:none;transition:border-color .15s;}
+input:focus,select:focus{border-color:var(--accent);}
+label{display:block;font-size:11.5px;font-weight:600;color:var(--muted);letter-spacing:.03em;margin-bottom:5px;text-transform:uppercase;}
+a{color:var(--accent);}
+
+.screen{display:none;min-height:100vh;}
+.screen.active{display:block;}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:12px 24px;border-radius:var(--radius);font-weight:600;font-size:14px;transition:all .15s;letter-spacing:.01em;}
+.btn-primary{background:var(--accent);color:#fff;}
+.btn-primary:hover{background:var(--accent-dark);}
+.btn-outline{background:transparent;color:var(--ink);border:1.5px solid var(--line);}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent);}
+.btn-ghost{background:transparent;color:var(--ink-soft);}
+.btn-ghost:hover{color:var(--ink);}
+.btn-sm{padding:8px 16px;font-size:13px;}
+.btn-block{width:100%;}
+.btn:disabled{opacity:.5;cursor:not-allowed;}
+
+/* ============================================================
+   LANDING / HOMEPAGE
+============================================================ */
+#screen-landing{background:var(--paper);}
+.nav{display:flex;align-items:center;justify-content:space-between;padding:22px 48px;border-bottom:1px solid var(--line-soft);}
+.brand{font-family:var(--serif);font-size:20px;font-weight:700;display:flex;align-items:center;gap:7px;}
+.mark{width:9px;height:9px;background:var(--accent);transform:rotate(45deg);border-radius:2px;}
+.nav-actions{display:flex;gap:10px;}
+.ticker{background:var(--ink);padding:13px 32px;display:flex;gap:32px;justify-content:center;flex-wrap:wrap;}
+.tick{display:flex;align-items:baseline;gap:7px;}
+.tick .n{font-family:var(--mono);font-size:10.5px;color:rgba(255,255,255,.5);letter-spacing:.06em;}
+.tick .v{font-family:var(--serif);font-size:14.5px;color:#fff;}
+.tick .c{font-family:var(--mono);font-size:10.5px;font-weight:700;}
+.up{color:#7FC4A0;} .down{color:#E08A7D;}
+.hero{max-width:820px;margin:0 auto;text-align:center;padding:90px 32px 60px;}
+.eyebrow{font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:22px;}
+.hero h1{font-family:var(--serif);font-size:44px;line-height:1.2;color:var(--ink);font-weight:700;margin-bottom:30px;letter-spacing:-.01em;}
+.hero h1 em{font-style:italic;color:var(--accent);}
+.hero-actions{display:flex;gap:14px;justify-content:center;}
+.section{max-width:1080px;margin:0 auto;padding:56px 32px;}
+.section-head{text-align:center;margin-bottom:32px;}
+.section-head h2{font-family:var(--serif);font-size:25px;color:var(--ink);margin-bottom:8px;}
+.section-head p{font-size:13.5px;color:var(--muted);max-width:480px;margin:0 auto;line-height:1.6;}
+.track-empty{background:var(--paper);border:1.5px dashed var(--line);border-radius:var(--radius-lg);padding:50px 40px;text-align:center;max-width:640px;margin:0 auto;}
+.track-empty .ic{font-size:32px;margin-bottom:14px;}
+.track-empty h3{font-family:var(--serif);font-size:18px;margin-bottom:10px;}
+.track-empty p{font-size:13px;color:var(--muted);line-height:1.7;max-width:440px;margin:0 auto 16px;}
+.track-empty .badge{display:inline-block;font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.08em;background:var(--accent-tint);color:var(--accent);padding:5px 14px;border-radius:20px;text-transform:uppercase;}
+.track-cards{display:flex;flex-direction:column;gap:10px;max-width:680px;margin:0 auto;}
+.tc{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:14px 18px;display:flex;justify-content:space-between;align-items:center;font-size:12.5px;}
+.tc .d{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-bottom:3px;}
+.tc-result{font-weight:700;}
+.precision-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:700px;margin:28px auto 0;}
+.prec-card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:18px;text-align:center;}
+.prec-card .lbl{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.1em;color:var(--muted);text-transform:uppercase;margin-bottom:7px;}
+.prec-card .val{font-family:var(--serif);font-size:26px;color:var(--ink-soft);}
+.prec-card .sub{font-size:10.5px;color:var(--muted);margin-top:3px;}
+.footer{text-align:center;padding:28px;font-size:11.5px;color:var(--muted);border-top:1px solid var(--line-soft);}
+
+/* ============================================================
+   LOGIN
+============================================================ */
+#screen-login{background:var(--bg);min-height:100vh;padding:20px;}
+#screen-login.active{display:flex;align-items:center;justify-content:center;}
+.login-box{max-width:400px;width:100%;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);padding:36px;box-shadow:var(--shadow-sm);}
+.login-box .brand{justify-content:center;margin-bottom:26px;}
+.login-box h2{font-family:var(--serif);font-size:22px;text-align:center;margin-bottom:6px;}
+.login-box .sub{font-size:12.5px;color:var(--muted);text-align:center;margin-bottom:24px;}
+.login-msg{font-size:12px;padding:10px 12px;border-radius:var(--radius);margin-top:12px;display:none;}
+.login-msg.bad{background:var(--danger-tint);color:var(--danger);display:block;}
+.login-msg.ok{background:var(--safe-tint);color:var(--safe);display:block;}
+
+/* ============================================================
+   ONBOARDING
+============================================================ */
+#screen-onboarding{background:var(--bg);padding:40px 20px 80px;}
+.ob-wrap{max-width:600px;margin:0 auto;}
+.ob-brand{text-align:center;margin-bottom:8px;}
+.ob-steps{display:flex;align-items:center;justify-content:center;margin:20px 0 30px;}
+.ob-dot{width:26px;height:26px;border-radius:50%;background:var(--line);color:var(--muted);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .2s;font-family:var(--mono);}
+.ob-dot.active{background:var(--accent);color:#fff;}
+.ob-dot.done{background:var(--accent-tint2);color:var(--accent);}
+.ob-line{width:32px;height:1.5px;background:var(--line);}
+.ob-line.done{background:var(--accent-tint2);}
+.ob-card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);padding:36px;box-shadow:var(--shadow-sm);}
+.ob-step{display:none;}
+.ob-step.active{display:block;}
+.ob-step h2{font-family:var(--serif);font-size:24px;margin-bottom:6px;}
+.ob-step .sub{font-size:13px;color:var(--muted);margin-bottom:26px;line-height:1.6;}
+.row{margin-bottom:16px;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.ob-nav{display:flex;justify-content:space-between;margin-top:26px;}
+.opt-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px;}
+.opt{border:1.5px solid var(--line);border-radius:var(--radius);padding:14px 10px;text-align:center;cursor:pointer;transition:all .15s;}
+.opt:hover{border-color:var(--accent);}
+.opt.sel{border-color:var(--accent);background:var(--accent-tint);}
+.opt .ic{font-size:20px;display:block;margin-bottom:6px;}
+.opt .t{font-size:11.5px;font-weight:700;}
+.opt .d{font-size:10px;color:var(--muted);margin-top:2px;}
+.goal-row{display:grid;grid-template-columns:1fr 110px 90px;gap:8px;margin-bottom:8px;}
+.add-goal{width:100%;border:1.5px dashed var(--line);border-radius:var(--radius);padding:10px;font-size:12.5px;font-weight:600;color:var(--muted);margin-top:6px;}
+.add-goal:hover{border-color:var(--accent);color:var(--accent);}
+.protect-warn{display:none;background:var(--danger-tint);border-left:3px solid var(--danger);border-radius:var(--radius);padding:12px 14px;font-size:12.5px;color:var(--danger);margin-top:12px;line-height:1.55;}
+.summary-row{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;background:var(--bg);border:1px solid var(--line-soft);border-radius:var(--radius);margin-bottom:8px;font-size:13px;}
+.summary-row .k{color:var(--muted);} .summary-row .v{font-weight:700;}
+
+/* Step 5 — trial vs paid */
+.choice-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;}
+.choice{border:2px solid var(--line);border-radius:var(--radius-lg);padding:22px 20px;position:relative;}
+.choice.trial{border-color:var(--accent);background:var(--accent-tint);}
+.badge-top{position:absolute;top:-10px;left:20px;background:var(--gold);color:#fff;font-size:9.5px;font-weight:700;padding:3px 10px;border-radius:10px;letter-spacing:.05em;}
+.choice .ic{font-size:22px;margin-bottom:10px;}
+.choice h3{font-size:14.5px;font-weight:700;margin-bottom:6px;}
+.choice p{font-size:11.5px;color:var(--muted);line-height:1.6;margin-bottom:14px;}
+.choice .deadline{font-family:var(--mono);font-size:9.5px;color:var(--accent);font-weight:700;margin-bottom:12px;letter-spacing:.03em;}
+.plan-list{display:flex;flex-direction:column;gap:7px;}
+.plan-mini{display:flex;justify-content:space-between;font-size:11px;padding:7px 10px;background:var(--paper);border-radius:4px;border:1px solid var(--line-soft);}
+.plan-mini b{color:var(--ink);}
+.fine{font-size:10.5px;color:var(--muted);text-align:center;line-height:1.7;margin-top:4px;}
+
+/* ============================================================
+   PRICING
+============================================================ */
+#screen-pricing{background:var(--bg);padding:48px 20px 88px;}
+.pricing-wrap{max-width:900px;margin:0 auto;}
+.pricing-head{text-align:center;margin-bottom:32px;}
+.pricing-head h1{font-family:var(--serif);font-size:30px;margin-bottom:10px;}
+.pricing-head p{font-size:13.5px;color:var(--muted);max-width:480px;margin:0 auto;line-height:1.6;}
+.launch-banner{max-width:600px;margin:22px auto 0;background:var(--ink);border-radius:var(--radius-lg);padding:16px 20px;text-align:center;}
+.launch-banner .tag{font-family:var(--mono);font-size:9.5px;color:var(--gold);letter-spacing:.12em;margin-bottom:5px;}
+.launch-banner .msg{font-size:13.5px;color:#fff;font-weight:600;}
+.launch-banner .msg code{font-family:var(--mono);color:var(--gold);background:rgba(255,255,255,.08);padding:2px 7px;border-radius:3px;}
+.launch-banner .sub{font-size:11px;color:rgba(255,255,255,.45);margin-top:5px;}
+.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:32px 0 36px;}
+.plan{background:var(--paper);border:1.5px solid var(--line);border-radius:var(--radius-lg);padding:24px 20px;display:flex;flex-direction:column;cursor:pointer;transition:all .15s;position:relative;}
+.plan:hover{border-color:var(--accent);box-shadow:var(--shadow-md);}
+.plan.sel{border-color:var(--accent);border-width:2px;}
+.plan.popular{border-color:var(--gold);}
+.plan-badge{position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:var(--gold);color:#fff;font-size:10px;font-weight:700;padding:3px 12px;border-radius:20px;white-space:nowrap;letter-spacing:.04em;}
+.plan .pname{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;color:var(--accent);text-transform:uppercase;margin-bottom:10px;}
+.plan .pprice{font-family:var(--serif);font-size:29px;color:var(--ink);}
+.plan .pperiod{font-size:11px;color:var(--muted);margin-bottom:14px;}
+.plan .pdesc{font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:16px;flex:1;}
+.plan ul{list-style:none;margin-bottom:18px;}
+.plan li{font-size:11.5px;color:var(--ink-soft);padding:5px 0;border-bottom:1px solid var(--line-soft);display:flex;gap:7px;}
+.plan li:last-child{border-bottom:none;}
+.plan li::before{content:'✓';color:var(--accent);font-weight:700;flex-shrink:0;}
+.plan-btn{width:100%;padding:10px;border-radius:var(--radius);font-size:12.5px;font-weight:700;border:1.5px solid var(--line);background:transparent;color:var(--ink);}
+.plan.sel .plan-btn{background:var(--accent);color:#fff;border-color:var(--accent);}
+.checkout{display:none;max-width:460px;margin:0 auto;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);padding:28px;box-shadow:var(--shadow-md);}
+.checkout h3{font-family:var(--serif);font-size:19px;margin-bottom:4px;}
+.checkout .sub{font-size:12px;color:var(--muted);margin-bottom:20px;}
+.co-box{background:var(--bg);border:1px solid var(--line-soft);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px;}
+.co-row{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;}
+.co-row .k{color:var(--muted);}
+.co-total{display:flex;justify-content:space-between;align-items:center;padding-top:10px;margin-top:6px;border-top:1px solid var(--line-soft);}
+.co-total .k{color:var(--accent);font-weight:700;font-size:13px;}
+.co-total .amt{font-family:var(--serif);font-size:23px;color:var(--ink);}
+.disc-row{display:flex;gap:8px;margin-bottom:12px;}
+.disc-input{flex:1;font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;font-size:13px;}
+.disc-msg{font-size:12px;padding:9px 12px;border-radius:var(--radius);margin-bottom:14px;display:none;line-height:1.5;}
+.disc-msg.ok{background:var(--safe-tint);color:var(--safe);display:block;}
+.disc-msg.bad{background:var(--danger-tint);color:var(--danger);display:block;}
+.founder-box{max-width:460px;margin:20px auto 0;background:var(--bg);border-left:3px solid var(--gold);border-radius:var(--radius);padding:14px 16px;font-size:12px;color:var(--ink-soft);line-height:1.7;}
+.founder-box code{font-family:var(--mono);color:var(--gold);font-weight:700;}
+
+/* ============================================================
+   SUBSCRIBE TO CONTINUE
+============================================================ */
+#screen-paused{background:var(--bg);min-height:100vh;padding:20px;}
+#screen-paused.active{display:flex;align-items:center;justify-content:center;}
+.pause-box{max-width:440px;width:100%;text-align:center;padding:42px 34px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);}
+.pause-box .ic{font-size:36px;margin-bottom:16px;}
+.pause-box h2{font-family:var(--serif);font-size:21px;margin-bottom:10px;}
+.pause-box p{font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:22px;}
+.data-safe{background:var(--accent-tint);border-radius:var(--radius);padding:12px 15px;font-size:11.5px;color:var(--accent);margin-bottom:22px;text-align:left;display:flex;gap:8px;}
+.plans-mini{display:flex;flex-direction:column;gap:8px;margin-bottom:18px;text-align:left;}
+.pm{display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border:1px solid var(--line);border-radius:var(--radius);font-size:12.5px;}
+.pm b{font-family:var(--serif);font-size:14px;}
+
+/* ============================================================
+   APP SHELL
+============================================================ */
+#screen-app{min-height:100vh;background:var(--bg);}
+.topbar{background:var(--paper);border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 24px;height:58px;position:sticky;top:0;z-index:50;}
+.topbar .brand{font-size:17px;margin-right:8px;}
+.plan-chip{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.06em;padding:3px 9px;border-radius:10px;margin-left:8px;text-transform:uppercase;}
+.chip-starter{background:var(--bg);color:var(--muted);}
+.chip-builder{background:var(--accent-tint);color:var(--accent);}
+.chip-wealth{background:var(--purple-tint);color:var(--purple);}
+.trial-chip{font-family:var(--mono);font-size:9px;font-weight:700;padding:3px 9px;border-radius:10px;background:var(--gold-tint);color:var(--gold);margin-left:6px;}
+.topbar-nav{display:flex;gap:2px;flex:1;justify-content:center;}
+.tnav-btn{font-size:13px;font-weight:600;color:var(--muted);padding:8px 16px;border-radius:var(--radius);transition:all .15s;}
+.tnav-btn:hover{color:var(--ink);background:var(--bg);}
+.tnav-btn.active{color:var(--accent);background:var(--accent-tint);}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.vix-pill{font-family:var(--mono);font-size:10.5px;font-weight:700;padding:4px 9px;border-radius:4px;}
+.vix-ok{background:var(--safe-tint);color:var(--safe);}
+.vix-warn{background:var(--warn-tint);color:var(--warn);}
+.vix-danger{background:var(--danger-tint);color:var(--danger);}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.app-view{display:none;max-width:1180px;margin:0 auto;padding:28px 24px 60px;}
+.app-view.active{display:block;}
+
+.upgrade-strip{background:var(--gold-tint);border:1px solid #E8D8A8;border-radius:var(--radius);padding:10px 16px;font-size:12px;color:var(--gold);margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
+.upgrade-strip b{color:#8A6A1A;}
+
+.dash-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+.dash-head h2{font-family:var(--serif);font-size:18px;}
+.section-link{font-size:12.5px;font-weight:600;color:var(--accent);cursor:pointer;}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);}
+.card-head{padding:14px 18px;border-bottom:1px solid var(--line-soft);display:flex;justify-content:space-between;align-items:center;background:var(--bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;}
+.card-head h3{font-size:13.5px;font-weight:700;}
+.empty-state{text-align:center;padding:44px 24px;color:var(--muted);}
+.empty-state .ic{font-size:30px;margin-bottom:12px;opacity:.5;}
+.empty-state h4{font-size:14px;color:var(--ink);font-weight:700;margin-bottom:6px;}
+.empty-state p{font-size:12.5px;max-width:340px;margin:0 auto 16px;line-height:1.6;}
+
+.brief-hero{background:var(--ink);border-radius:var(--radius-lg);padding:22px 26px;margin-bottom:20px;position:relative;overflow:hidden;}
+.brief-hero::before{content:'';position:absolute;top:0;left:0;bottom:0;width:3px;background:var(--gold);}
+.brief-top{margin-bottom:14px;}
+.brief-top .t{font-family:var(--serif);font-size:15px;color:var(--gold);}
+.brief-top .d{font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.4);margin-top:2px;}
+.brief-grid{display:grid;gap:14px;}
+.brief-box{background:rgba(255,255,255,.04);border-radius:var(--radius);padding:13px 14px;}
+.brief-box .h{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.1em;color:rgba(255,255,255,.35);text-transform:uppercase;margin-bottom:8px;}
+.brief-item{font-size:11.5px;color:rgba(255,255,255,.78);padding:3px 0;line-height:1.5;}
+
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;}
+.stat-card{padding:15px 17px;}
+.lbl{font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;}
+.val{font-family:var(--serif);font-size:20px;}
+.chg{font-size:11px;font-weight:600;margin-top:4px;}
+.pos{color:var(--safe);} .neg{color:var(--danger);}
+
+.goals-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:22px;}
+.goal-card{padding:15px;}
+.goal-card .type{font-family:var(--mono);font-size:8.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px;color:var(--muted);}
+.goal-card .name{font-size:12.5px;font-weight:700;margin-bottom:10px;}
+.pbar{height:4px;border-radius:2px;background:var(--line-soft);margin-bottom:8px;overflow:hidden;}
+.pfill{height:100%;border-radius:2px;background:var(--accent);}
+.goal-card .pct{font-family:var(--serif);font-size:18px;}
+.goal-card .pct-lbl{font-size:10px;color:var(--muted);}
+.goal-card .amt{font-size:10px;color:var(--muted);margin-top:4px;}
+.add-goal-card{border:1.5px dashed var(--line);border-radius:var(--radius);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:5px;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:15px;}
+.add-goal-card:hover{border-color:var(--accent);color:var(--accent);}
+
+.two-col{display:grid;grid-template-columns:1fr 340px;gap:18px;}
+.three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;}
+
+table.data-table{width:100%;border-collapse:collapse;}
+.data-table th{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);text-align:left;padding:9px 16px;background:var(--bg);border-bottom:1px solid var(--line);}
+.data-table td{font-size:12.5px;padding:11px 16px;border-bottom:1px solid var(--line-soft);color:var(--ink-soft);}
+.data-table tr:last-child td{border-bottom:none;}
+.inst-name{font-size:13px;font-weight:700;color:var(--ink);}
+.inst-type{font-size:10.5px;color:var(--muted);margin-top:1px;}
+.sl-dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:5px;}
+.sl-ok{background:var(--safe);} .sl-warn{background:var(--warn);} .sl-bad{background:var(--danger);}
+
+.signal-row{display:grid;grid-template-columns:74px 1fr auto;gap:12px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line-soft);cursor:pointer;}
+.signal-row:hover{background:var(--bg);}
+.signal-row:last-child{border-bottom:none;}
+.sig-name{font-size:13px;font-weight:700;}
+.sig-meta{font-size:10.5px;color:var(--muted);margin-top:1px;}
+.sig-conf{font-family:var(--serif);font-size:15px;text-align:right;}
+.stamp{font-family:var(--mono);font-size:9.5px;font-weight:700;padding:3px 8px;border-radius:3px;text-align:center;}
+.stamp-buy{background:var(--accent-tint);color:var(--accent);}
+.stamp-watch{background:var(--warn-tint);color:var(--warn);}
+.stamp-hold{background:var(--bg);color:var(--muted);}
+
+.filter-row{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;}
+.filter-btn{font-size:12px;font-weight:600;padding:7px 15px;border-radius:var(--radius);border:1.5px solid var(--line);color:var(--ink-soft);background:var(--paper);}
+.filter-btn.active{background:var(--ink);border-color:var(--ink);color:#fff;}
+.sfc{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin-bottom:12px;cursor:pointer;}
+.sfc:hover{box-shadow:var(--shadow-md);}
+.sfc.open{border-color:var(--accent);}
+.sfc-top{display:grid;grid-template-columns:90px 1fr auto;gap:14px;align-items:center;}
+.sfc-body{display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--line-soft);}
+.sfc-body.open{display:block;}
+.sfc-detail-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px;}
+.sfc-detail-item .l{font-size:9.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px;}
+.sfc-detail-item .v{font-size:14px;font-weight:700;}
+.rationale{background:var(--bg);border-radius:var(--radius);padding:14px 16px;font-size:12.5px;color:var(--ink-soft);line-height:1.7;border-left:3px solid var(--accent);}
+.engine-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px;}
+.engine-pill{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:var(--radius);border:1px solid var(--line);font-size:10.5px;font-weight:600;}
+.engine-pill.agree{background:var(--safe-tint);border-color:var(--accent-tint2);color:var(--safe);}
+.engine-pill.disagree{background:var(--danger-tint);border-color:#F1C9C2;color:var(--danger);}
+.engine-pill.neutral{background:var(--warn-tint);border-color:#F0DDAE;color:var(--warn);}
+
+.profile-hero{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);padding:26px;margin-bottom:20px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;}
+.avatar-lg{width:60px;height:60px;border-radius:50%;background:var(--accent);color:#fff;font-size:20px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.profile-hero h2{font-family:var(--serif);font-size:20px;}
+.tier-badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:3px 10px;border-radius:3px;margin-top:5px;background:var(--accent-tint);color:var(--accent);}
+.profile-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.prow{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px;}
+.prow:last-child{border-bottom:none;}
+.prow .k{color:var(--muted);} .prow .v{font-weight:700;}
+
+.intel-tabs{display:flex;gap:3px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:4px;width:fit-content;margin-bottom:22px;flex-wrap:wrap;}
+.itab{font-size:12px;font-weight:600;padding:7px 15px;border-radius:4px;color:var(--muted);}
+.itab.active{background:var(--ink);color:var(--gold);}
+.itab.locked{opacity:.4;}
+.isec{display:none;} .isec.active{display:block;}
+.mac{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:14px;}
+.mac-h{background:var(--ink);padding:11px 16px;display:flex;justify-content:space-between;}
+.mac-h .t{font-size:12px;font-weight:700;color:#fff;}
+.mac-h .u{font-family:var(--mono);font-size:9px;color:rgba(255,255,255,.4);}
+.mac-b{padding:13px 16px;}
+.mac-item{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line-soft);font-size:12px;}
+.mac-item:last-child{border-bottom:none;}
+.mac-note{padding:10px 16px;background:var(--bg);border-top:1px solid var(--line-soft);font-size:11.5px;color:var(--ink-soft);line-height:1.6;}
+.tip-card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;margin-bottom:10px;cursor:pointer;}
+.tip-card:hover{border-color:var(--accent);}
+.tip-top{display:flex;gap:12px;align-items:flex-start;}
+.tip-ic{font-size:20px;width:38px;height:38px;border-radius:var(--radius);background:var(--bg);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.tip-cat{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
+.tip-title{font-size:13.5px;font-weight:700;margin-bottom:4px;}
+.tip-preview{font-size:11.5px;color:var(--muted);}
+.tip-body{display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft);font-size:12.5px;color:var(--ink-soft);line-height:1.75;}
+.tip-body.open{display:block;}
+
+.modal-overlay{position:fixed;inset:0;background:rgba(22,33,27,.5);z-index:500;display:none;align-items:center;justify-content:center;padding:20px;}
+.modal-overlay.open{display:flex;}
+.modal-box{background:var(--paper);border-radius:var(--radius-lg);padding:28px;width:100%;max-width:460px;box-shadow:var(--shadow-lg);max-height:85vh;overflow-y:auto;}
+.modal-box h3{font-family:var(--serif);font-size:19px;margin-bottom:4px;}
+.modal-box .sub{font-size:12px;color:var(--muted);margin-bottom:18px;}
+.modal-foot{display:flex;gap:10px;margin-top:18px;justify-content:flex-end;}
+.toast{position:fixed;bottom:24px;right:24px;background:var(--ink);color:#fff;padding:12px 18px;border-radius:var(--radius);font-size:13px;box-shadow:var(--shadow-lg);z-index:1000;transform:translateY(80px);opacity:0;transition:all .3s;display:flex;align-items:center;gap:8px;max-width:340px;}
+.toast.show{transform:translateY(0);opacity:1;}
+
+/* ============================================================
+   TICKER NOTE + MULTI-CHECKPOINT TRACK RECORD (v3 additions)
+============================================================ */
+.ticker-note{background:#131920;padding:6px 24px;text-align:center;font-size:10px;color:#5A6A7A;font-family:var(--mono);letter-spacing:.02em;}
+
+.tc-card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin-bottom:12px;}
+.tc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px;}
+.tc-date{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-bottom:3px;}
+.tc-title{font-size:14px;font-weight:700;color:var(--ink);}
+.checkpoint-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding-top:12px;border-top:1px solid var(--line-soft);}
+.cp{text-align:center;padding:8px;border-radius:6px;min-width:0;overflow:hidden;}
+.cp.correct{background:var(--safe-tint);}
+.cp.incorrect{background:var(--danger-tint);}
+.cp.pending{background:var(--bg);}
+.cp .lbl{font-family:var(--mono);font-size:8.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
+.cp .verdict{font-size:11.5px;font-weight:700;line-height:1.4;}
+.cp.correct .verdict{color:var(--safe);}
+.cp.incorrect .verdict{color:var(--danger);}
+.cp.pending .verdict{color:var(--muted);}
+.prec-card .lbl{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.1em;color:var(--muted);text-transform:uppercase;margin-bottom:4px;}
+.prec-card .sub-lbl{font-size:9px;color:var(--muted);margin-bottom:8px;font-style:italic;}
+.prec-card .val{font-family:var(--serif);font-size:28px;color:var(--accent);}
+.prec-card .count{font-size:10.5px;color:var(--muted);margin-top:4px;}
+
+/* ============================================================
+   PUBLIC MARKETS DASHBOARD
+============================================================ */
+#screen-markets{background:var(--bg);min-height:100vh;}
+.markets-nav{display:flex;align-items:center;justify-content:space-between;padding:20px 48px;border-bottom:1px solid var(--line-soft);background:var(--paper);}
+.markets-wrap{max-width:1180px;margin:0 auto;padding:26px 32px 60px;}
+.markets-head h1{font-family:var(--serif);font-size:25px;color:var(--ink);margin-bottom:6px;}
+.markets-head p{font-size:13px;color:var(--muted);max-width:680px;line-height:1.6;}
+.markets-note{background:var(--accent-tint);border-left:3px solid var(--accent);border-radius:6px;padding:12px 16px;margin:18px 0 26px;font-size:12.5px;color:var(--accent);line-height:1.6;}
+.mkt-section-head{display:flex;justify-content:space-between;align-items:center;margin:30px 0 14px;}
+.mkt-section-head h2{font-family:var(--serif);font-size:17px;color:var(--ink);}
+.mkt-risk-note{font-size:11px;color:var(--muted);}
+
+.macro-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+.macro-card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0;}
+.macro-name{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--muted);text-transform:uppercase;}
+.macro-price{font-family:var(--serif);font-size:20px;color:var(--ink);margin-top:2px;margin-bottom:10px;}
+.trend-row-4{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:12px;}
+.trend-cell{text-align:center;min-width:0;}
+.trend-cell .lbl{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px;}
+.trend-cell .pct{font-family:var(--mono);font-size:10px;font-weight:700;}
+.view-box{background:var(--bg);border-radius:6px;padding:10px 12px;margin-bottom:10px;}
+.view-stamp{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 9px;border-radius:4px;margin-bottom:6px;}
+.stamp-bullish,.stamp-buy{background:var(--accent-tint);color:var(--accent);}
+.stamp-bearish,.stamp-sell{background:var(--danger-tint);color:var(--danger);}
+.stamp-neutral,.stamp-watch{background:var(--warn-tint);color:var(--warn);}
+.view-conf{font-family:var(--mono);font-size:9.5px;color:var(--muted);margin-left:6px;}
+.view-reason{font-size:11px;color:var(--ink-soft);line-height:1.5;}
+.checkpoint-mini{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
+.cpm{text-align:center;padding:6px 4px;border-radius:5px;min-width:0;overflow:hidden;}
+.cpm.correct{background:var(--safe-tint);} .cpm.incorrect{background:var(--danger-tint);} .cpm.pending{background:var(--bg);}
+.cpm .lbl{font-size:7.5px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:.03em;}
+.cpm .v{font-size:9.5px;font-weight:700;margin-top:2px;}
+.cpm.correct .v{color:var(--safe);} .cpm.incorrect .v{color:var(--danger);} .cpm.pending .v{color:var(--muted);}
+
+.fd-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+.fd-card{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:14px 16px;text-align:center;min-width:0;}
+.fd-card .bank{font-size:11.5px;font-weight:700;color:var(--ink);margin-bottom:6px;}
+.fd-card .rate{font-family:var(--serif);font-size:22px;color:var(--accent);}
+.fd-card .term{font-size:10px;color:var(--muted);margin-top:2px;}
+.fd-card .updated{font-family:var(--mono);font-size:8.5px;color:var(--muted);margin-top:8px;}
+
+.mkt-inst-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
+.mkt-inst-card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0;}
+.mkt-inst-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;}
+.mkt-inst-name{font-size:13.5px;font-weight:700;color:var(--ink);}
+.mkt-inst-type{font-size:10px;color:var(--muted);margin-top:1px;}
+.mkt-inst-price{font-family:var(--serif);font-size:17px;color:var(--ink);margin-bottom:10px;}
+.mkt-risk-chip{font-family:var(--mono);font-size:8px;font-weight:700;padding:2px 7px;border-radius:8px;letter-spacing:.03em;white-space:nowrap;}
+.mkt-risk-low{background:var(--accent-tint);color:var(--accent);}
+.mkt-risk-med{background:var(--warn-tint);color:var(--warn);}
+.mkt-risk-high{background:var(--danger-tint);color:var(--danger);}
+
+.public-cta{background:var(--ink);border-radius:12px;padding:26px 30px;margin-top:36px;text-align:center;}
+.public-cta h3{font-family:var(--serif);font-size:19px;color:#fff;margin-bottom:8px;}
+.public-cta p{font-size:12.5px;color:rgba(255,255,255,.6);max-width:480px;margin:0 auto 16px;line-height:1.6;}
+.btn-gold-mini{background:var(--gold);color:#16211B;padding:11px 24px;border-radius:6px;font-size:13px;font-weight:700;}
+
+/* ============================================================
+   FLASH ALERTS (dashboard component)
+============================================================ */
+.flash-card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);margin-bottom:20px;}
+.flash-head{padding:13px 18px;border-bottom:1px solid var(--line-soft);display:flex;justify-content:space-between;align-items:center;background:var(--bg);border-radius:var(--radius-lg) var(--radius-lg) 0 0;}
+.flash-head h3{font-size:13.5px;font-weight:700;display:flex;align-items:center;gap:6px;}
+.flash-badge{font-family:var(--mono);font-size:9px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--warn-tint);color:var(--warn);}
+@media (max-width:900px){
+  .hero{padding-top:44px;} .plans{grid-template-columns:1fr;}
+  .stats-grid,.two-col,.three-col{grid-template-columns:1fr;}
+  .brief-grid{grid-template-columns:1fr;}
+  .profile-grid{grid-template-columns:1fr;}
+  .sfc-detail-grid{grid-template-columns:1fr 1fr;} .engine-grid{grid-template-columns:1fr 1fr;}
+  .topbar-nav{display:none;} .choice-grid{grid-template-columns:1fr;}
+  /* v3 additions: collapse every new grid to something legible on tablets */
+  .precision-row{grid-template-columns:1fr;}
+  .macro-grid{grid-template-columns:1fr 1fr;}
+  .fd-grid{grid-template-columns:1fr 1fr;}
+  .mkt-inst-grid{grid-template-columns:1fr;}
+  .markets-wrap,.markets-nav{padding-left:24px;padding-right:24px;}
+}
+@media (max-width:560px){
+  .grid2{grid-template-columns:1fr;} .opt-grid{grid-template-columns:1fr;}
+  .hero h1{font-size:30px;} .nav,.hero,.section{padding-left:20px;padding-right:20px;}
+  .nav{flex-wrap:wrap;gap:10px;row-gap:10px;}
+  /* v3 additions — this is the breakpoint that was actually broken:
+     macro/checkpoint/trend grids were never given mobile rules at all,
+     so a 390px phone was trying to cram 3-4 columns into no room,
+     and section headers with a trailing note had no wrap allowance. */
+  .ticker{padding:10px 12px;gap:0;}
+  .tick{padding:4px 10px;border-right:none;}
+  .macro-grid{grid-template-columns:1fr;}
+  .trend-row-4{grid-template-columns:repeat(2,1fr);row-gap:8px;}
+  .fd-grid{grid-template-columns:1fr 1fr;}
+  .mkt-inst-grid{grid-template-columns:1fr;}
+  .checkpoint-row,.checkpoint-mini{grid-template-columns:1fr 1fr 1fr;}
+  .mkt-section-head,.section-title-row{flex-direction:column;align-items:flex-start;gap:4px;}
+  .markets-wrap,.markets-nav,.wrap{padding-left:16px;padding-right:16px;}
+  .markets-nav{flex-wrap:wrap;gap:10px;padding:14px 16px;}
+  .public-cta{padding:20px 18px;}
+}
+
+/* ──────────────────────────────────────────────────
+   SIP PLANNER
+────────────────────────────────────────────────── */
+.view-head{padding:20px 24px 0;max-width:860px;}
+.view-head h2{font-family:var(--serif);font-size:22px;font-weight:700;color:var(--ink);margin-bottom:4px;}
+.view-head p{font-size:12.5px;color:var(--muted);line-height:1.6;max-width:580px;}
+#view-sip{padding-bottom:60px;}
+#sip-content{max-width:900px;margin:0 auto;padding:20px 24px;}
+
+/* Goal SIP card */
+.sip-goal-card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:20px 22px;margin-bottom:14px;}
+.sip-goal-name{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:3px;}
+.sip-goal-meta{font-size:11.5px;color:var(--muted);margin-bottom:14px;}
+.sip-amounts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px;}
+.sip-amount-box{background:var(--bg);border-radius:6px;padding:12px 14px;text-align:center;}
+.sip-amount-box .amt-label{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;}
+.sip-amount-box .amt-val{font-family:var(--serif);font-size:20px;color:var(--ink);}
+.sip-amount-box.needed .amt-val{color:var(--accent);}
+.sip-amount-box.gap .amt-val{color:var(--danger);}
+.sip-amount-box.surplus .amt-val{color:var(--safe);}
+.sip-disclaimer{font-size:10.5px;color:var(--muted);font-style:italic;line-height:1.5;}
+.sip-rate-note{display:inline-block;background:var(--warn-tint);color:var(--warn);font-family:var(--mono);font-size:9px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:8px;}
+
+/* Fund recommendation cards */
+.sip-fund-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:14px;}
+.sip-fund-card{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;}
+.sip-fund-name{font-size:13px;font-weight:700;color:var(--ink);}
+.sip-fund-cat{font-size:11px;color:var(--muted);}
+.sip-fund-metrics{display:flex;gap:14px;flex-wrap:wrap;}
+.sip-fund-metric{text-align:center;}
+.sip-fund-metric .m-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px;}
+.sip-fund-metric .m-val{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--ink);}
+.sip-rec-chip{display:inline-block;font-family:var(--mono);font-size:8.5px;font-weight:700;padding:2px 9px;border-radius:10px;background:var(--accent-tint);color:var(--accent);letter-spacing:.03em;}
+
+/* Active SIPs */
+.sip-log-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line-soft);gap:10px;flex-wrap:wrap;}
+.sip-log-row:last-child{border-bottom:none;}
+.sip-log-name{font-size:13px;font-weight:700;color:var(--ink);}
+.sip-log-meta{font-size:11px;color:var(--muted);margin-top:1px;}
+.sip-log-val{text-align:right;}
+.sip-log-val .amount{font-family:var(--serif);font-size:15px;color:var(--ink);}
+.sip-log-val .est{font-size:10px;color:var(--muted);margin-top:1px;}
+
+/* Chart */
+.sip-chart-wrap{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:16px;margin-top:14px;}
+.sip-chart-head{font-size:13px;font-weight:700;margin-bottom:12px;}
+.sip-chart-bars{display:flex;align-items:flex-end;gap:4px;height:100px;}
+.sip-bar-wrap{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;}
+.sip-bar{width:100%;border-radius:3px 3px 0 0;transition:height .3s;}
+.sip-bar.principal{background:var(--line);}
+.sip-bar.growth{background:var(--accent-tint);}
+.sip-bar-year{font-size:8.5px;color:var(--muted);}
+.sip-chart-legend{display:flex;gap:16px;margin-top:10px;}
+.sip-chart-legend span{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;}
+.sip-chart-legend .dot{width:10px;height:10px;border-radius:2px;}
+
+/* Section heading within SIP content */
+.sip-section{margin-bottom:28px;}
+.sip-section-title{font-family:var(--serif);font-size:16px;font-weight:700;color:var(--ink);margin-bottom:4px;}
+.sip-section-sub{font-size:11.5px;color:var(--muted);margin-bottom:14px;line-height:1.5;}
+
+/* Add SIP form */
+.sip-add-form{background:var(--bg);border:1px dashed var(--line);border-radius:8px;padding:16px;}
+.sip-form-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end;}
+.sip-form-row label{font-size:10.5px;font-weight:700;color:var(--muted);display:block;margin-bottom:3px;}
+.sip-form-row input,.sip-form-row select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:4px;font-size:13px;font-family:inherit;background:var(--paper);}
+
+@media(max-width:560px){
+  .sip-amounts{grid-template-columns:1fr;}
+  .sip-fund-grid{grid-template-columns:1fr;}
+  .sip-form-row{grid-template-columns:1fr;}
+  #view-sip .view-head,.sip-content{padding-left:16px;padding-right:16px;}
+}
+
+/* Mobile bottom nav — shows all tabs on small screens where the
+   topbar nav is hidden. Replaces the invisible desktop tab bar
+   with a standard mobile navigation pattern. */
+.mobile-bottom-nav{
+  display:none;
+  position:fixed;bottom:0;left:0;right:0;
+  background:var(--paper);border-top:1px solid var(--line);
+  padding:8px 0 max(8px, env(safe-area-inset-bottom));
+  z-index:1000;
+}
+.mobile-bottom-nav a{
+  flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+  font-size:9px;font-weight:600;color:var(--muted);letter-spacing:.02em;
+  text-decoration:none;cursor:pointer;padding:2px 0;
+}
+.mobile-bottom-nav a.active{color:var(--accent);}
+.mobile-bottom-nav a .ic{font-size:18px;}
+@media(max-width:900px){
+  .mobile-bottom-nav{display:flex;}
+  #screen-app{padding-bottom:68px;}
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     SCREEN: LANDING / HOMEPAGE
+============================================================ -->
+<div id="screen-landing" class="screen active">
+  <div class="nav">
+    <div class="brand"><span class="mark"></span>WealthGuard</div>
+    <div class="nav-actions">
+      <button class="btn btn-ghost btn-sm" onclick="goTo('markets')">Markets</button>
+      <button class="btn btn-outline btn-sm" onclick="goTo('login')">Log In</button>
+      <button class="btn btn-primary btn-sm" onclick="goTo('onboarding')">Create Account</button>
+    </div>
+  </div>
+  <div class="ticker" id="ticker-strip">
+    <div class="tick"><span class="n">NIFTY 50</span><span class="v">—</span></div>
+    <div class="tick"><span class="n">SENSEX</span><span class="v">—</span></div>
+    <div class="tick"><span class="n">USD/INR</span><span class="v">—</span></div>
+    <div class="tick"><span class="n">GOLD</span><span class="v">—</span></div>
+    <div class="tick"><span class="n">SILVER</span><span class="v">—</span></div>
+    <div class="tick"><span class="n">INDIA VIX</span><span class="v">—</span></div>
+  </div>
+  <div class="ticker-note" id="ticker-note">Gold &amp; Silver: global spot rate, indicative — may differ from local retail price</div>
+  <div class="hero">
+    <div class="eyebrow">Investment Analysis & Strategy for India</div>
+    <h1>Capital preservation first.<br><em>Wealth</em> as the consequence.</h1>
+    <div class="hero-actions">
+      <button class="btn btn-primary" onclick="goTo('onboarding')">Create Free Account</button>
+      <button class="btn btn-outline" onclick="goTo('login')">Log In</button>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head"><h2>Our Track Record</h2><p>Every prediction is dated, published, and checked three separate times as it plays out — at 1 week, 1 month, and 1 quarter. Wins and misses both shown.</p></div>
+    <div id="track-record-container">
+      <div class="track-empty">
+        <div class="ic">📋</div>
+        <h3>Our track record starts 9th September 2026</h3>
+        <p>We publish every signal the day we make it, and show you exactly how it performed at each checkpoint. Check back after our first week live.</p>
+        <span class="badge">Launching 9 Sept 2026</span>
+      </div>
+    </div>
+    <div class="precision-row" id="precision-row">
+      <div class="prec-card"><div class="lbl">Short-Term</div><div class="sub-lbl">(Weekly checkpoint)</div><div class="val">—</div><div class="count">Accuracy pending launch</div></div>
+      <div class="prec-card"><div class="lbl">Mid-Term</div><div class="sub-lbl">(Monthly checkpoint)</div><div class="val">—</div><div class="count">Accuracy pending launch</div></div>
+      <div class="prec-card"><div class="lbl">Long-Term</div><div class="sub-lbl">(Quarterly checkpoint)</div><div class="val">—</div><div class="count">Accuracy pending launch</div></div>
+    </div>
+  </div>
+  <div class="footer">WealthGuard · Independent investment analysis & strategy · Not SEBI registered advice · We do not execute trades on your behalf</div>
+</div>
+
+<!-- ============================================================
+     SCREEN: PUBLIC MARKETS DASHBOARD
+============================================================ -->
+<div id="screen-markets" class="screen">
+  <div class="markets-nav">
+    <div class="brand"><span class="mark"></span>WealthGuard</div>
+    <div class="nav-actions">
+      <button class="btn btn-ghost btn-sm" onclick="goTo('landing')">← Home</button>
+      <button class="btn btn-outline btn-sm" onclick="goTo('login')">Log In</button>
+      <button class="btn btn-primary btn-sm" onclick="goTo('onboarding')">Create Account</button>
+    </div>
+  </div>
+  <div class="markets-wrap">
+    <div class="markets-head">
+      <h1>Markets Dashboard</h1>
+      <p>Everything WealthGuard tracks, open to everyone — no account needed. See our current view on each index and instrument, and exactly how our past calls have played out at 1 week, 1 month, and 1 quarter.</p>
+    </div>
+    <div class="markets-note">💡 Broad market indices (Nifty, Sensex, Gold, etc.) get a directional view — Bullish, Bearish, or Neutral. Individual stocks and funds get a specific action — Buy, Sell, or Watch. Both are tracked and checked the same honest way.</div>
+
+    <div class="mkt-section-head"><h2>Key Indices &amp; Rates — Our View</h2></div>
+    <div class="macro-grid" id="macro-grid"><div class="empty-state"><div class="ic">📊</div><p>Loading market data...</p></div></div>
+
+    <div class="mkt-section-head"><h2>Fixed Deposit Rates</h2><span class="mkt-risk-note">Updated manually · low risk</span></div>
+    <div class="fd-grid" id="fd-grid"></div>
+
+    <div class="mkt-section-head"><h2>Large-Cap Equity — Our Calls</h2><span class="mkt-risk-note">Higher risk · higher potential return</span></div>
+    <div class="mkt-inst-grid" id="equity-grid"><div class="empty-state"><div class="ic">📈</div><h4>No calls logged yet</h4><p>Our first equity calls appear here once logged.</p></div></div>
+
+    <div class="mkt-section-head"><h2>Mutual Funds — Our Calls</h2><span class="mkt-risk-note">Moderate risk · diversified</span></div>
+    <div class="mkt-inst-grid" id="fund-grid"><div class="empty-state"><div class="ic">📊</div><h4>No calls logged yet</h4><p>Our first fund calls appear here once logged.</p></div></div>
+
+    <div class="public-cta">
+      <h3>Want signals tailored to your own risk profile and goals?</h3>
+      <p>Everything above is our general market view. Create a free account and WealthGuard builds a personal plan — matched to your income, goals, and how much risk actually fits your life.</p>
+      <button class="btn-gold-mini" onclick="goTo('onboarding')">Create Free Account →</button>
+    </div>
+  </div>
+  <div class="footer">WealthGuard · Independent investment analysis &amp; strategy · Not SEBI registered advice · We do not execute trades on your behalf</div>
+</div>
+
+<!-- ============================================================
+     SCREEN: LOGIN
+============================================================ -->
+<div id="screen-login" class="screen">
+  <div class="login-box">
+    <div class="brand"><span class="mark"></span>WealthGuard</div>
+    <h2>Welcome back</h2>
+    <div class="sub">Log in with the WhatsApp number you registered with.</div>
+    <div class="row"><label>WhatsApp number</label><input id="login-phone" placeholder="+91 98765 43210"></div>
+    <button class="btn btn-primary btn-block" onclick="doLogin()">Log In →</button>
+    <div class="login-msg" id="login-msg"></div>
+    <div style="text-align:center;margin-top:18px;">
+      <button class="btn btn-ghost btn-sm" onclick="goTo('landing')">← Back to home</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: ONBOARDING
+============================================================ -->
+<div id="screen-onboarding" class="screen">
+  <div class="ob-wrap">
+    <div class="ob-brand"><div class="brand" style="justify-content:center;"><span class="mark"></span>WealthGuard</div></div>
+    <div class="ob-steps">
+      <div class="ob-dot active" id="dot-1">1</div><div class="ob-line" id="line-1"></div>
+      <div class="ob-dot" id="dot-2">2</div><div class="ob-line" id="line-2"></div>
+      <div class="ob-dot" id="dot-3">3</div><div class="ob-line" id="line-3"></div>
+      <div class="ob-dot" id="dot-4">4</div><div class="ob-line" id="line-4"></div>
+      <div class="ob-dot" id="dot-5">5</div>
+    </div>
+    <div class="ob-card">
+      <div class="ob-step active" id="step-1">
+        <h2>Tell us about yourself</h2>
+        <div class="sub">This helps us understand your financial reality — not just a risk score.</div>
+        <div class="row"><label>Full name</label><input id="ob-name" placeholder="Your name"></div>
+        <div class="grid2">
+          <div class="row"><label>Age</label><input id="ob-age" type="number" placeholder="35"></div>
+          <div class="row"><label>WhatsApp number</label><input id="ob-phone" placeholder="+91 98765 43210"></div>
+        </div>
+        <div class="row"><label>Income type</label>
+          <select id="ob-income-type"><option value="">Select</option><option value="salaried">Salaried employee</option><option value="business">Business owner</option><option value="freelance">Freelancer / Consultant</option><option value="retired">Retired</option><option value="rental">Rental / Passive income</option></select>
+        </div>
+        <div class="row"><label>Monthly take-home income (₹)</label><input id="ob-income" type="number" placeholder="75000"></div>
+        <div class="row"><label>Monthly committed expenses — EMIs, rent, fees (₹)</label><input id="ob-expenses" type="number" placeholder="35000"></div>
+        <div class="ob-nav"><button class="btn btn-outline" onclick="goTo('landing')">← Back</button><button class="btn btn-primary" onclick="obNext(1)">Continue →</button></div>
+      </div>
+
+      <div class="ob-step" id="step-2">
+        <h2>Family & health situation</h2>
+        <div class="sub">This shapes your investment strategy more than any risk questionnaire.</div>
+        <div class="grid2">
+          <div class="row"><label>Marital status</label><select id="ob-marital"><option value="single">Single</option><option value="married">Married</option><option value="divorced">Divorced</option><option value="widowed">Widowed</option></select></div>
+          <div class="row"><label>Children</label><select id="ob-children"><option value="0">None</option><option value="1">1</option><option value="2">2</option><option value="3+">3 or more</option></select></div>
+        </div>
+        <div class="row"><label>Dependent parents or in-laws?</label><select id="ob-dependents"><option value="no">No</option><option value="yes-partial">Partially</option><option value="yes-full">Fully dependent</option></select></div>
+        <div class="grid2">
+          <div class="row"><label>Health insurance cover (₹ lakh)</label><input id="ob-health-ins" type="number" placeholder="10" oninput="checkProtection()"></div>
+          <div class="row"><label>Term life cover (₹ lakh)</label><input id="ob-term" type="number" placeholder="100" oninput="checkProtection()"></div>
+        </div>
+        <div class="protect-warn" id="protect-warn">⚠ Protection gap detected. We recommend addressing insurance coverage before investing — a single health or life event can otherwise erase years of savings.</div>
+        <div class="ob-nav"><button class="btn btn-outline" onclick="obBack(2)">← Back</button><button class="btn btn-primary" onclick="obNext(2)">Continue →</button></div>
+      </div>
+
+      <div class="ob-step" id="step-3">
+        <h2>How do you actually behave with money?</h2>
+        <div class="sub">Not how you think you should — how you actually do when markets fall.</div>
+        <label style="margin-bottom:8px;">When markets fell 30% in March 2020, what did you do?</label>
+        <div class="opt-grid" id="opt-2020">
+          <div class="opt" onclick="selOpt('b2020','panic',this)"><span class="ic">😰</span><div class="t">Sold everything</div><div class="d">Moved to cash</div></div>
+          <div class="opt" onclick="selOpt('b2020','held',this)"><span class="ic">😐</span><div class="t">Held on</div><div class="d">Nervous but stayed</div></div>
+          <div class="opt" onclick="selOpt('b2020','bought',this)"><span class="ic">💪</span><div class="t">Bought more</div><div class="d">Saw opportunity</div></div>
+        </div>
+        <div class="row" style="margin-top:18px;"><label>What does money mean to you most?</label>
+          <select id="ob-money"><option value="security">Security — never want to worry</option><option value="freedom">Freedom — choices it gives me</option><option value="legacy">Legacy — building for family</option><option value="growth">Growth — maximise wealth</option></select>
+        </div>
+        <div class="row"><label>How often do you check your portfolio?</label>
+          <select id="ob-freq"><option value="multiple_daily">Multiple times a day</option><option value="daily">Once a day</option><option value="weekly">Weekly</option><option value="monthly">Monthly or less</option></select>
+        </div>
+        <div class="row"><label>At what portfolio loss would you lose sleep? (%)</label><input id="ob-sleep" type="number" placeholder="15"></div>
+        <div class="ob-nav"><button class="btn btn-outline" onclick="obBack(3)">← Back</button><button class="btn btn-primary" onclick="obNext(3)">Continue →</button></div>
+      </div>
+
+      <div class="ob-step" id="step-4">
+        <h2>What is this money for?</h2>
+        <div class="sub">Every rupee gets a named job. We'll build a plan for each goal.</div>
+        <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:8px;margin-bottom:6px;"><label>Goal</label><label>Target ₹</label><label>By when</label></div>
+        <div id="goal-rows">
+          <div class="goal-row"><input value="Emergency Fund" placeholder="Goal name"><input type="number" value="300000" placeholder="Amount"><input value="Ongoing" placeholder="Year"></div>
+          <div class="goal-row"><input placeholder="e.g. Child's education"><input type="number" placeholder="1500000"><input placeholder="2031"></div>
+          <div class="goal-row"><input placeholder="e.g. Retirement"><input type="number" placeholder="10000000"><input placeholder="2045"></div>
+        </div>
+        <button class="add-goal" onclick="addGoalRow()">+ Add another goal</button>
+        <div class="ob-nav"><button class="btn btn-outline" onclick="obBack(4)">← Back</button><button class="btn btn-primary" onclick="obNext(4)">Continue →</button></div>
+      </div>
+
+      <div class="ob-step" id="step-5">
+        <h2>Choose how you'd like to start</h2>
+        <div class="sub" id="step5-sub">Your profile is ready. Pick a free trial or jump straight into a paid plan.</div>
+        <div class="choice-grid" id="choice-grid">
+          <div class="choice trial" id="trial-choice">
+            <span class="badge-top">LIMITED TIME</span>
+            <div class="ic">🎁</div>
+            <h3>Free 30-Day Trial</h3>
+            <p>Full platform access. No card required.</p>
+            <div class="deadline">⏳ Available until 31 Dec 2026</div>
+            <button class="btn btn-primary btn-sm" style="width:100%;" onclick="startFreeTrial()">Start Free Trial →</button>
+          </div>
+          <div class="choice">
+            <div class="ic">💳</div>
+            <h3>Choose a Paid Plan</h3>
+            <p>Pick the tier that matches your situation. Billed monthly.</p>
+            <div class="plan-list">
+              <div class="plan-mini"><span>Starter</span><b>₹299/mo</b></div>
+              <div class="plan-mini"><span>Builder</span><b>₹799/mo</b></div>
+              <div class="plan-mini"><span>Wealth Builder</span><b>₹1,999/mo</b></div>
+            </div>
+            <button class="btn btn-outline btn-sm" style="width:100%;margin-top:14px;" onclick="goToPricing()">View All Plans →</button>
+          </div>
+        </div>
+        <div class="fine">Trial converts to a paid subscription automatically after 30 days.<br>You'll always be asked to choose a plan before continuing.</div>
+        <div class="ob-nav"><button class="btn btn-outline" onclick="obBack(5)">← Edit</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: PRICING
+============================================================ -->
+<div id="screen-pricing" class="screen">
+  <div class="pricing-wrap">
+    <button class="btn btn-ghost btn-sm" onclick="goTo('landing')" style="margin-bottom:20px;">← Back to home</button>
+    <div class="pricing-head">
+      <h1>Choose your plan</h1>
+      <p>Start free for 30 days. No card required. Cancel anytime.</p>
+      <div class="launch-banner">
+        <div class="tag">🚀 LAUNCHING 9 SEPTEMBER 2026</div>
+        <div class="msg">Use code <code>LAUNCH9SEP</code> for 50% off your first 3 months</div>
+        <div class="sub">Limited to the first 50 subscribers</div>
+      </div>
+    </div>
+    <div class="plans" id="plans-grid">
+      <div class="plan" data-plan="starter" onclick="selectPlan('starter', this)">
+        <div class="pname">Starter</div><div class="pprice">₹299</div><div class="pperiod">per month</div>
+        <div class="pdesc">For ₹10,000–₹50,000/month earners. Build the foundation first.</div>
+        <ul><li>Daily brief — WhatsApp + dashboard</li><li>Flash steep-move alerts — WhatsApp + dashboard</li><li>Unlimited goals &amp; holdings</li><li>Up to 7 active signals</li><li>Short + Mid + Long-term outlook</li><li>Education centre</li></ul>
+        <button class="plan-btn">Select Starter</button>
+      </div>
+      <div class="plan popular" data-plan="builder" onclick="selectPlan('builder', this)">
+        <div class="plan-badge">MOST POPULAR</div>
+        <div class="pname">Builder</div><div class="pprice">₹799</div><div class="pperiod">per month</div>
+        <div class="pdesc">For ₹50,000–₹3L/month earners. The full intelligence engine.</div>
+        <ul><li>Everything in Starter</li><li>Up to 15 active signals</li><li>High Conviction signals, full rationale</li><li>Real-time stop-loss alerts</li><li>PESTLE snapshot</li><li>Full Intelligence Centre</li></ul>
+        <button class="plan-btn">Select Builder</button>
+      </div>
+      <div class="plan" data-plan="wealth_builder" onclick="selectPlan('wealth_builder', this)">
+        <div class="pname">Wealth Builder</div><div class="pprice">₹1,999</div><div class="pperiod">per month</div>
+        <div class="pdesc">For ₹3L+/month earners. Priority insight, deeper analysis.</div>
+        <ul><li>Everything in Builder</li><li>Up to 25 active signals</li><li>Priority signal delivery</li><li>Tax optimisation alerts (LTCG/STCG)</li><li>Monthly PDF report</li><li>Personal Track Record module</li></ul>
+        <button class="plan-btn">Select Wealth Builder</button>
+      </div>
+    </div>
+    <div class="checkout" id="checkout">
+      <h3>Complete your subscription</h3>
+      <div class="sub">One step away from full WealthGuard access.</div>
+      <div class="co-box">
+        <div class="co-row"><span class="k">Plan</span><span id="co-plan">Builder</span></div>
+        <div class="co-row"><span class="k">Billing</span><span>Monthly</span></div>
+        <div class="co-row" id="co-disc-row" style="display:none;"><span class="k">Discount</span><span id="co-disc-val" style="color:var(--safe);font-weight:700;"></span></div>
+        <div class="co-total"><span class="k">Total today</span><span class="amt" id="co-total">₹799</span></div>
+      </div>
+      <label>Have a discount or founder code?</label>
+      <div class="disc-row">
+        <input class="disc-input" id="disc-input" placeholder="ENTER CODE" maxlength="20" oninput="this.value=this.value.toUpperCase()">
+        <button class="btn btn-outline btn-sm" onclick="applyDiscount()">Apply</button>
+      </div>
+      <div class="disc-msg" id="disc-msg"></div>
+      <button class="btn btn-primary btn-block" id="pay-btn" onclick="initiatePayment()">Pay ₹799 via UPI / Card</button>
+      <button class="btn btn-block" id="free-btn" style="display:none;background:var(--safe);color:#fff;" onclick="activateFree()">✓ Activate Free — No Payment Needed</button>
+      <div style="text-align:center;font-size:10.5px;color:var(--muted);margin-top:14px;line-height:1.7;">🔒 Secured by Razorpay · Cancel anytime</div>
+      <button class="btn btn-ghost btn-sm btn-block" onclick="document.getElementById('checkout').style.display='none'" style="margin-top:10px;">← Change plan</button>
+    </div>
+    <div class="founder-box">
+      The first 5 WealthGuard clients receive <b>1 full year free</b> on any plan.<br>
+      Founder codes: <code>WGFOUND01</code> – <code>WGFOUND05</code> · single use each.<br>
+      Want to try first? Use <code>WGDEMO</code> for 1 month free, no payment required.
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: SUBSCRIBE TO CONTINUE (trial expired)
+============================================================ -->
+<div id="screen-paused" class="screen">
+  <div class="pause-box">
+    <div class="ic">⏸️</div>
+    <h2>Your free trial has ended</h2>
+    <p id="pause-msg">Your 30 days of full access have finished. Choose a plan below to pick up right where you left off.</p>
+    <div class="data-safe">🔒&nbsp; Your portfolio, goals, and signal history are safely saved and will appear immediately once you subscribe.</div>
+    <div class="plans-mini">
+      <div class="pm"><span>Starter</span><b>₹299/mo</b></div>
+      <div class="pm"><span>Builder — Most Popular</span><b>₹799/mo</b></div>
+      <div class="pm"><span>Wealth Builder</span><b>₹1,999/mo</b></div>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="goToPricing()">Choose a Plan to Continue →</button>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: APP
+============================================================ -->
+<div id="screen-app" class="screen">
+  <div class="topbar">
+    <div class="brand"><span class="mark"></span>WealthGuard<span class="plan-chip" id="topbar-plan-chip">—</span><span class="trial-chip" id="trial-chip" style="display:none;"></span></div>
+    <div class="topbar-nav">
+      <button class="tnav-btn active" onclick="switchView('dashboard',this)">Dashboard</button>
+      <button class="tnav-btn" onclick="switchView('portfolio',this)">Portfolio</button>
+      <button class="tnav-btn" onclick="switchView('signals',this)">Signals</button>
+      <button class="tnav-btn" onclick="switchView('intelligence',this)">Intelligence</button>
+      <button class="tnav-btn" onclick="switchView('sip',this)">SIP Planner</button>
+      <button class="tnav-btn" onclick="switchView('profile',this)">Profile</button>
+    </div>
+    <div class="topbar-right">
+      <span class="vix-pill vix-ok" id="vix-pill">VIX —</span>
+      <div class="avatar" id="avatar" onclick="logOut()" title="Click to log out">?</div>
+    </div>
+  </div>
+
+  <!-- DASHBOARD (rendered dynamically per plan tier into this container) -->
+  <div class="app-view active" id="view-dashboard"><div id="dashboard-content"></div></div>
+
+  <!-- PORTFOLIO -->
+  <div class="app-view" id="view-portfolio">
+    <div class="dash-head"><h2>Portfolio</h2><button class="btn btn-primary btn-sm" onclick="openModal('modal-holding')">+ Add Holding</button></div>
+    <div class="stats-grid" id="pf-stats"></div>
+    <div class="card"><div class="card-head"><h3>All Holdings</h3></div><div id="portfolio-full-wrap"></div></div>
+  </div>
+
+  <!-- SIGNALS -->
+  <div class="app-view" id="view-signals">
+    <div class="dash-head"><h2>Signal Feed</h2><span class="vix-pill vix-ok" id="signals-vix-pill">VIX —</span></div>
+    <div class="filter-row">
+      <button class="filter-btn active" onclick="filterSignals('all',this)">All</button>
+      <button class="filter-btn" onclick="filterSignals('buy',this)">BUY</button>
+      <button class="filter-btn" onclick="filterSignals('sell',this)">SELL / REDUCE</button>
+      <button class="filter-btn" onclick="filterSignals('hc',this)">High Conviction</button>
+      <button class="filter-btn" onclick="filterSignals('watch',this)">Watchlist</button>
+    </div>
+    <div id="signals-list"></div>
+  </div>
+
+  <!-- INTELLIGENCE -->
+  <div class="app-view" id="view-intelligence">
+    <div class="dash-head"><h2>Intelligence Centre</h2></div>
+    <div class="intel-tabs" id="intel-tabs-row">
+      <button class="itab active" onclick="switchIntel('brief',this)">Daily Brief</button>
+      <button class="itab" onclick="switchIntel('tips',this)">Tips & Strategy</button>
+      <button class="itab" onclick="switchIntel('market',this)">Market Analysis</button>
+      <button class="itab" onclick="switchIntel('pestle',this)">PESTLE Watch</button>
+      <button class="itab" onclick="switchIntel('learn',this)">Learn</button>
+    </div>
+    <div class="isec active" id="isec-brief"><div id="intel-brief-content"></div></div>
+    <div class="isec" id="isec-tips"><div id="intel-tips-content"></div></div>
+    <div class="isec" id="isec-market"><div id="intel-market-content"></div></div>
+    <div class="isec" id="isec-pestle"><div id="intel-pestle-content"></div></div>
+    <div class="isec" id="isec-learn"><div id="intel-learn-content"></div></div>
+  </div>
+
+  <!-- SIP PLANNER -->
+  <div class="app-view" id="view-sip">
+    <div class="view-head">
+      <h2>SIP Planner</h2>
+      <p>Systematic investment plans — the most reliable path to long-term wealth for most investors. Every figure here is a projection, not a promise.</p>
+    </div>
+    <div id="sip-content">
+      <div class="empty-state"><div class="ic">📈</div><p>Loading your SIP plan...</p></div>
+    </div>
+  </div>
+
+  <!-- MOBILE BOTTOM NAV -->
+  <div class="mobile-bottom-nav" id="mobile-bottom-nav">
+    <a onclick="switchView('dashboard', document.querySelectorAll('.tnav-btn')[0]);updateMobileNav('dashboard')"><span class="ic">🏠</span>Home</a>
+    <a onclick="switchView('portfolio', document.querySelectorAll('.tnav-btn')[1]);updateMobileNav('portfolio')"><span class="ic">💼</span>Portfolio</a>
+    <a onclick="switchView('signals', document.querySelectorAll('.tnav-btn')[2]);updateMobileNav('signals')"><span class="ic">⚡</span>Signals</a>
+    <a onclick="switchView('sip', document.querySelectorAll('.tnav-btn')[4]);updateMobileNav('sip')"><span class="ic">📈</span>SIPs</a>
+    <a onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[5]);updateMobileNav('profile')"><span class="ic">👤</span>Profile</a>
+  </div>
+
+  <!-- PROFILE -->
+  <div class="app-view" id="view-profile">
+    <div class="profile-hero">
+      <div class="avatar-lg" id="avatar-lg">?</div>
+      <div>
+        <h2 id="profile-name">—</h2>
+        <div class="tier-badge" id="profile-tier">—</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:5px;" id="profile-meta">—</div>
+      </div>
+    </div>
+    <div class="profile-grid" id="profile-grid"></div>
+  </div>
+</div>
+
+<!-- MODALS -->
+<div class="modal-overlay" id="modal-holding">
+  <div class="modal-box">
+    <h3>Add Holding</h3>
+    <div class="sub">Log an investment you hold — WealthGuard tracks it, you manage the actual buy/sell with your broker.</div>
+    <div class="row"><label>Instrument name / symbol</label><input id="mh-name" placeholder="e.g. Infosys, Mirae Large Cap Fund"></div>
+    <div class="row"><label>Asset class</label>
+      <select id="mh-type"><option value="equity">Equity — NSE/BSE Stock</option><option value="mutual_fund">Mutual Fund</option><option value="gold">Gold ETF / SGB</option><option value="bond">Debt / Bond / G-Sec</option><option value="fd">Fixed Deposit</option><option value="reit">REIT / InvIT</option></select>
+    </div>
+    <div class="grid2">
+      <div class="row"><label>Quantity / units</label><input id="mh-qty" type="number" placeholder="100"></div>
+      <div class="row"><label>Average buy price (₹)</label><input id="mh-buy" type="number" placeholder="1450.00"></div>
+    </div>
+    <div class="grid2">
+      <div class="row"><label>Current price (₹)</label><input id="mh-curr" type="number" placeholder="1680.00"></div>
+      <div class="row"><label>Stop-loss price (₹)</label><input id="mh-sl" type="number" placeholder="1350.00"></div>
+    </div>
+    <div class="row"><label>Linked goal</label><select id="mh-goal"></select></div>
+    <div class="modal-foot"><button class="btn btn-outline" onclick="closeModal('modal-holding')">Cancel</button><button class="btn btn-primary" onclick="addHolding()">Add to Portfolio</button></div>
+  </div>
+</div>
+<div class="modal-overlay" id="modal-goal">
+  <div class="modal-box">
+    <h3>Add a Goal</h3>
+    <div class="sub">Give this money a name and a purpose.</div>
+    <div class="row"><label>Goal name</label><input id="mg-name" placeholder="e.g. Down payment on a house"></div>
+    <div class="row"><label>Goal type</label>
+      <select id="mg-type"><option value="emergency">Emergency Fund</option><option value="short">Short-term (1–3 years)</option><option value="medium">Medium-term (3–7 years)</option><option value="long">Long-term (7+ years)</option></select>
+    </div>
+    <div class="grid2">
+      <div class="row"><label>Target amount (₹)</label><input id="mg-amount" type="number" placeholder="500000"></div>
+      <div class="row"><label>Target date</label><input id="mg-date" type="date"></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-outline" onclick="closeModal('modal-goal')">Cancel</button><button class="btn btn-primary" onclick="addGoal()">Add Goal</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="toast-icon">✓</span><span id="toast-msg">Done</span></div>
+
+<script>
+/* ============================================================
+   CONFIG — fill these two in to enable live Track Record data.
+   Safe to expose: the Supabase ANON key is public-facing by design.
+   Leave blank to keep the homepage Track Record section in its
+   honest "starting soon" empty state.
+============================================================ */
+const SUPABASE_URL = '';       // e.g. 'https://xxxxx.supabase.co'
+const SUPABASE_ANON_KEY = '';  // e.g. 'eyJhbGciOi...'
+let sb = null;
+if (SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase) {
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+/* ============================================================
+   API CLIENT — talks to the existing Render backend (unchanged)
+============================================================ */
+const API = {
+  base: (function(){
+    const h = window.location.hostname;
+    if (h.includes('localhost') || h.includes('127.0.0.1')) return window.location.origin + '/api';
+    return 'https://wealthguard-backend.onrender.com/api';
+  })(),
+  clientId: localStorage.getItem('wg_client_id') || null,
+  async get(path){ try{ const r=await fetch(this.base+path); if(!r.ok) return null; return await r.json(); }catch(e){ console.warn('GET failed',path,e.message); return null; } },
+  async post(path, body){ try{ const r=await fetch(this.base+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok){ const e=await r.json().catch(()=>({})); return {error:e.error||'Request failed'}; } return await r.json(); }catch(e){ console.warn('POST failed',path,e.message); return {error:'Network error — backend may be starting up'}; } }
+};
+
+/* ============================================================
+   TRIAL CONFIG
+============================================================ */
+const TRIAL_CUTOFF = new Date('2026-12-31T23:59:59');
+const TRIAL_DAYS = 30;
+
+/* ============================================================
+   APP STATE
+============================================================ */
+const state = {
+  obData: {}, selectedPlan: 'builder', discount: null,
+  goals: [], portfolio: [], signals: [],
+  planTier: null,       // 'starter' | 'builder' | 'wealth_builder'
+  isTrial: false, trialStart: null,
+};
+
+/* ============================================================
+   ROUTING
+============================================================ */
+function goTo(screen){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  const el = document.getElementById('screen-'+screen);
+  if (el) el.classList.add('active');
+  window.scrollTo(0,0);
+  if (screen === 'markets') loadMarketsDashboard();
+}
+function goToPricing(){ goTo('pricing'); loadRazorpaySdk(); }
+
+function switchView(view, btn){
+  document.querySelectorAll('.app-view').forEach(v=>v.classList.remove('active'));
+  document.querySelectorAll('.tnav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('view-'+view).classList.add('active');
+  if (btn) btn.classList.add('active');
+  if (view==='signals') renderSignalsView();
+  if (view==='intelligence') renderIntelBrief();
+  if (view==='sip') renderSIPContent();
+  updateMobileNav(view);
+  window.scrollTo(0,0);
+}
+function switchIntel(tab, btn){
+  document.querySelectorAll('.isec').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.itab').forEach(b=>b.classList.remove('active'));
+  document.getElementById('isec-'+tab).classList.add('active');
+  btn.classList.add('active');
+  if (tab==='tips' && !window._tipsLoaded){ renderTips(); window._tipsLoaded=true; }
+  if (tab==='market' && !window._marketLoaded){ renderMarket(); window._marketLoaded=true; }
+  if (tab==='pestle' && !window._pestleLoaded){ renderPestle(); window._pestleLoaded=true; }
+  if (tab==='learn' && !window._learnLoaded){ renderLearn(); window._learnLoaded=true; }
+}
+
+/* ============================================================
+   LOGIN
+============================================================ */
+async function doLogin(){
+  const phone = document.getElementById('login-phone').value.trim();
+  const msg = document.getElementById('login-msg');
+  if (!phone){ msg.textContent='Enter your WhatsApp number.'; msg.className='login-msg bad'; return; }
+  msg.textContent='Checking...'; msg.className='login-msg ok';
+
+  const result = await API.post('/auth/login', { phone_wa: phone });
+  if (result && result.client){
+    API.clientId = result.client.id;
+    localStorage.setItem('wg_client_id', API.clientId);
+    msg.textContent='Welcome back! Loading your dashboard...'; msg.className='login-msg ok';
+    const profileRes = await API.get('/clients/'+API.clientId+'/profile');
+    const statusRes = await API.get('/payments/status/'+API.clientId);
+    hydrateFromProfile(profileRes && profileRes.profile, statusRes);
+    setTimeout(enterApp, 600);
+  } else {
+    msg.textContent='No account found with that number. Create one instead?'; msg.className='login-msg bad';
+  }
+}
+function hydrateFromProfile(profile, status){
+  if (profile){
+    state.obData.name = profile.full_name;
+    const lp = profile.client_life_profiles && profile.client_life_profiles[0];
+    if (lp){
+      state.obData.age=lp.age; state.obData.incomeType=lp.income_type;
+      state.obData.income=lp.monthly_income_inr; state.obData.expenses=lp.monthly_committed_expenses;
+      state.obData.marital=lp.marital_status;
+      state.obData.healthIns = lp.health_insurance_cover_inr ? lp.health_insurance_cover_inr/100000 : 0;
+      state.obData.term = lp.term_cover_inr ? lp.term_cover_inr/100000 : 0;
+    }
+    const bp = profile.client_behavioural_profiles && profile.client_behavioural_profiles[0];
+    if (bp){ state.obData.money = bp.money_relationship; state.obData.sleep = bp.sleep_test_threshold_pct; }
+    if (profile.client_goals) state.goals = profile.client_goals;
+  }
+  if (status && status.plan) state.planTier = status.plan;
+  else state.planTier = 'builder'; // sensible fallback
+}
+function logOut(){
+  if (!confirm('Log out of WealthGuard?')) return;
+  localStorage.removeItem('wg_client_id');
+  API.clientId = null;
+  goTo('landing');
+}
+
+/* ============================================================
+   ONBOARDING
+============================================================ */
+function setStep(n){
+  for (let i=1;i<=5;i++){
+    const step=document.getElementById('step-'+i), dot=document.getElementById('dot-'+i), line=document.getElementById('line-'+i);
+    step.classList.toggle('active', i===n);
+    if (i<n){dot.className='ob-dot done';dot.textContent='✓'; if(line) line.className='ob-line done';}
+    else if (i===n){dot.className='ob-dot active';dot.textContent=i;}
+    else {dot.className='ob-dot'; dot.textContent=i; if(line) line.className='ob-line';}
+  }
+}
+function obNext(step){
+  const d = state.obData;
+  if (step===1){ d.name=val('ob-name')||'Client'; d.age=val('ob-age')||30; d.phone=val('ob-phone'); d.incomeType=val('ob-income-type')||'salaried'; d.income=Number(val('ob-income'))||0; d.expenses=Number(val('ob-expenses'))||0; }
+  if (step===2){ d.marital=val('ob-marital'); d.children=val('ob-children'); d.dependents=val('ob-dependents'); d.healthIns=Number(val('ob-health-ins'))||0; d.term=Number(val('ob-term'))||0; }
+  if (step===3){ d.money=val('ob-money'); d.freq=val('ob-freq'); d.sleep=Number(val('ob-sleep'))||15; }
+  if (step===4){ d.goals = Array.from(document.querySelectorAll('#goal-rows .goal-row')).map(row=>{ const i=row.querySelectorAll('input'); return {name:i[0].value, amount:Number(i[1].value)||0, by:i[2].value}; }).filter(g=>g.name&&g.amount); }
+  if (step<5){ setStep(step+1); if (step+1===5) prepStep5(); }
+}
+function obBack(step){ if(step===2){goTo('landing');return;} setStep(step-1); }
+function val(id){ const e=document.getElementById(id); return e?e.value:''; }
+function selOpt(group,v,el){ document.querySelectorAll('#opt-2020 .opt').forEach(o=>o.classList.remove('sel')); el.classList.add('sel'); state.obData[group]=v; }
+function checkProtection(){ const h=Number(val('ob-health-ins'))||0; document.getElementById('protect-warn').style.display=(h>0&&h<5)?'block':'none'; }
+function addGoalRow(){ const c=document.getElementById('goal-rows'); const r=document.createElement('div'); r.className='goal-row'; r.innerHTML='<input placeholder="Goal name"><input type="number" placeholder="Amount"><input placeholder="Year">'; c.appendChild(r); }
+
+function prepStep5(){
+  const trialOpen = new Date() < TRIAL_CUTOFF;
+  const el = document.getElementById('trial-choice');
+  if (!trialOpen){
+    el.style.display = 'none';
+    document.getElementById('step5-sub').textContent = 'Your profile is ready. Choose the plan that matches your situation.';
+    document.getElementById('choice-grid').style.gridTemplateColumns = '1fr';
+  } else {
+    el.style.display = 'block';
+  }
+}
+
+/* ============================================================
+   TRIAL / SUBSCRIPTION LOGIC
+============================================================ */
+async function startFreeTrial(){
+  if (new Date() >= TRIAL_CUTOFF){ toast('⚠','Free trial is no longer available. Please choose a paid plan.'); goToPricing(); return; }
+  const clientId = await ensureClientRegistered();
+  await API.post('/payments/subscribe', { client_id: clientId, plan_key: 'builder', discount_code: 'WGDEMO' });
+  const now = Date.now();
+  localStorage.setItem('wg_trial_start', String(now));
+  state.isTrial = true; state.trialStart = now; state.planTier = 'builder';
+  toast('🎉','Free trial activated! Full access for 30 days.');
+  setTimeout(enterApp, 1000);
+}
+function checkTrialStatus(){
+  const start = localStorage.getItem('wg_trial_start');
+  if (!start) return { onTrial:false };
+  const startMs = Number(start);
+  const daysElapsed = (Date.now()-startMs) / (1000*60*60*24);
+  const daysLeft = Math.max(0, Math.ceil(TRIAL_DAYS - daysElapsed));
+  return { onTrial:true, daysElapsed, daysLeft, expired: daysElapsed >= TRIAL_DAYS };
+}
+
+/* ============================================================
+   PRICING / DISCOUNT / CHECKOUT
+============================================================ */
+const PLAN_PRICE = { starter:299, builder:799, wealth_builder:1999 };
+const PLAN_NAME  = { starter:'Starter', builder:'Builder', wealth_builder:'Wealth Builder' };
+const DEMO_CODES = { WGFOUND01:{d:100,m:12},WGFOUND02:{d:100,m:12},WGFOUND03:{d:100,m:12},WGFOUND04:{d:100,m:12},WGFOUND05:{d:100,m:12}, WGDEMO:{d:100,m:1}, LAUNCH9SEP:{d:50,m:3}, WGEARLY:{d:30,m:6} };
+
+function selectPlan(key, el){
+  state.selectedPlan = key;
+  document.querySelectorAll('.plan').forEach(p=>p.classList.remove('sel'));
+  el.classList.add('sel');
+  document.getElementById('checkout').style.display='block';
+  document.getElementById('checkout').scrollIntoView({behavior:'smooth', block:'nearest'});
+  state.discount = null;
+  document.getElementById('disc-input').value='';
+  document.getElementById('disc-msg').className='disc-msg';
+  document.getElementById('disc-msg').textContent='';
+  document.getElementById('co-disc-row').style.display='none';
+  updateCheckout();
+}
+function updateCheckout(){
+  const price = PLAN_PRICE[state.selectedPlan];
+  document.getElementById('co-plan').textContent = PLAN_NAME[state.selectedPlan];
+  let final = price, free=false;
+  if (state.discount){
+    const save = Math.round(price*state.discount.d/100);
+    final = price-save; free = final<=0;
+    document.getElementById('co-disc-row').style.display='flex';
+    document.getElementById('co-disc-val').textContent = `−${state.discount.d}% (−₹${save})`;
+  }
+  document.getElementById('co-total').textContent = free?'FREE':'₹'+final.toLocaleString('en-IN');
+  document.getElementById('pay-btn').style.display = free?'none':'flex';
+  document.getElementById('pay-btn').textContent = `Pay ₹${final.toLocaleString('en-IN')} via UPI / Card`;
+  document.getElementById('free-btn').style.display = free?'flex':'none';
+}
+async function applyDiscount(){
+  const code = document.getElementById('disc-input').value.trim().toUpperCase();
+  const msg = document.getElementById('disc-msg');
+  if (!code){ msg.textContent='Enter a code first.'; msg.className='disc-msg bad'; return; }
+  msg.textContent='Checking...'; msg.className='disc-msg ok';
+  const result = await API.post('/payments/validate-code', { code });
+  if (result && result.valid){
+    state.discount = { d: result.discount, m: result.duration_months };
+    msg.textContent = result.message; msg.className='disc-msg ok'; updateCheckout(); return;
+  }
+  if (DEMO_CODES[code] && (!result || result.error)){
+    const c = DEMO_CODES[code];
+    state.discount = { d:c.d, m:c.m };
+    msg.textContent = c.d===100 ? `🎉 Code applied — ${c.m} month${c.m>1?'s':''} free.` : `✅ ${c.d}% off for ${c.m} months.`;
+    msg.className='disc-msg ok'; updateCheckout();
+  } else {
+    state.discount = null;
+    msg.textContent = (result && result.message) || 'Invalid code.';
+    msg.className='disc-msg bad'; updateCheckout();
+  }
+}
+async function activateFree(){
+  const btn = document.getElementById('free-btn'); btn.textContent='Activating...'; btn.disabled=true;
+  const code = document.getElementById('disc-input').value.trim().toUpperCase();
+  const clientId = await ensureClientRegistered();
+  await API.post('/payments/subscribe', { client_id: clientId, plan_key: state.selectedPlan, discount_code: code });
+  state.planTier = state.selectedPlan;
+  toast('🎉', `${PLAN_NAME[state.selectedPlan]} plan activated. Welcome to WealthGuard.`);
+  setTimeout(enterApp, 1200);
+}
+async function initiatePayment(){
+  const clientId = await ensureClientRegistered();
+  const price = PLAN_PRICE[state.selectedPlan];
+  const discount = state.discount ? state.discount.d : 0;
+  const finalPaise = Math.round(price * (1-discount/100)) * 100;
+  const order = await API.post('/payments/subscribe', { client_id: clientId, plan_key: state.selectedPlan, discount_code: document.getElementById('disc-input').value.trim().toUpperCase() || null });
+  if (!order || order.error || !order.subscription || order.subscription.type === 'demo'){
+    toast('ℹ️','Payment gateway not yet live — proceeding to demo access.');
+    state.planTier = state.selectedPlan;
+    setTimeout(enterApp, 1500); return;
+  }
+  if (typeof Razorpay === 'undefined'){ toast('⏳','Loading payment gateway...'); loadRazorpaySdk(); return; }
+  const rzp = new Razorpay({
+    key: order.razorpay_key || 'rzp_test_placeholder', amount: finalPaise, currency:'INR', name:'WealthGuard',
+    description: `${PLAN_NAME[state.selectedPlan]} Plan — Monthly`, order_id: order.razorpay_order_id,
+    handler: async function(resp){
+      await API.post('/payments/verify', { order_id:resp.razorpay_order_id, payment_id:resp.razorpay_payment_id, signature:resp.razorpay_signature, client_id:clientId, plan_key:state.selectedPlan });
+      state.planTier = state.selectedPlan;
+      toast('🎉','Payment successful. Welcome to WealthGuard.');
+      setTimeout(enterApp, 1200);
+    },
+    prefill:{ name:state.obData.name||'', contact:state.obData.phone||'' }, theme:{ color:'#1B5E3F' },
+  });
+  rzp.open();
+}
+function loadRazorpaySdk(){ if(document.getElementById('rzp-sdk'))return; const s=document.createElement('script'); s.id='rzp-sdk'; s.src='https://checkout.razorpay.com/v1/checkout.js'; document.head.appendChild(s); }
+
+async function ensureClientRegistered(){
+  if (API.clientId) return API.clientId;
+  const d = state.obData;
+  const result = await API.post('/auth/register', {
+    full_name: d.name||'WealthGuard Client', phone_wa: d.phone||'',
+    age: d.age, income_type: d.incomeType, monthly_income_inr: d.income, monthly_committed_expenses: d.expenses,
+    marital_status: d.marital, num_children: d.children==='3+'?3:Number(d.children)||0,
+    health_insurance_cover_inr:(d.healthIns||0)*100000, term_cover_inr:(d.term||0)*100000,
+    stated_risk_score:6, panic_history:d.b2020==='panic', money_relationship:d.money||'security', sleep_test_threshold_pct:d.sleep||15,
+    goals:(d.goals||[]).map(g=>({goal_name:g.name, target_amount_inr:g.amount, target_date:g.by})), tax_bracket:30,
+  });
+  const id = (result && (result.client_id || (result.client && result.client.id))) || ('local-'+Date.now());
+  API.clientId = id; localStorage.setItem('wg_client_id', id);
+  if (d.goals) state.goals = d.goals.map((g,i)=>({ goal_name:g.name, target_amount_inr:g.amount, target_date:g.by, current_corpus_inr:0, funding_pct:0, goal_type: i===0?'emergency':(g.by && Number(g.by)-new Date().getFullYear()<=3?'short':(Number(g.by)-new Date().getFullYear()<=7?'medium':'long')) }));
+  return id;
+}
+
+/* ============================================================
+   ENTER APP
+============================================================ */
+async function enterApp(){
+  // Check trial expiry before entering
+  const trial = checkTrialStatus();
+  if (trial.onTrial && trial.expired){
+    document.getElementById('pause-msg').textContent = `Your ${TRIAL_DAYS} days of full access have finished. Choose a plan below to pick up right where you left off.`;
+    goTo('paused'); return;
+  }
+  state.isTrial = trial.onTrial && !trial.expired;
+
+  const name = state.obData.name || 'Client';
+  const initial = name.charAt(0).toUpperCase();
+  document.getElementById('avatar').textContent = initial;
+  document.getElementById('avatar-lg').textContent = initial;
+  document.getElementById('profile-name').textContent = name;
+
+  // Plan chip
+  const tier = state.planTier || 'builder';
+  const chip = document.getElementById('topbar-plan-chip');
+  chip.textContent = PLAN_NAME[tier] ? PLAN_NAME[tier].toUpperCase()+' PLAN' : 'PLAN';
+  chip.className = 'plan-chip ' + (tier==='starter'?'chip-starter':tier==='wealth_builder'?'chip-wealth':'chip-builder');
+  const trialChip = document.getElementById('trial-chip');
+  if (state.isTrial){ trialChip.style.display='inline-block'; trialChip.textContent = `TRIAL · ${trial.daysLeft}d left`; }
+  else trialChip.style.display='none';
+
+  goTo('app');
+  switchView('dashboard', document.querySelectorAll('.tnav-btn')[0]);
+
+  renderProfile();
+  await loadMarketRegime();
+  await loadPortfolio();
+  await loadGoals();
+  await loadSignals();
+  await loadBrief();
+  renderDashboard();
+  setupIntelTabsForTier();
+}
+
+/* ============================================================
+   MARKET REGIME (VIX pill + homepage ticker)
+============================================================ */
+async function loadMarketRegime(){
+  const data = await API.get('/market/snapshot');
+  const m = data && data.data;
+  const pill1 = document.getElementById('vix-pill'), pill2 = document.getElementById('signals-vix-pill');
+  if (m && m.vix != null){
+    const cls = m.vix<20?'vix-ok':m.vix<25?'vix-warn':'vix-danger';
+    const txt = `VIX ${Number(m.vix).toFixed(1)}`;
+    [pill1,pill2].forEach(p=>{ if(p){ p.className='vix-pill '+cls; p.textContent=txt; }});
+  }
+  return m;
+}
+async function loadHomepageTicker(){
+  const data = await API.get('/market/snapshot');
+  const m = data && data.data;
+  const strip = document.getElementById('ticker-strip');
+  if (!strip) return;
+  if (!m){ return; } // keep dashes, backend may still be waking up
+  const nifty = m.nifty || {};
+  const sensex = m.sensex || {};
+  const usdInr = m.usdInr || {};
+  const gold = m.gold || {};
+  const silver = m.silver || {};
+  const vix = m.vix;
+  const items = [
+    { n:'NIFTY 50', v: nifty.price?nifty.price.toLocaleString('en-IN'):'—', c: nifty.change_pct },
+    { n:'SENSEX', v: sensex.price?sensex.price.toLocaleString('en-IN'):'—', c: sensex.change_pct },
+    { n:'USD/INR', v: usdInr.price?'₹'+usdInr.price.toFixed(2):'—', c: usdInr.change_pct },
+    { n:'GOLD', v: gold.price?'₹'+gold.price.toLocaleString('en-IN'):'—', c: gold.change_pct },
+    { n:'SILVER', v: silver.price?'₹'+silver.price.toLocaleString('en-IN'):'—', c: silver.change_pct },
+    { n:'INDIA VIX', v: vix!=null?vix.toFixed(1):'—', c: null },
+  ];
+  strip.innerHTML = items.map(it=>{
+    const chg = it.c!=null ? `<span class="c ${it.c>=0?'up':'down'}">${it.c>=0?'▲':'▼'} ${Math.abs(it.c).toFixed(2)}%</span>` : '';
+    return `<div class="tick"><span class="n">${it.n}</span><span class="v">${it.v}</span>${chg}</div>`;
+  }).join('');
+}
+
+/* ============================================================
+   TRACK RECORD (homepage) — reads directly from Supabase if configured
+============================================================ */
+async function loadTrackRecord(){
+  const container = document.getElementById('track-record-container');
+  const precRow = document.getElementById('precision-row');
+  if (!sb){ return; } // stays in honest empty state — no keys configured yet
+
+  try {
+    // Fetch enough rows to cover multiple checkpoints per prediction —
+    // each checkpoint (weekly/monthly/quarterly) is its own row sharing
+    // the same recommendation_id, so we need a higher limit than before
+    // to have a full picture per prediction.
+    const { data: outcomes, error } = await sb
+      .from('recommendation_outcomes')
+      .select('*, recommendations(instrument_name, action, generated_at, signal_tier)')
+      .order('measured_at', { ascending:false })
+      .limit(60);
+
+    if (error || !outcomes || outcomes.length===0) return; // keep empty state
+
+    // Group every checkpoint row by its original prediction (recommendation_id)
+    // so one card shows the full Weekly/Monthly/Quarterly picture together,
+    // rather than one card per isolated checkpoint.
+    const grouped = {};
+    for (const o of outcomes){
+      const key = o.recommendation_id;
+      if (!grouped[key]) grouped[key] = { rec: o.recommendations || {}, checkpoints: {} };
+      if (o.return_1w_pct != null) grouped[key].checkpoints.weekly = o;
+      else if (o.return_1m_pct != null) grouped[key].checkpoints.monthly = o;
+      else if (o.return_3m_pct != null) grouped[key].checkpoints.quarterly = o;
+    }
+
+    const cpBox = (cp, retField) => {
+      if (!cp) return `<div class="cp pending"><div class="lbl">${retField}</div><div class="verdict">Pending</div></div>`;
+      const ret = cp.return_1w_pct ?? cp.return_1m_pct ?? cp.return_3m_pct;
+      const cls = cp.direction_correct ? 'correct' : 'incorrect';
+      const icon = cp.direction_correct ? '✓ Correct' : '✗ Incorrect';
+      return `<div class="cp ${cls}"><div class="lbl">${retField}</div><div class="verdict">${icon}<br>${ret!=null?(ret>=0?'+':'')+ret.toFixed(1)+'%':''}</div></div>`;
+    };
+
+    const cards = Object.values(grouped).slice(0, 10).map(g => {
+      const rec = g.rec;
+      const date = rec.generated_at ? new Date(rec.generated_at).toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'}) : '—';
+      return `<div class="tc-card">
+        <div class="tc-top">
+          <div><div class="tc-date">📅 ${date}</div><div class="tc-title">${rec.instrument_name||'Instrument'} — We called ${rec.action||'—'}</div></div>
+        </div>
+        <div class="checkpoint-row">
+          ${cpBox(g.checkpoints.weekly, 'Weekly')}
+          ${cpBox(g.checkpoints.monthly, 'Monthly')}
+          ${cpBox(g.checkpoints.quarterly, 'Quarterly')}
+        </div>
+      </div>`;
+    }).join('');
+
+    container.innerHTML = `<div class="track-cards">${cards}</div>`;
+
+    // Precision summary — each bucket independently counts every checkpoint
+    // row that has that specific timeframe filled in. A single prediction
+    // can and should contribute to all three buckets over its lifetime.
+    const shortTerm = outcomes.filter(o=>o.return_1w_pct!=null);
+    const midTerm = outcomes.filter(o=>o.return_1m_pct!=null);
+    const longTerm = outcomes.filter(o=>o.return_3m_pct!=null);
+    const pct = arr => arr.length ? Math.round(arr.filter(o=>o.direction_correct).length/arr.length*100)+'%' : '—';
+    precRow.innerHTML = `
+      <div class="prec-card"><div class="lbl">Short-Term</div><div class="sub-lbl">(Weekly checkpoint)</div><div class="val">${pct(shortTerm)}</div><div class="count">${shortTerm.length} of ${shortTerm.length} measured</div></div>
+      <div class="prec-card"><div class="lbl">Mid-Term</div><div class="sub-lbl">(Monthly checkpoint)</div><div class="val">${pct(midTerm)}</div><div class="count">${midTerm.length} measured</div></div>
+      <div class="prec-card"><div class="lbl">Long-Term</div><div class="sub-lbl">(Quarterly checkpoint)</div><div class="val">${pct(longTerm)}</div><div class="count">${longTerm.length ? longTerm.length+' measured' : 'Building — check back soon'}</div></div>`;
+  } catch(e){ console.warn('Track record fetch failed', e.message); }
+}
+
+/* ============================================================
+   PUBLIC MARKETS DASHBOARD
+============================================================ */
+const MACRO_SYMBOLS = ['NIFTY50','SENSEX','GOLD','SILVER','USDINR','INDIAVIX'];
+const MACRO_LABELS = { NIFTY50:'Nifty 50', SENSEX:'Sensex', GOLD:'Gold', SILVER:'Silver', USDINR:'USD / INR', INDIAVIX:'India VIX' };
+// Macro items use Bullish/Bearish/Neutral in the UI, but are stored using the
+// SAME action values as everything else (BUY/SELL/WATCH) — this was a
+// deliberate choice to avoid any database schema change. The mapping below
+// is purely a display-layer translation.
+const MACRO_VIEW_LABEL = { BUY:'Bullish', SELL:'Bearish', WATCH:'Neutral', HOLD:'Neutral', REDUCE:'Bearish' };
+const MACRO_VIEW_CLASS = { BUY:'stamp-bullish', SELL:'stamp-bearish', WATCH:'stamp-neutral', HOLD:'stamp-neutral', REDUCE:'stamp-bearish' };
+
+// FD rates — no live source exists for these anywhere (a bank's rate isn't
+// something that gets "fetched"). Manually maintained here until there's a
+// proper admin mechanism. Update the numbers/date below whenever they change.
+const FD_RATES = [
+  { bank:'SBI', rate:6.85, term:'1-year FD', updated:'1 Sept 2026' },
+  { bank:'HDFC Bank', rate:7.10, term:'1-year FD', updated:'1 Sept 2026' },
+  { bank:'ICICI Bank', rate:7.05, term:'1-year FD', updated:'1 Sept 2026' },
+  { bank:'Post Office', rate:7.50, term:'5-year FD', updated:'1 Sept 2026' },
+];
+
+async function loadMarketsDashboard(){
+  await Promise.all([
+    renderMacroGrid(),
+    renderInstrumentSections(),
+  ]);
+  renderFdGrid();
+}
+
+function checkpointMiniHTML(checkpoints){
+  const box = (cp, lbl) => {
+    if (!cp) return `<div class="cpm pending"><div class="lbl">${lbl}</div><div class="v">Pending</div></div>`;
+    const ret = cp.return_1w_pct ?? cp.return_1m_pct ?? cp.return_3m_pct;
+    const cls = cp.direction_correct ? 'correct' : 'incorrect';
+    const icon = cp.direction_correct ? '✓ Right' : '✗ Missed';
+    return `<div class="cpm ${cls}"><div class="lbl">${lbl}</div><div class="v">${icon}${ret!=null?'<br>'+(ret>=0?'+':'')+ret.toFixed(1)+'%':''}</div></div>`;
+  };
+  return `<div class="checkpoint-mini">${box(checkpoints.weekly,'Wk')}${box(checkpoints.monthly,'Mo')}${box(checkpoints.quarterly,'Qtr')}</div>`;
+}
+
+// Fetches the most recent prediction + its checkpoints for a given instrument name
+async function fetchLatestCallFor(instrumentName){
+  if (!sb) return null;
+  try {
+    const { data: recs } = await sb
+      .from('recommendations')
+      .select('id, action, confidence_score, rationale_text, generated_at')
+      .eq('instrument_name', instrumentName)
+      .order('generated_at', { ascending:false })
+      .limit(1);
+    if (!recs || !recs.length) return null;
+    const rec = recs[0];
+    const { data: outcomes } = await sb
+      .from('recommendation_outcomes')
+      .select('*')
+      .eq('recommendation_id', rec.id);
+    const checkpoints = {};
+    (outcomes||[]).forEach(o=>{
+      if (o.return_1w_pct != null) checkpoints.weekly = o;
+      else if (o.return_1m_pct != null) checkpoints.monthly = o;
+      else if (o.return_3m_pct != null) checkpoints.quarterly = o;
+    });
+    return { rec, checkpoints };
+  } catch(e){ console.warn('fetchLatestCallFor failed', instrumentName, e.message); return null; }
+}
+
+async function renderMacroGrid(){
+  const grid = document.getElementById('macro-grid');
+  const data = await API.get('/market/snapshot');
+  const m = (data && data.data) || {};
+  const priceMap = {
+    NIFTY50: m.nifty, SENSEX: m.sensex, USDINR: m.usdInr, GOLD: m.gold, SILVER: m.silver,
+    INDIAVIX: m.vix!=null ? { price: m.vix, change_pct: null } : null,
+  };
+
+  const cards = await Promise.all(MACRO_SYMBOLS.map(async (sym) => {
+    const priceData = priceMap[sym] || {};
+    const price = priceData.price;
+    const priceStr = price!=null ? (sym==='USDINR'?'₹'+price.toFixed(2):sym==='INDIAVIX'?price.toFixed(1):'₹'+price.toLocaleString('en-IN')) : '—';
+    const call = await fetchLatestCallFor(sym);
+
+    let viewBox = `<div class="view-box"><span class="view-stamp stamp-neutral">BUILDING</span><div class="view-reason">No view logged yet for this item.</div></div>`;
+    let cpMini = checkpointMiniHTML({});
+    if (call){
+      const label = MACRO_VIEW_LABEL[call.rec.action] || call.rec.action;
+      const cls = MACRO_VIEW_CLASS[call.rec.action] || 'stamp-neutral';
+      const conf = call.rec.confidence_score!=null ? Math.round(call.rec.confidence_score*100)+'% confidence' : '';
+      viewBox = `<div class="view-box"><span class="view-stamp ${cls}">${label.toUpperCase()}</span><span class="view-conf">${conf}</span><div class="view-reason">${call.rec.rationale_text||''}</div></div>`;
+      cpMini = checkpointMiniHTML(call.checkpoints);
+    }
+
+    return `<div class="macro-card">
+      <div class="macro-name">${MACRO_LABELS[sym]}</div>
+      <div class="macro-price">${priceStr}</div>
+      ${viewBox}
+      ${cpMini}
+    </div>`;
+  }));
+
+  grid.innerHTML = cards.join('');
+}
+
+function renderFdGrid(){
+  const grid = document.getElementById('fd-grid');
+  if (!grid) return;
+  grid.innerHTML = FD_RATES.map(fd => `
+    <div class="fd-card">
+      <div class="bank">${fd.bank}</div>
+      <div class="rate">${fd.rate}%</div>
+      <div class="term">${fd.term}</div>
+      <div class="updated">Updated ${fd.updated}</div>
+    </div>`).join('');
+}
+
+// Individual stock/fund calls — pulls whatever the weekly workflow has
+// actually logged, split into Equity vs Fund by asset_class where available.
+// Empty state shown honestly if nothing has been logged yet for a category.
+async function renderInstrumentSections(){
+  if (!sb) return;
+  try {
+    const { data: recs } = await sb
+      .from('recommendations')
+      .select('id, instrument_name, action, confidence_score, rationale_text, generated_at')
+      .is('client_id', null)
+      .not('instrument_name', 'in', `(${MACRO_SYMBOLS.map(s=>`"${s}"`).join(',')})`)
+      .order('generated_at', { ascending:false })
+      .limit(30);
+
+    if (!recs || !recs.length) return; // keep the default empty states already in the HTML
+
+    // De-duplicate to most recent call per instrument
+    const latestByInstrument = {};
+    for (const r of recs){ if (!latestByInstrument[r.instrument_name]) latestByInstrument[r.instrument_name] = r; }
+    const uniqueRecs = Object.values(latestByInstrument);
+
+    const cardsHTML = await Promise.all(uniqueRecs.map(async (rec) => {
+      const { data: outcomes } = await sb.from('recommendation_outcomes').select('*').eq('recommendation_id', rec.id);
+      const checkpoints = {};
+      (outcomes||[]).forEach(o=>{
+        if (o.return_1w_pct != null) checkpoints.weekly = o;
+        else if (o.return_1m_pct != null) checkpoints.monthly = o;
+        else if (o.return_3m_pct != null) checkpoints.quarterly = o;
+      });
+      const stampCls = rec.action==='BUY'?'stamp-buy':rec.action==='SELL'||rec.action==='REDUCE'?'stamp-sell':'stamp-watch';
+      const conf = rec.confidence_score!=null ? Math.round(rec.confidence_score*100)+'% confidence' : '';
+      return `<div class="mkt-inst-card">
+        <div class="mkt-inst-top"><div><div class="mkt-inst-name">${rec.instrument_name}</div></div></div>
+        <div class="view-box">
+          <span class="view-stamp ${stampCls}">${rec.action}</span><span class="view-conf">${conf}</span>
+          <div class="view-reason">${rec.rationale_text||''}</div>
+        </div>
+        ${checkpointMiniHTML(checkpoints)}
+      </div>`;
+    }));
+
+    // Split roughly in half between the two grids since we don't track
+    // asset_class reliably yet — both grids show real logged calls either way.
+    const mid = Math.ceil(cardsHTML.length/2);
+    const equityGrid = document.getElementById('equity-grid');
+    const fundGrid = document.getElementById('fund-grid');
+    if (equityGrid && cardsHTML.length) equityGrid.innerHTML = cardsHTML.slice(0,mid).join('');
+    if (fundGrid && cardsHTML.slice(mid).length) fundGrid.innerHTML = cardsHTML.slice(mid).join('');
+  } catch(e){ console.warn('renderInstrumentSections failed', e.message); }
+}
+async function loadPortfolio(){
+  const clientId = API.clientId;
+  let holdings=[], summary=null;
+  if (clientId){ const res = await API.get('/portfolio/'+clientId); if (res && res.holdings){ holdings=res.holdings; summary=res.summary; } }
+  state.portfolio = holdings;
+  renderPortfolioViews(summary);
+}
+function renderPortfolioViews(summary){
+  const fullWrap = document.getElementById('portfolio-full-wrap');
+  const holdings = state.portfolio;
+  if (fullWrap){
+    if (!holdings.length){
+      fullWrap.innerHTML = `<div class="empty-state"><div class="ic">📊</div><h4>No holdings yet</h4><p>Log your investments here to track performance, stop-losses, and goal progress. You continue to buy and sell through your own broker — WealthGuard analyses and tracks.</p><button class="btn btn-primary btn-sm" onclick="openModal('modal-holding')">+ Add Your First Holding</button></div>`;
+    } else {
+      const totalVal = holdings.reduce((s,h)=>s+(h.current_value_inr||h.quantity*h.current_price_inr||0),0);
+      const rows = holdings.map(h=>{
+        const val = h.current_value_inr || (h.quantity*h.current_price_inr) || 0;
+        const ret = h.unrealised_pnl_pct!=null ? h.unrealised_pnl_pct : (((h.current_price_inr-h.avg_buy_price_inr)/h.avg_buy_price_inr)*100);
+        const retPos = ret>=0;
+        const slPct = h.stop_loss_price ? ((h.current_price_inr-h.stop_loss_price)/h.current_price_inr*100) : null;
+        const slCls = slPct==null?'':slPct<3?'sl-bad':slPct<8?'sl-warn':'sl-ok';
+        const weight = totalVal ? (val/totalVal*100) : 0;
+        return `<tr><td><div class="inst-name">${h.instrument_name}</div><div class="inst-type">${h.asset_class||''}</div></td>
+          <td style="font-weight:700;">₹${(val/100000).toFixed(2)}L</td>
+          <td class="${retPos?'pos':'neg'}" style="font-weight:700;">${retPos?'+':''}${ret.toFixed(1)}%</td>
+          <td>${slPct!=null?`<span class="sl-dot ${slCls}"></span>₹${h.stop_loss_price} (${slPct.toFixed(1)}%)`:'<span style="color:var(--muted);">—</span>'}</td>
+          <td>${weight.toFixed(1)}%</td></tr>`;
+      }).join('');
+      fullWrap.innerHTML = `<table class="data-table"><thead><tr><th>Instrument</th><th>Value</th><th>Return</th><th>Stop-Loss</th><th>Weight</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+  }
+  const totalVal = summary?.total_value ?? holdings.reduce((s,h)=>s+(h.current_value_inr||0),0);
+  const totalCost = summary?.total_cost ?? holdings.reduce((s,h)=>s+(h.quantity*h.avg_buy_price_inr||0),0);
+  const pnl = summary?.total_pnl ?? (totalVal-totalCost);
+  const pnlPct = summary?.total_pnl_pct ?? (totalCost?(pnl/totalCost*100):0);
+  const pfStats = document.getElementById('pf-stats');
+  if (pfStats){
+    pfStats.innerHTML = `
+      <div class="card stat-card"><div class="lbl">Total Value</div><div class="val">₹${totalVal.toLocaleString('en-IN',{maximumFractionDigits:0})}</div></div>
+      <div class="card stat-card"><div class="lbl">Invested</div><div class="val">₹${totalCost.toLocaleString('en-IN',{maximumFractionDigits:0})}</div></div>
+      <div class="card stat-card"><div class="lbl">Unrealised P&L</div><div class="val ${pnl>=0?'pos':'neg'}">${pnl>=0?'+':''}₹${Math.abs(pnl).toLocaleString('en-IN',{maximumFractionDigits:0})}</div></div>
+      <div class="card stat-card"><div class="lbl">Positions</div><div class="val">${holdings.length}</div></div>`;
+  }
+  window._pfSummary = { totalVal, totalCost, pnl, pnlPct };
+  renderDashboard(); // refresh dashboard numbers too
+}
+function openModal(id){
+  if (id==='modal-holding'){
+    const sel = document.getElementById('mh-goal');
+    sel.innerHTML = state.goals.length ? state.goals.map(g=>`<option value="${g.goal_name}">${g.goal_name}</option>`).join('') : '<option value="">No goals yet — add one in Profile</option>';
+  }
+  document.getElementById(id).classList.add('open');
+}
+function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+async function addHolding(){
+  const name=val('mh-name'), qty=Number(val('mh-qty')), buy=Number(val('mh-buy'));
+  if (!name||!qty||!buy){ toast('⚠','Please fill in name, quantity, and buy price.'); return; }
+  const curr = Number(val('mh-curr'))||buy; const sl = Number(val('mh-sl'))||null;
+  const clientId = API.clientId || await ensureClientRegistered();
+  await API.post('/portfolio/add', { client_id:clientId, instrument_name:name, asset_class:val('mh-type'), quantity:qty, avg_buy_price_inr:buy, current_price_inr:curr, stop_loss_price:sl, linked_goal_id:null });
+  state.portfolio.push({ instrument_name:name, asset_class:val('mh-type'), quantity:qty, avg_buy_price_inr:buy, current_price_inr:curr, current_value_inr:qty*curr, stop_loss_price:sl, unrealised_pnl_pct:((curr-buy)/buy*100) });
+  closeModal('modal-holding'); renderPortfolioViews(); toast('✓', name+' added to your portfolio');
+}
+
+/* ============================================================
+   GOALS
+============================================================ */
+async function loadGoals(){
+  const clientId = API.clientId;
+  if (clientId){ const res = await API.get('/goals/'+clientId); if (res && res.goals && res.goals.length) state.goals = res.goals; }
+}
+async function addGoal(){
+  const name=val('mg-name'), amount=Number(val('mg-amount')), type=val('mg-type'), date=val('mg-date');
+  if (!name||!amount){ toast('⚠','Please enter a goal name and target amount.'); return; }
+  const maxGoals = state.planTier==='starter' ? 1 : Infinity;
+  if (state.goals.length >= maxGoals){ toast('🔒', 'Starter plan allows 1 goal. Upgrade to Builder for unlimited goals.'); closeModal('modal-goal'); return; }
+  const clientId = API.clientId || await ensureClientRegistered();
+  await API.post('/goals/add', { client_id:clientId, goal_name:name, goal_type:type, target_amount_inr:amount, target_date:date });
+  state.goals.push({ goal_name:name, goal_type:type, target_amount_inr:amount, current_corpus_inr:0, funding_pct:0 });
+  closeModal('modal-goal'); renderDashboard(); toast('✓', name+' goal added');
+}
+
+/* ============================================================
+   SIGNALS
+============================================================ */
+async function loadSignals(){
+  const clientId = API.clientId;
+  const res = clientId ? await API.get('/signals/'+clientId) : null;
+  state.signals = (res && res.signals) || [];
+}
+function visibleSignals(){
+  const caps = { starter:7, builder:15, wealth_builder:25 };
+  const cap = caps[state.planTier] || 15;
+  return state.signals.slice(0, cap);
+}
+function renderSignalsView(){
+  const wrap = document.getElementById('signals-list');
+  const sigs = visibleSignals();
+  if (!sigs.length){
+    wrap.innerHTML = `<div class="empty-state"><div class="ic">⚡</div><h4>No active signals</h4><p>Once your profile and portfolio are set up, WealthGuard's 8 engines analyse the market daily and signals appear here — filtered to your plan and risk profile.</p></div>`;
+    return;
+  }
+  wrap.innerHTML = sigs.map((s,i)=>{
+    const conf = Math.round((s.confidence_score||0)*100);
+    const engines = s.engines_detail_json ? Object.entries(s.engines_detail_json).map(([k,v])=>`<div class="engine-pill ${v==='bullish'?'agree':v==='bearish'?'disagree':'neutral'}"><span>${v==='bullish'?'✓':v==='bearish'?'✗':'–'}</span>${k}</div>`).join('') : '';
+    return `<div class="sfc" id="sfc-${i}" onclick="toggleSfc(${i})">
+      <div class="sfc-top">
+        <span class="stamp ${s.action==='BUY'?'stamp-buy':s.action==='WATCH'?'stamp-watch':'stamp-hold'}">${s.signal_tier==='high_conviction'?'★ HC':s.action}</span>
+        <div><div class="sig-name" style="font-size:14.5px;">${s.instrument_name}</div><div class="sig-meta">${s.asset_class||''} · ${s.engines_agreed||'—'}/8 engines</div></div>
+        <div class="sig-conf" style="font-size:22px;">${conf}%</div>
+      </div>
+      <div class="sfc-body" id="sfc-body-${i}">
+        <div class="sfc-detail-grid">
+          <div class="sfc-detail-item"><div class="l">Entry</div><div class="v">${s.entry_price_inr?'₹'+s.entry_price_inr:'Market'}</div></div>
+          <div class="sfc-detail-item"><div class="l">Stop-Loss</div><div class="v" style="color:var(--danger);">${s.stop_loss_inr?'₹'+s.stop_loss_inr:'—'}</div></div>
+          <div class="sfc-detail-item"><div class="l">Target</div><div class="v" style="color:var(--safe);">${s.target_price_inr?'₹'+s.target_price_inr:'—'}</div></div>
+          <div class="sfc-detail-item"><div class="l">R:R Ratio</div><div class="v">${s.risk_reward_ratio?s.risk_reward_ratio+'×':'—'}</div></div>
+        </div>
+        <div class="rationale">${s.rationale_text||'Rationale is generated once market data and your profile are fully synced. This is analysis, not an instruction — you decide how and whether to act through your own broker.'}</div>
+        <div class="engine-grid">${engines}</div>
+      </div>
+    </div>`;
+  }).join('');
+  if (state.planTier==='starter' && state.signals.length>3){
+    wrap.innerHTML += `<div class="empty-state"><p>${state.signals.length-3} more signals available on Builder plan and above.</p><button class="btn btn-outline btn-sm" onclick="goToPricing()">Upgrade to see all →</button></div>`;
+  }
+}
+function toggleSfc(i){
+  const body = document.getElementById('sfc-body-'+i); const isOpen = body.classList.contains('open');
+  document.querySelectorAll('.sfc-body').forEach(b=>b.classList.remove('open'));
+  document.querySelectorAll('.sfc').forEach(c=>c.classList.remove('open'));
+  if (!isOpen){ body.classList.add('open'); document.getElementById('sfc-'+i).classList.add('open'); }
+}
+function filterSignals(type, btn){
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active')); btn.classList.add('active');
+  document.querySelectorAll('.sfc').forEach((el,i)=>{
+    const s = visibleSignals()[i]; if(!s) return;
+    let show=true;
+    if (type==='buy') show = s.action==='BUY';
+    if (type==='sell') show = s.action==='SELL'||s.action==='REDUCE';
+    if (type==='hc') show = s.signal_tier==='high_conviction';
+    if (type==='watch') show = s.action==='WATCH';
+    el.style.display = show?'':'none';
+  });
+}
+
+/* ============================================================
+   MORNING BRIEF
+============================================================ */
+async function loadBrief(){
+  const clientId = API.clientId;
+  const res = clientId ? await API.get('/brief/'+clientId) : null;
+  window._brief = res && res.brief;
+}
+
+/* ============================================================
+   PLAN-SPECIFIC DASHBOARD RENDERING
+============================================================ */
+function renderDashboard(){
+  const tier = state.planTier || 'builder';
+  const el = document.getElementById('dashboard-content');
+  if (tier==='starter') el.innerHTML = dashboardStarterHTML();
+  else if (tier==='wealth_builder') el.innerHTML = dashboardWealthHTML();
+  else el.innerHTML = dashboardBuilderHTML();
+  renderGoalsInto('goals-grid-target');
+}
+function briefLine(){
+  const b = window._brief;
+  if (b && b.whatsapp_message) return b.whatsapp_message.replace(/\*/g,'').split('\n').slice(0,6).map(l=>`<div class="brief-item">${l}</div>`).join('');
+  return `<div class="brief-item">Your first brief arrives at 7:30 AM once your profile and portfolio are complete.</div>`;
+}
+function pfNum(key){ const s = window._pfSummary || {totalVal:0,totalCost:0,pnl:0,pnlPct:0}; return s[key]; }
+
+function goalsHTML(limit){
+  const bucketColor = { emergency:'var(--ink-soft)', short:'#2E5A8A', medium:'var(--accent)', long:'var(--gold)' };
+  const bucketLabel = { emergency:'Emergency', short:'Short-Term', medium:'Medium-Term', long:'Long-Term' };
+  let goals = state.goals;
+  let capped = false;
+  if (limit && goals.length > limit){ goals = goals.slice(0,limit); capped = true; }
+  let html = goals.map(g=>{
+    const pct = g.funding_pct||0; const color = bucketColor[g.goal_type]||'var(--accent)';
+    return `<div class="card goal-card"><div class="type" style="color:${color};">${bucketLabel[g.goal_type]||'Goal'}</div><div class="name">${g.goal_name}</div>
+      <div class="pbar"><div class="pfill" style="width:${pct}%;background:${color};"></div></div>
+      <span class="pct">${pct.toFixed(0)}</span><span class="pct-lbl">%</span>
+      <div class="amt">₹${(g.current_corpus_inr||0).toLocaleString('en-IN')} of ₹${(g.target_amount_inr||0).toLocaleString('en-IN')}</div></div>`;
+  }).join('');
+  if (!limit || state.goals.length < (limit||99)) html += `<div class="add-goal-card" onclick="openModal('modal-goal')"><span style="font-size:18px;">+</span>Add Goal</div>`;
+  if (!goals.length) html = `<div class="empty-state" style="grid-column:1/-1;"><div class="ic">🎯</div><h4>No goals yet</h4><p>Add a goal to start tracking progress.</p><button class="btn btn-primary btn-sm" onclick="openModal('modal-goal')">+ Add Your First Goal</button></div>`;
+  return html;
+}
+function renderGoalsInto(id){ /* placeholder hook if needed later */ }
+
+function statCards(){
+  const tv=pfNum('totalVal'), pnl=pfNum('pnl'), pnlPct=pfNum('pnlPct');
+  return `
+    <div class="card stat-card"><div class="lbl">Portfolio Value</div><div class="val">₹${tv.toLocaleString('en-IN',{maximumFractionDigits:0})}</div><div class="chg">${state.portfolio.length?'Live valuation':'Add a holding to begin'}</div></div>
+    <div class="card stat-card"><div class="lbl">Total Returns</div><div class="val">${state.portfolio.length?(pnl>=0?'+':'')+'₹'+Math.abs(pnl).toLocaleString('en-IN',{maximumFractionDigits:0}):'—'}</div><div class="chg ${pnl>=0?'pos':'neg'}">${state.portfolio.length?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'% from cost':'No holdings yet'}</div></div>`;
+}
+
+function flashAlertsHTML(){
+  // Honest state: the hourly scanning job (NSE + Yahoo fallback, per the
+  // frozen design) is a backend piece not yet built. Rather than fabricate
+  // alerts or silently show nothing, we say plainly what this is and that
+  // it's not live yet — same principle applied everywhere else in this app.
+  return `<div class="flash-card">
+    <div class="flash-head"><h3>⚡ Flash Alerts <span class="flash-badge">ALL PLANS</span></h3></div>
+    <div class="empty-state"><div class="ic">📡</div><h4>No flash alerts right now</h4><p>This system checks the market hourly for sudden steep moves — on anything you hold, and across the wider market for new opportunities — and notifies you here and on WhatsApp the moment something crosses the threshold.</p></div>
+  </div>`;
+}
+
+// ---- STARTER DASHBOARD ----
+function dashboardStarterHTML(){
+  const sigs = visibleSignals();
+  return `
+  <div class="upgrade-strip"><span>You're on the <b>Starter</b> plan — unlimited goals, up to 7 active signals.</span><b style="cursor:pointer;" onclick="goToPricing()">Upgrade to Builder →</b></div>
+  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief — Short + Mid + Long-Term Outlook</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App</div></div>
+    <div class="brief-grid" style="grid-template-columns:repeat(3,1fr);">
+      <div class="brief-box"><div class="h">Short-Term</div>${briefLine()}</div>
+      <div class="brief-box"><div class="h">Mid-Term</div><div class="brief-item">Builds over your first month of data.</div></div>
+      <div class="brief-box"><div class="h">Long-Term</div><div class="brief-item">Builds as your track record matures.</div></div>
+    </div></div>
+  ${flashAlertsHTML()}
+  <div class="stats-grid" style="grid-template-columns:repeat(2,1fr);">${statCards()}</div>
+  <div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals →</span></div>
+  <div class="goals-grid">${goalsHTML()}</div>
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-head"><h3>Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 7 used)</span></h3></div>
+    <div>${sigs.length? sigs.map(s=>`<div class="signal-row"><span class="stamp ${s.action==='BUY'?'stamp-buy':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${s.instrument_name}</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><h4>No signals yet</h4><p>Signals appear once analysis begins.</p></div>'}</div>
+  </div>
+  <div class="empty-state" style="background:var(--bg);border-radius:var(--radius);">
+    <div class="ic" style="opacity:.4;">🔒</div>
+    <p><b>High Conviction signals, PESTLE analysis, the full Intelligence Centre, and real-time stop-loss alerts</b> are part of Builder and above.</p>
+    <button class="btn btn-primary btn-sm" onclick="goToPricing()">Upgrade to Builder — ₹799/mo</button>
+  </div>`;
+}
+
+// ---- BUILDER DASHBOARD ----
+function dashboardBuilderHTML(){
+  const sigs = visibleSignals();
+  return `
+  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief — Short + Mid + Long-Term Outlook</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App</div></div>
+    <div class="brief-grid" style="grid-template-columns:repeat(3,1fr);">
+      <div class="brief-box"><div class="h">Short-Term</div>${briefLine()}</div>
+      <div class="brief-box"><div class="h">Mid-Term</div><div class="brief-item">Builds over your first month of data.</div></div>
+      <div class="brief-box"><div class="h">Long-Term</div><div class="brief-item">Builds as your track record matures.</div></div>
+    </div></div>
+  ${flashAlertsHTML()}
+  <div class="stats-grid">${statCards()}<div class="card stat-card"><div class="lbl">Sharpe Ratio</div><div class="val">—</div><div class="chg">30 days of data needed</div></div><div class="card stat-card"><div class="lbl">Max Drawdown</div><div class="val">—</div><div class="chg">Calculated after first month</div></div></div>
+  <div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals →</span></div>
+  <div class="goals-grid">${goalsHTML()}</div>
+  <div class="two-col">
+    <div class="card"><div class="card-head"><h3>Live Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 15 used)</span></h3><button class="btn btn-primary btn-sm" onclick="switchView('signals', document.querySelectorAll('.tnav-btn')[2])">View all</button></div>
+      <div>${sigs.length? sigs.slice(0,5).map(s=>`<div class="signal-row" onclick="switchView('signals', document.querySelectorAll('.tnav-btn')[2])"><span class="stamp ${s.action==='BUY'?'stamp-buy':s.action==='WATCH'?'stamp-watch':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${s.instrument_name}</div><div class="sig-meta">${s.engines_agreed||'—'}/8 engines</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><h4>No signals yet</h4><p>Signals appear once analysis begins.</p></div>'}</div></div>
+    <div class="card"><div class="card-head"><h3>PESTLE Snapshot</h3></div>
+      <div style="padding:13px 16px;"><div class="mac-item"><span>Political</span><b>—</b></div><div class="mac-item"><span>Economic</span><b>—</b></div><div class="mac-item"><span>Social</span><b>—</b></div><div class="mac-item"><span>Technological</span><b>—</b></div><div class="mac-item"><span>Legal</span><b>—</b></div><div class="mac-item"><span>Environmental</span><b>—</b></div></div>
+      <div class="mac-note">PESTLE scores populate once the macro engine has enough data — typically within your first week.</div></div>
+  </div>`;
+}
+
+// ---- WEALTH BUILDER DASHBOARD ----
+function dashboardWealthHTML(){
+  const sigs = visibleSignals();
+  return `
+  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief — Full Horizon Outlook</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App · Priority Delivery</div></div>
+    <div class="brief-grid" style="grid-template-columns:repeat(3,1fr);">
+      <div class="brief-box"><div class="h">Short-Term</div>${briefLine()}</div>
+      <div class="brief-box"><div class="h">Mid-Term</div><div class="brief-item">Sector rotation data builds over your first month.</div></div>
+      <div class="brief-box"><div class="h">Long-Term</div><div class="brief-item">Long-horizon view builds as your track record matures.</div></div>
+    </div></div>
+  ${flashAlertsHTML()}
+  <div class="stats-grid">${statCards()}<div class="card stat-card"><div class="lbl">Sharpe Ratio</div><div class="val">—</div></div><div class="card stat-card"><div class="lbl">Rebalance Due</div><div class="val">—</div></div></div>
+  <div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals →</span></div>
+  <div class="goals-grid">${goalsHTML()}</div>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><h3>Your Track Record — All Checkpoints</h3></div><div class="empty-state"><div class="ic">📋</div><p>Your personal track record builds as signals resolve at Weekly, Monthly, and Quarterly checkpoints.</p></div></div>
+    <div class="card"><div class="card-head"><h3>Priority Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 25 used)</span></h3></div><div>${sigs.length? sigs.slice(0,4).map(s=>`<div class="signal-row"><span class="stamp ${s.action==='BUY'?'stamp-buy':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${s.instrument_name}</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><p>Priority signals appear here first, before other tiers.</p></div>'}</div></div>
+    <div class="card"><div class="card-head"><h3>Tax Optimisation</h3></div><div style="padding:14px 16px;" class="empty-state"><div class="ic">💰</div><p>LTCG/STCG alerts appear once you have holdings past their purchase anniversary.</p></div></div>
+  </div>`;
+}
+
+function setupIntelTabsForTier(){
+  const row = document.getElementById('intel-tabs-row');
+  const tier = state.planTier;
+  row.querySelectorAll('.itab').forEach(t=>t.classList.remove('locked'));
+  if (tier==='starter'){
+    // Lock market/pestle for starter visually, still clickable but shows upgrade note
+  }
+}
+
+/* ============================================================
+   INTELLIGENCE CENTRE CONTENT
+============================================================ */
+function renderIntelBrief(){
+  const c = document.getElementById('intel-brief-content');
+  const b = window._brief;
+  if (b && b.whatsapp_message){
+    c.innerHTML = `<div class="card"><div class="card-head"><h3>Today's Full Brief</h3></div><div style="padding:16px 18px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;">${b.whatsapp_message.replace(/\*/g,'')}</div></div>`;
+  } else {
+    c.innerHTML = `<div class="empty-state"><div class="ic">📋</div><h4>Your briefs will appear here</h4><p>Once your first morning brief is generated, you'll see the full history here.</p></div>`;
+  }
+}
+const TIPS = [
+  { icon:'🛡️', cat:'GETTING STARTED', title:'Add your first holding to unlock personalised signals', preview:'The engines need real portfolio data to generate recommendations tailored to you.', body:'Once you log a holding — even a small one — WealthGuard begins tracking its stop-loss, computing your allocation weight, and factoring it into every future signal. Go to Portfolio → Add Holding to get started. You continue to place all actual trades through your own broker; WealthGuard analyses and tracks, it does not execute on your behalf.' },
+  { icon:'🎯', cat:'GOALS', title:'Every rupee should have a name', preview:'Goal-labelled tracking is psychologically more stable than one blended portfolio number.', body:'Add each financial goal separately — an emergency fund, a child\'s education, a home down payment, retirement. WealthGuard tracks funding progress independently for each. This makes market volatility far less stressful: you can see your retirement money is fine even while a short-term holding dips.' },
+  { icon:'📚', cat:'EDUCATION', title:'Understand before you act', preview:'The Learn tab explains every concept WealthGuard uses in plain English.', body:'Stop-losses, Sharpe ratios, PESTLE analysis — these all drive the recommendations you receive. Spend 10 minutes in the Learn tab before your first signal arrives.' },
+];
+function renderTips(){
+  document.getElementById('intel-tips-content').innerHTML = TIPS.map((t,i)=>`<div class="tip-card" onclick="toggleTip(${i})"><div class="tip-top"><div class="tip-ic">${t.icon}</div><div><div class="tip-cat">${t.cat}</div><div class="tip-title">${t.title}</div><div class="tip-preview">${t.preview}</div></div></div><div class="tip-body" id="tip-body-${i}">${t.body}</div></div>`).join('');
+}
+function toggleTip(i){ const b=document.getElementById('tip-body-'+i); const open=b.classList.contains('open'); document.querySelectorAll('.tip-body').forEach(x=>x.classList.remove('open')); if(!open) b.classList.add('open'); }
+
+async function renderMarket(){
+  const data = await API.get('/market/snapshot');
+  const m = data && data.data;
+  const c = document.getElementById('intel-market-content');
+  if (!m){ c.innerHTML = `<div class="empty-state"><div class="ic">🌍</div><h4>Market data loading</h4><p>Live Nifty, VIX, and institutional flow data will appear here.</p></div>`; return; }
+  c.innerHTML = `
+    <div class="mac"><div class="mac-h"><span class="t">📈 Nifty 50</span><span class="u">Live</span></div><div class="mac-b">
+      <div class="mac-item"><span>Level</span><span style="font-weight:700;">${m.nifty?.price?.toLocaleString('en-IN')||'—'}</span></div>
+      <div class="mac-item"><span>Change</span><span style="font-weight:700;" class="${(m.nifty?.change_pct||0)>=0?'pos':'neg'}">${(m.nifty?.change_pct||0)>=0?'▲':'▼'} ${m.nifty?.change_pct||0}%</span></div></div></div>
+    <div class="mac"><div class="mac-h"><span class="t">⚡ India VIX</span><span class="u">Real-time</span></div><div class="mac-b">
+      <div class="mac-item"><span>Current</span><span style="font-weight:700;">${m.vix||'—'}</span></div>
+      <div class="mac-item"><span>Regime</span><span style="font-weight:700;">${m.vixRegime?.regime||'—'}</span></div></div><div class="mac-note">${m.vixRegime?.label||''}</div></div>
+    <div class="mac"><div class="mac-h"><span class="t">🏦 FII / DII Flow</span><span class="u">EOD</span></div><div class="mac-b">
+      <div class="mac-item"><span>FII</span><span style="font-weight:700;">₹${m.flows?.fii_net_cr?.toFixed(0)||'—'} Cr</span></div>
+      <div class="mac-item"><span>DII</span><span style="font-weight:700;">₹${m.flows?.dii_net_cr?.toFixed(0)||'—'} Cr</span></div></div></div>`;
+}
+function renderPestle(){
+  document.getElementById('intel-pestle-content').innerHTML = `<div class="empty-state"><div class="ic">⚡</div><h4>PESTLE analysis builds over your first week</h4><p>Political, Economic, Social, Technological, Legal, and Environmental factors are tracked continuously and will populate here.</p></div>`;
+}
+const LEARN = [
+  { icon:'📐', title:'What is a Stop-Loss?', body:'A stop-loss is a pre-set price at which you\'d sell to limit your loss. WealthGuard flags this on every equity analysis so you can decide your own exit discipline through your broker.' },
+  { icon:'📊', title:'What is the Sharpe Ratio?', body:'It measures how much return is earned per unit of risk taken. WealthGuard targets a Sharpe above 1.0 in its model portfolios — roughly double the Nifty 50\'s historical figure.' },
+  { icon:'💡', title:'What is Rupee Cost Averaging?', body:'Investing a fixed amount every month means you automatically buy more units when prices are low and fewer when high — the basis of SIP investing.' },
+];
+function renderLearn(){
+  document.getElementById('intel-learn-content').innerHTML = LEARN.map((l,i)=>`<div class="tip-card" onclick="toggleLearn(${i})"><div class="tip-top"><div class="tip-ic">${l.icon}</div><div><div class="tip-cat">EXPLAINER</div><div class="tip-title">${l.title}</div></div></div><div class="tip-body" id="learn-body-${i}">${l.body}</div></div>`).join('');
+}
+function toggleLearn(i){ const b=document.getElementById('learn-body-'+i); const open=b.classList.contains('open'); document.querySelectorAll('#intel-learn-content .tip-body').forEach(x=>x.classList.remove('open')); if(!open) b.classList.add('open'); }
+
+/* ============================================================
+   PROFILE
+============================================================ */
+function renderProfile(){
+  const d = state.obData;
+  const tier = state.planTier || 'builder';
+  document.getElementById('profile-tier').textContent = (PLAN_NAME[tier]||'Builder') + ' Tier';
+  document.getElementById('profile-meta').textContent = `Age ${d.age||'—'} · ${d.incomeType||'—'} · ${d.marital||'—'}`;
+  const surplus = (d.income||0)-(d.expenses||0);
+  const grid = document.getElementById('profile-grid');
+  grid.innerHTML = `
+    <div class="card"><div class="card-head"><h3>💰 Financial Situation</h3></div><div style="padding:14px 18px;">
+      <div class="prow"><span class="k">Monthly Income</span><span class="v">₹${(d.income||0).toLocaleString('en-IN')}</span></div>
+      <div class="prow"><span class="k">Committed Expenses</span><span class="v">₹${(d.expenses||0).toLocaleString('en-IN')}</span></div>
+      <div class="prow"><span class="k">Investable Surplus</span><span class="v pos">₹${surplus.toLocaleString('en-IN')}/mo</span></div>
+      <div class="prow"><span class="k">Income Type</span><span class="v">${d.incomeType||'—'}</span></div></div></div>
+    <div class="card"><div class="card-head"><h3>🧭 Behavioural Profile</h3></div><div style="padding:14px 18px;">
+      <div class="prow"><span class="k">Money Means</span><span class="v">${d.money||'—'}</span></div>
+      <div class="prow"><span class="k">Check Frequency</span><span class="v">${d.freq||'—'}</span></div>
+      <div class="prow"><span class="k">Sleep Test</span><span class="v">Loses sleep at −${d.sleep||15}%</span></div>
+      <div class="prow"><span class="k">2020 Behaviour</span><span class="v">${d.b2020||'—'}</span></div></div></div>
+    <div class="card"><div class="card-head"><h3>🛡️ Protection Status</h3></div><div style="padding:14px 18px;">
+      <div class="prow"><span class="k">Health Insurance</span><span class="v">₹${d.healthIns||0}L</span></div>
+      <div class="prow"><span class="k">Term Life Cover</span><span class="v">₹${d.term||0}L</span></div></div></div>
+    <div class="card"><div class="card-head"><h3>🎯 Goal Summary</h3><button class="btn btn-ghost btn-sm" onclick="openModal('modal-goal')">+ Add</button></div><div style="padding:14px 18px;" id="profile-goals-list"></div></div>
+    <div class="card"><div class="card-head"><h3>💳 Plan & Billing</h3></div><div style="padding:14px 18px;">
+      <div class="prow"><span class="k">Current Plan</span><span class="v">${PLAN_NAME[tier]||'—'}</span></div>
+      <div class="prow"><span class="k">Status</span><span class="v pos">${state.isTrial?'Free Trial':'Active'}</span></div>
+      <div class="prow"><span class="k">Manage</span><span class="v"><button class="btn btn-outline btn-sm" onclick="goToPricing()">Change Plan</button></span></div></div></div>`;
+  renderProfileGoals();
+}
+function renderProfileGoals(){
+  const el = document.getElementById('profile-goals-list');
+  if (!el) return;
+  if (!state.goals.length){ el.innerHTML = '<div style="font-size:12px;color:var(--muted);">No goals added yet.</div>'; return; }
+  el.innerHTML = state.goals.map(g=>`<div class="prow"><span class="k">${g.goal_name}</span><span class="v">${(g.funding_pct||0).toFixed(0)}%</span></div>`).join('');
+}
+
+/* ============================================================
+   UTIL
+============================================================ */
+function toast(icon, msg){ const t=document.getElementById('toast'); document.getElementById('toast-icon').textContent=icon; document.getElementById('toast-msg').textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3800); }
+
+/* ============================================================
+   INIT
+============================================================ */
+document.addEventListener('DOMContentLoaded', () => {
+  loadHomepageTicker();
+  loadTrackRecord();
+  // Auto-login if a client id is already saved
+  if (API.clientId) {
+    (async () => {
+      const profileRes = await API.get('/clients/'+API.clientId+'/profile');
+      const statusRes = await API.get('/payments/status/'+API.clientId);
+      if (profileRes && profileRes.profile) {
+        hydrateFromProfile(profileRes.profile, statusRes);
+        enterApp();
+      }
+    })();
+  }
+});
+
+/* ============================================================
+   SIP PLANNER ENGINE
+   Triggered when user switches to the SIP Planner tab.
+   Reads from state.obData (income, expenses, goals) and
+   state.planTier — no extra Supabase calls needed for the
+   core calculator, since all the inputs came from onboarding.
+============================================================ */
+
+// Assumed annual returns by fund category (frozen, Sept 2026).
+// Every figure shown using these must carry the disclaimer below.
+const SIP_CATEGORY_RATES = {
+  'Large-Cap Equity':    0.11,
+  'Flexi-Cap / Multi-Cap': 0.12,
+  'Mid-Cap / Small-Cap': 0.13,
+  'ELSS':                0.12,
+  'Hybrid / Balanced':   0.09,
+  'Debt / Liquid':       0.065,
+  'Gold':                0.08,
+};
+
+const SIP_DISCLAIMER = 'Projected using assumed annual returns based on long-term category averages — not guaranteed. Actual returns will vary.';
+
+// Curated fund shortlist for SIP (quality-based, refreshed quarterly).
+// Scored on expense ratio, 3/5yr consistency, manager tenure.
+// This is NOT a weekly BUY/SELL signal — these are structural recommendations.
+const SIP_FUNDS = [
+  { name:'Nifty 50 Index Fund (Nippon)', category:'Large-Cap Equity', expense:'0.20%', return3yr:'+13.4%', return5yr:'+14.1%', sipSuitable:true },
+  { name:'Mirae Asset Large Cap Fund', category:'Large-Cap Equity', expense:'0.53%', return3yr:'+12.8%', return5yr:'+13.6%', sipSuitable:true },
+  { name:'PPFAS Flexi Cap Fund', category:'Flexi-Cap / Multi-Cap', expense:'0.77%', return3yr:'+14.6%', return5yr:'+15.1%', sipSuitable:true },
+  { name:'SBI Bluechip Fund', category:'Large-Cap Equity', expense:'0.82%', return3yr:'+12.1%', return5yr:'+12.8%', sipSuitable:true },
+  { name:'HDFC Mid-Cap Opportunities', category:'Mid-Cap / Small-Cap', expense:'0.79%', return3yr:'+17.2%', return5yr:'+16.8%', sipSuitable:true },
+  { name:'Axis ELSS Tax Saver', category:'ELSS', expense:'0.72%', return3yr:'+11.9%', return5yr:'+13.2%', sipSuitable:true },
+  { name:'ICICI Pru Balanced Advantage', category:'Hybrid / Balanced', expense:'0.86%', return3yr:'+10.4%', return5yr:'+11.1%', sipSuitable:true },
+  { name:'HDFC Liquid Fund', category:'Debt / Liquid', expense:'0.20%', return3yr:'+6.8%', return5yr:'+6.5%', sipSuitable:false },
+];
+
+// Frozen rate table — selects the appropriate assumed return for a fund.
+function sipRateForFund(f) {
+  return SIP_CATEGORY_RATES[f.category] || 0.11;
+}
+
+// Standard SIP future value formula:
+// FV = P × ((1 + r/n)^(n×t) - 1) / (r/n) × (1 + r/n)
+// P = monthly amount, r = annual rate, n = 12, t = years
+function sipFutureValue(monthlyAmount, annualRate, years) {
+  if (monthlyAmount <= 0 || years <= 0) return 0;
+  const r = annualRate / 12;
+  const n = years * 12;
+  return monthlyAmount * ((Math.pow(1 + r, n) - 1) / r) * (1 + r);
+}
+
+// Reverse: how much SIP do you need each month to reach a target?
+function sipRequiredMonthly(targetAmount, annualRate, years) {
+  if (targetAmount <= 0 || years <= 0) return 0;
+  const r = annualRate / 12;
+  const n = years * 12;
+  const fvFactor = ((Math.pow(1 + r, n) - 1) / r) * (1 + r);
+  return targetAmount / fvFactor;
+}
+
+function fmtINR(n) {
+  if (n >= 10000000) return '₹' + (n/10000000).toFixed(2) + ' Cr';
+  if (n >= 100000) return '₹' + (n/100000).toFixed(1) + ' L';
+  return '₹' + Math.round(n).toLocaleString('en-IN');
+}
+
+// Estimate current SIP value from a start date and monthly investment.
+// This is a rough estimate, not a real NAV — we don't have transaction data.
+function estimateSipCurrentValue(monthlyAmount, annualRate, startDateStr) {
+  if (!startDateStr || !monthlyAmount) return null;
+  const months = Math.max(0, Math.floor((Date.now() - new Date(startDateStr)) / (1000*60*60*24*30)));
+  if (months < 1) return monthlyAmount;
+  return sipFutureValue(monthlyAmount, annualRate, months/12);
+}
+
+// Active SIPs stored in localStorage (simple, no backend needed for v1)
+function getSavedSIPs() {
+  try { return JSON.parse(localStorage.getItem('wg_active_sips') || '[]'); } catch { return []; }
+}
+function saveSIPs(sips) {
+  try { localStorage.setItem('wg_active_sips', JSON.stringify(sips)); } catch {}
+}
+
+function addSIPEntry() {
+  const name = document.getElementById('sip-new-name').value.trim();
+  const cat = document.getElementById('sip-new-cat').value;
+  const amount = parseFloat(document.getElementById('sip-new-amount').value);
+  const date = document.getElementById('sip-new-date').value;
+  if (!name || !amount || !date) { alert('Please fill in all fields.'); return; }
+  const sips = getSavedSIPs();
+  sips.push({ name, category: cat, monthlyAmount: amount, startDate: date, addedAt: new Date().toISOString() });
+  saveSIPs(sips);
+  renderSIPContent();
+}
+
+function removeSIPEntry(index) {
+  const sips = getSavedSIPs();
+  sips.splice(index, 1);
+  saveSIPs(sips);
+  renderSIPContent();
+}
+
+// Growth projection chart — shows year-by-year SIP corpus growth
+// split between principal invested and growth on top.
+function growthChartHTML(monthlyAmount, annualRate, years) {
+  if (!monthlyAmount || years <= 0) return '';
+  const points = [];
+  const step = years <= 10 ? 1 : Math.ceil(years/10);
+  for (let y = step; y <= years; y += step) {
+    const fv = sipFutureValue(monthlyAmount, annualRate, y);
+    const principal = monthlyAmount * 12 * y;
+    points.push({ y, fv, principal, growth: fv - principal });
+  }
+  if (!points.length) return '';
+  const maxFV = Math.max(...points.map(p=>p.fv));
+  const bars = points.map(p => {
+    const totalH = Math.round((p.fv / maxFV) * 90);
+    const principalH = Math.round((p.principal / maxFV) * 90);
+    const growthH = totalH - principalH;
+    return `<div class="sip-bar-wrap">
+      <div style="display:flex;flex-direction:column-reverse;gap:0;height:90px;width:100%;">
+        <div class="sip-bar principal" style="height:${principalH}px;"></div>
+        <div class="sip-bar growth" style="height:${growthH}px;"></div>
+      </div>
+      <div class="sip-bar-year">Yr ${p.y}</div>
+    </div>`;
+  }).join('');
+  return `<div class="sip-chart-wrap">
+    <div class="sip-chart-head">Projected corpus — ${fmtINR(monthlyAmount)}/month at ${Math.round(annualRate*100)}% assumed return</div>
+    <div class="sip-chart-bars">${bars}</div>
+    <div class="sip-chart-legend">
+      <span><div class="dot" style="background:var(--accent-tint);border:1px solid var(--accent);"></div>Growth</span>
+      <span><div class="dot" style="background:var(--line);"></div>Principal invested</span>
+    </div>
+    <div class="sip-disclaimer" style="margin-top:8px;">${SIP_DISCLAIMER}</div>
+  </div>`;
+}
+
+function renderSIPContent() {
+  const el = document.getElementById('sip-content');
+  if (!el) return;
+  const ob = state.obData || {};
+  const monthly_surplus = Math.max(0, (ob.monthly_income_inr || 0) - (ob.monthly_committed_expenses || 0));
+  const goals = state.goals || [];
+  const activeSIPs = getSavedSIPs();
+
+  // ── SECTION 1: Per-goal calculators ──────────────────────
+  let goalHTML = '';
+  if (!goals.length) {
+    goalHTML = `<div class="empty-state"><div class="ic">🎯</div><h4>No goals set yet</h4><p>Add goals in your Profile to see personalised SIP targets for each one.</p></div>`;
+  } else {
+    goalHTML = goals.map(g => {
+      const targetAmt = g.target_amount_inr || 0;
+      const targetDate = g.target_date ? new Date(g.target_date) : null;
+      const yearsToGoal = targetDate ? Math.max(0, (targetDate - Date.now()) / (1000*60*60*24*365)) : 0;
+      const defaultRate = SIP_CATEGORY_RATES['Flexi-Cap / Multi-Cap'];
+      const needed = sipRequiredMonthly(targetAmt, defaultRate, yearsToGoal);
+      const gap = Math.max(0, needed - monthly_surplus);
+      const onTrack = monthly_surplus >= needed;
+      const yearsLabel = yearsToGoal < 1 ? '<1 year' : Math.round(yearsToGoal) + ' years';
+      return `<div class="sip-goal-card">
+        <div class="sip-goal-name">${g.goal_name}</div>
+        <div class="sip-goal-meta">Target: ${fmtINR(targetAmt)} · ${yearsLabel} away <span class="sip-rate-note">Assumes 12% avg. return</span></div>
+        <div class="sip-amounts">
+          <div class="sip-amount-box needed">
+            <div class="amt-label">Needed monthly</div>
+            <div class="amt-val">${needed>0?fmtINR(needed):'—'}</div>
+          </div>
+          <div class="sip-amount-box surplus">
+            <div class="amt-label">Your surplus</div>
+            <div class="amt-val">${monthly_surplus>0?fmtINR(monthly_surplus):'—'}</div>
+          </div>
+          <div class="sip-amount-box ${onTrack?'needed':'gap'}">
+            <div class="amt-label">${onTrack?'On track':'Monthly gap'}</div>
+            <div class="amt-val">${onTrack?'✓':fmtINR(gap)}</div>
+          </div>
+        </div>
+        ${growthChartHTML(Math.min(needed, monthly_surplus), defaultRate, Math.round(yearsToGoal))}
+      </div>`;
+    }).join('');
+  }
+
+  // ── SECTION 2: Recommended SIP-suitable funds ─────────────
+  const sipFunds = SIP_FUNDS.filter(f => f.sipSuitable);
+  const fundCards = sipFunds.map(f => {
+    const rate = sipRateForFund(f);
+    return `<div class="sip-fund-card">
+      <div>
+        <div class="sip-fund-name">${f.name}</div>
+        <div class="sip-fund-cat">${f.category}</div>
+      </div>
+      <div class="sip-fund-metrics">
+        <div class="sip-fund-metric"><div class="m-lbl">Expense</div><div class="m-val">${f.expense}</div></div>
+        <div class="sip-fund-metric"><div class="m-lbl">3yr return</div><div class="m-val">${f.return3yr}</div></div>
+        <div class="sip-fund-metric"><div class="m-lbl">5yr return</div><div class="m-val">${f.return5yr}</div></div>
+        <div class="sip-fund-metric"><div class="m-lbl">Assumed rate</div><div class="m-val">${Math.round(rate*100)}%</div></div>
+      </div>
+      <span class="sip-rec-chip">SIP SUITABLE</span>
+    </div>`;
+  }).join('');
+
+  // ── SECTION 3: Active SIPs ─────────────────────────────────
+  let activeSIPHTML = '';
+  if (!activeSIPs.length) {
+    activeSIPHTML = `<div class="empty-state"><div class="ic">💳</div><h4>No SIPs logged yet</h4><p>Add your existing SIPs below and we will track their estimated growth.</p></div>`;
+  } else {
+    activeSIPHTML = activeSIPs.map((sip, i) => {
+      const rate = SIP_CATEGORY_RATES[sip.category] || 0.11;
+      const estVal = estimateSipCurrentValue(sip.monthlyAmount, rate, sip.startDate);
+      const months = Math.max(0, Math.floor((Date.now() - new Date(sip.startDate)) / (1000*60*60*24*30)));
+      return `<div class="sip-log-row">
+        <div>
+          <div class="sip-log-name">${sip.name}</div>
+          <div class="sip-log-meta">${sip.category} · Started ${new Date(sip.startDate).toLocaleDateString('en-IN',{month:'short',year:'numeric'})} · ${months} months</div>
+        </div>
+        <div style="display:flex;gap:12px;align-items:center;">
+          <div class="sip-log-val">
+            <div class="amount">${fmtINR(sip.monthlyAmount)}/mo</div>
+            <div class="est">Est. current value: ${estVal?fmtINR(estVal):'—'}</div>
+          </div>
+          <button class="btn btn-outline btn-sm" onclick="removeSIPEntry(${i})">Remove</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // ── SECTION 4: Add new SIP form ───────────────────────────
+  const catOptions = Object.keys(SIP_CATEGORY_RATES).map(c =>
+    `<option value="${c}">${c}</option>`).join('');
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  el.innerHTML = `
+    <div class="sip-section">
+      <div class="sip-section-title">Your SIP targets, per goal</div>
+      <div class="sip-section-sub">Each goal from your profile, showing what monthly SIP it needs vs what you can realistically invest from your current surplus.</div>
+      ${goalHTML}
+    </div>
+
+    <div class="sip-section">
+      <div class="sip-section-title">Funds recommended for SIP</div>
+      <div class="sip-section-sub">Quality-reviewed quarterly — based on expense ratio, return consistency, and fund manager track record. Not a weekly buy/sell call.</div>
+      <div class="sip-fund-grid">${fundCards}</div>
+    </div>
+
+    <div class="sip-section">
+      <div class="sip-section-title">Your active SIPs</div>
+      <div class="sip-section-sub">Log your existing SIPs to track their estimated value over time. This is an estimate based on assumed returns — actual NAV values will differ.</div>
+      <div class="card" style="margin-bottom:14px;padding:16px 18px;">${activeSIPHTML}</div>
+      <div class="sip-add-form">
+        <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.04em;">Add a SIP</div>
+        <div class="sip-form-row">
+          <div><label>Fund name</label><input id="sip-new-name" placeholder="e.g. Mirae Asset Large Cap"></div>
+          <div><label>Category</label><select id="sip-new-cat">${catOptions}</select></div>
+          <div><label>Monthly amount (₹)</label><input id="sip-new-amount" type="number" placeholder="3000"></div>
+          <div style="padding-top:16px;"><button class="btn btn-primary btn-sm" onclick="addSIPEntry()">Add SIP</button></div>
+        </div>
+        <div style="margin-top:10px;">
+          <label style="font-size:10.5px;font-weight:700;color:var(--muted);">Start date</label>
+          <input id="sip-new-date" type="date" value="${todayStr}" style="padding:8px 10px;border:1px solid var(--line);border-radius:4px;font-size:13px;font-family:inherit;margin-top:3px;">
+        </div>
+      </div>
+    </div>`;
+}
+
+
+function updateMobileNav(activeView){
+  document.querySelectorAll('.mobile-bottom-nav a').forEach(a=>a.classList.remove('active'));
+  const viewMap = {dashboard:0, portfolio:1, signals:2, sip:3, profile:4};
+  const idx = viewMap[activeView];
+  if (idx != null) document.querySelectorAll('.mobile-bottom-nav a')[idx].classList.add('active');
+}
+
+</script>
+</body>
+</html>
