@@ -43,6 +43,47 @@ const DEMO_YAHOO = {
   SILVER_USD_OZ: { price: 30.80, change_pct: 0.85 },
 };
 
+// ── SUPABASE-BACKED PRICE CACHE ────────────────────────────
+// The real fix for data reverting after Render restarts.
+// In-memory cache (_snapshotCache) resets every time the free-tier
+// server spins down. This layer persists the last verified-live Yahoo
+// prices to Supabase so restarts always serve real data, not stale
+// hardcoded placeholders from months ago.
+const YAHOO_CACHE_KEY = 'yahoo_prices_v1';
+
+async function loadYahooCacheFromSupabase() {
+  if (!supabaseAdmin) return null;
+  try {
+    const { data } = await supabaseAdmin
+      .from('market_cache')
+      .select('data, updated_at')
+      .eq('cache_key', YAHOO_CACHE_KEY)
+      .single();
+    if (!data) return null;
+    const ageMs = Date.now() - new Date(data.updated_at).getTime();
+    // Use cached value if it's less than 6 hours old — old enough to
+    // survive overnight restarts, fresh enough to track real trends.
+    if (ageMs < 6 * 60 * 60 * 1000) {
+      console.log(`   Using Supabase-cached Yahoo prices (${Math.round(ageMs/60000)} min old)`);
+      return data.data;
+    }
+    return null;
+  } catch { return null; }
+}
+
+async function saveYahooCacheToSupabase(prices) {
+  if (!supabaseAdmin) return;
+  try {
+    await supabaseAdmin.from('market_cache').upsert({
+      cache_key: YAHOO_CACHE_KEY,
+      data: prices,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'cache_key' });
+  } catch (e) {
+    console.warn('Could not save Yahoo prices to Supabase cache:', e.message);
+  }
+}
+
 const DEMO_MF_NAV = {
   'MF-MIRAE-LC':    { nav: 94.23, date: '2026-08-25', fund_name: 'Mirae Asset Large Cap Fund' },
   'MF-SBI-BC':      { nav: 64.18, date: '2026-08-25', fund_name: 'SBI Bluechip Fund' },
@@ -316,11 +357,29 @@ async function refreshAllMarketData() {
     getSensex(),
     getUsdInr(),
   ]);
-  // Gold/Silver conversion needs the USD/INR rate we just fetched
   const [gold, silver] = await Promise.all([
     getGoldINR(usdInr.price),
     getSilverINR(usdInr.price),
   ]);
+
+  // If Yahoo returned live prices, save them to Supabase so the next
+  // server restart can use them instead of hardcoded placeholders.
+  const yahooLive = [sensex, usdInr, gold, silver].every(x => x.source === 'yahoo_live');
+  if (yahooLive) {
+    await saveYahooCacheToSupabase({ sensex, usdInr, gold, silver, savedAt: new Date().toISOString() });
+    console.log('   ✓ Live Yahoo prices saved to Supabase cache');
+  } else {
+    // Yahoo failed this cycle — try Supabase-cached prices before
+    // falling all the way back to the hardcoded placeholder numbers.
+    const cached = await loadYahooCacheFromSupabase();
+    if (cached) {
+      if (sensex.source === 'demo' && cached.sensex) Object.assign(sensex, cached.sensex, { source: 'supabase_cache' });
+      if (usdInr.source === 'demo' && cached.usdInr) Object.assign(usdInr, cached.usdInr, { source: 'supabase_cache' });
+      if (gold.source === 'demo' && cached.gold) Object.assign(gold, cached.gold, { source: 'supabase_cache' });
+      if (silver.source === 'demo' && cached.silver) Object.assign(silver, cached.silver, { source: 'supabase_cache' });
+    }
+  }
+
   const regime = classifyVIXRegime(vix);
   const snapshot = { nifty, vix, vixRegime: regime, flows, macro, sensex, usdInr, gold, silver, refreshedAt: new Date().toISOString() };
   console.log(`   Nifty: ${nifty.price} | Sensex: ${sensex.price} [${sensex.source}] | VIX: ${vix} [${regime.regime}]`);
