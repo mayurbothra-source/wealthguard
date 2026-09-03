@@ -1,121 +1,207 @@
+/**
+ * WealthGuard Auth Routes
+ * POST /api/auth/login     — phone_wa + pin → returns client data
+ * POST /api/auth/set-pin   — client_id + pin → hashes and stores
+ * POST /api/auth/register  — creates new client record (no PIN yet)
+ * POST /api/auth/check     — checks if phone_wa exists (for login screen UX)
+ */
+
 const express = require('express');
+const bcrypt = require('bcrypt');
 const router = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const crypto = require('crypto');
 
-// POST /api/auth/register — Client onboarding
-router.post('/register', async (req, res) => {
-  try {
-    const {
-      full_name, email, phone_wa, age, income_type, monthly_income_inr,
-      monthly_committed_expenses, marital_status, num_children, dependents_json,
-      health_status, health_insurance_cover_inr, term_cover_inr,
-      has_critical_illness_cover, stated_risk_score, panic_history,
-      portfolio_check_frequency, money_relationship, sleep_test_threshold_pct,
-      goals, tax_bracket,
-    } = req.body;
+const BCRYPT_ROUNDS = 10;
+const MAX_PIN_ATTEMPTS = 5;
+const LOCKOUT_MINUTES = 15;
+const PIN_LENGTH = 6;
 
-    if (!full_name || !phone_wa) {
-      return res.status(400).json({ error: 'Name and WhatsApp number required' });
-    }
+// ── HELPERS ─────────────────────────────────────────────────
 
-    // Demo mode — return mock client
-    if (!supabaseAdmin) {
-      const mockClient = {
-        id: crypto.randomUUID(),
-        full_name, email, phone_wa, tax_bracket: tax_bracket || 30,
-        kyc_status: 'pending',
-        onboarded_at: new Date().toISOString(),
-      };
-      return res.json({ success: true, client: mockClient, demo: true });
-    }
+function isValidPin(pin) {
+  return typeof pin === 'string' && /^\d{6}$/.test(pin);
+}
 
-    // Create client
-    const { data: client, error: clientErr } = await supabaseAdmin
-      .from('clients').insert({ full_name, email, phone_wa, tax_bracket: tax_bracket || 30 })
-      .select().single();
-    if (clientErr) throw clientErr;
+async function getClientByPhone(phone_wa) {
+  if (!supabaseAdmin) return null;
+  const { data, error } = await supabaseAdmin
+    .from('clients')
+    .select('*')
+    .eq('phone_wa', phone_wa.trim())
+    .single();
+  if (error || !data) return null;
+  return data;
+}
 
-    // Compute client tier
-    const income = monthly_income_inr || 0;
-    const tier = income >= 200000 ? 'hni' : income >= 30000 ? 'wealth_builder' : income >= 50000 ? 'builder' : 'starter';
+// Strips sensitive fields before sending client data to the frontend.
+// The pin_hash must NEVER leave the backend under any circumstance.
+function sanitiseClient(client) {
+  const { pin_hash, pin_attempts, pin_locked_until, ...safe } = client;
+  return safe;
+}
 
-    // Compute protection gaps
-    const protectionGaps = [];
-    if (!health_insurance_cover_inr || health_insurance_cover_inr < 500000) protectionGaps.push({ gap: 'health_insurance', severity: 'high', message: 'Health cover below ₹5L per family member' });
-    if (!term_cover_inr && num_children > 0) protectionGaps.push({ gap: 'term_life', severity: 'critical', message: 'No term life cover with dependents — protect your family first' });
-    if (!has_critical_illness_cover) protectionGaps.push({ gap: 'critical_illness', severity: 'medium', message: 'Critical illness cover recommended' });
-
-    // Create life profile
-    await supabaseAdmin.from('client_life_profiles').insert({
-      client_id: client.id, age, income_type, monthly_income_inr,
-      monthly_committed_expenses, marital_status, num_children,
-      dependents_json: dependents_json || [], health_status: health_status || 'good',
-      health_insurance_cover_inr, term_cover_inr, has_critical_illness_cover: has_critical_illness_cover || false,
-      protection_gaps_json: protectionGaps, client_tier: tier, income_stability: 'stable',
-    });
-
-    // Compute effective risk score with behavioural adjustment
-    let effectiveRisk = stated_risk_score || 5;
-    if (panic_history) effectiveRisk = Math.max(1, effectiveRisk - 2);
-    if (portfolio_check_frequency === 'multiple_daily') effectiveRisk = Math.max(1, effectiveRisk - 1);
-    if (money_relationship === 'security') effectiveRisk = Math.max(1, effectiveRisk - 1);
-    if (money_relationship === 'growth') effectiveRisk = Math.min(10, effectiveRisk + 1);
-
-    const riskCategory = effectiveRisk <= 3 ? 'conservative' : effectiveRisk <= 6 ? 'moderate' : 'aggressive';
-    const stabilityThreshold = sleep_test_threshold_pct ? sleep_test_threshold_pct * 0.7 : 10;
-
-    await supabaseAdmin.from('client_behavioural_profiles').insert({
-      client_id: client.id, stated_risk_score: stated_risk_score || 5,
-      effective_risk_score: effectiveRisk, panic_history: panic_history || false,
-      portfolio_check_frequency: portfolio_check_frequency || 'weekly',
-      money_relationship: money_relationship || 'security',
-      sleep_test_threshold_pct: sleep_test_threshold_pct || 15,
-      stability_intervention_threshold_pct: stabilityThreshold,
-      max_single_position_pct: effectiveRisk <= 3 ? 8 : effectiveRisk <= 6 ? 10 : 15,
-      max_drawdown_tolerance_pct: effectiveRisk <= 3 ? 10 : effectiveRisk <= 6 ? 20 : 30,
-    });
-
-    // Create goals
-    if (goals && goals.length > 0) {
-      for (const goal of goals) {
-        if (!goal.goal_name || !goal.target_amount_inr) continue;
-        const type = goal.goal_name.toLowerCase().includes('emergency') ? 'emergency'
-          : parseInt(goal.years_to_target) <= 3 ? 'short'
-          : parseInt(goal.years_to_target) <= 7 ? 'medium' : 'long';
-        await supabaseAdmin.from('client_goals').insert({
-          client_id: client.id,
-          goal_name: goal.goal_name,
-          goal_type: type,
-          target_amount_inr: goal.target_amount_inr,
-          target_date: goal.target_date,
-          priority_rank: goal.priority || 1,
-          is_non_negotiable: type === 'emergency',
-        });
-      }
-    }
-
-    // Log profile creation event
-    await supabaseAdmin.from('profile_change_events').insert({
-      client_id: client.id, event_type: 'initial',
-      trigger_description: 'Client onboarded via WealthGuard platform',
-      fields_changed_json: { all: 'initial_setup' },
-    });
-
-    res.json({ success: true, client_id: client.id, client, tier, effective_risk_score: effectiveRisk, protection_gaps: protectionGaps });
-  } catch (err) {
-    console.error('Register error:', err);
-    res.status(500).json({ error: err.message });
+// ── POST /api/auth/check ─────────────────────────────────────
+// Lets the login screen check if a phone number exists before asking
+// for a PIN — avoids exposing which numbers are registered by keeping
+// the response vague when the number doesn't exist.
+router.post('/check', async (req, res) => {
+  const { phone_wa } = req.body;
+  if (!phone_wa) return res.status(400).json({ error: 'phone_wa required' });
+  const client = await getClientByPhone(phone_wa);
+  if (!client) {
+    // Deliberate vague response — don't confirm whether the number exists
+    return res.json({ exists: false, pin_set: false });
   }
+  res.json({ exists: true, pin_set: !!client.pin_set });
 });
 
-// POST /api/auth/login — Simple phone-based lookup (demo)
+// ── POST /api/auth/login ─────────────────────────────────────
 router.post('/login', async (req, res) => {
-  const { phone_wa } = req.body;
-  if (!supabaseAdmin) return res.json({ success: true, demo: true });
-  const { data, error } = await supabaseAdmin.from('clients').select('*').eq('phone_wa', phone_wa).single();
-  if (error || !data) return res.status(404).json({ error: 'Client not found' });
-  res.json({ success: true, client: data });
+  const { phone_wa, pin } = req.body;
+  if (!phone_wa || !pin) {
+    return res.status(400).json({ error: 'phone_wa and pin are required' });
+  }
+
+  const client = await getClientByPhone(phone_wa);
+  if (!client) {
+    // Same response shape as a wrong PIN — don't leak whether the account exists
+    return res.status(401).json({ error: 'Incorrect phone number or PIN. Please try again.' });
+  }
+
+  // Check lockout
+  if (client.pin_locked_until && new Date(client.pin_locked_until) > new Date()) {
+    const minutesLeft = Math.ceil((new Date(client.pin_locked_until) - Date.now()) / 60000);
+    return res.status(429).json({
+      error: `Account temporarily locked after too many incorrect attempts. Try again in ${minutesLeft} minute${minutesLeft !== 1 ? 's' : ''}.`,
+      locked: true,
+      locked_until: client.pin_locked_until,
+    });
+  }
+
+  // If no PIN set yet, allow login but flag that PIN setup is required
+  if (!client.pin_set || !client.pin_hash) {
+    return res.json({
+      success: true,
+      pin_setup_required: true,
+      client: sanitiseClient(client),
+      message: 'Please set a 6-digit PIN to secure your account.',
+    });
+  }
+
+  // Verify PIN against stored bcrypt hash
+  const pinValid = await bcrypt.compare(String(pin), client.pin_hash);
+
+  if (!pinValid) {
+    const newAttempts = (client.pin_attempts || 0) + 1;
+    const shouldLock = newAttempts >= MAX_PIN_ATTEMPTS;
+    const updatePayload = {
+      pin_attempts: newAttempts,
+      pin_locked_until: shouldLock
+        ? new Date(Date.now() + LOCKOUT_MINUTES * 60 * 1000).toISOString()
+        : null,
+    };
+    await supabaseAdmin.from('clients').update(updatePayload).eq('id', client.id);
+
+    if (shouldLock) {
+      return res.status(429).json({
+        error: `Incorrect PIN. Account locked for ${LOCKOUT_MINUTES} minutes after ${MAX_PIN_ATTEMPTS} failed attempts.`,
+        locked: true,
+      });
+    }
+    const remaining = MAX_PIN_ATTEMPTS - newAttempts;
+    return res.status(401).json({
+      error: `Incorrect PIN. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining before temporary lockout.`,
+    });
+  }
+
+  // Success — reset attempt counter and return client data
+  await supabaseAdmin.from('clients').update({
+    pin_attempts: 0,
+    pin_locked_until: null,
+    last_login_at: new Date().toISOString(),
+  }).eq('id', client.id);
+
+  res.json({ success: true, client: sanitiseClient(client) });
+});
+
+// ── POST /api/auth/set-pin ───────────────────────────────────
+router.post('/set-pin', async (req, res) => {
+  const { client_id, pin, confirm_pin } = req.body;
+  if (!client_id || !pin) {
+    return res.status(400).json({ error: 'client_id and pin are required' });
+  }
+  if (!isValidPin(String(pin))) {
+    return res.status(400).json({ error: 'PIN must be exactly 6 digits.' });
+  }
+  if (confirm_pin && String(pin) !== String(confirm_pin)) {
+    return res.status(400).json({ error: 'PINs do not match. Please try again.' });
+  }
+
+  const hash = await bcrypt.hash(String(pin), BCRYPT_ROUNDS);
+  const { error } = await supabaseAdmin.from('clients').update({
+    pin_hash: hash,
+    pin_set: true,
+    pin_attempts: 0,
+    pin_locked_until: null,
+  }).eq('id', client_id);
+
+  if (error) return res.status(500).json({ error: 'Could not save PIN: ' + error.message });
+  res.json({ success: true, message: 'PIN set successfully.' });
+});
+
+// ── POST /api/auth/change-pin ─────────────────────────────────
+// Requires the current PIN before allowing a change.
+router.post('/change-pin', async (req, res) => {
+  const { client_id, current_pin, new_pin } = req.body;
+  if (!client_id || !current_pin || !new_pin) {
+    return res.status(400).json({ error: 'client_id, current_pin, and new_pin are required' });
+  }
+  if (!isValidPin(String(new_pin))) {
+    return res.status(400).json({ error: 'New PIN must be exactly 6 digits.' });
+  }
+
+  const { data: client } = await supabaseAdmin
+    .from('clients').select('pin_hash,pin_set').eq('id', client_id).single();
+  if (!client || !client.pin_hash) {
+    return res.status(400).json({ error: 'No PIN set on this account.' });
+  }
+
+  const currentValid = await bcrypt.compare(String(current_pin), client.pin_hash);
+  if (!currentValid) {
+    return res.status(401).json({ error: 'Current PIN is incorrect.' });
+  }
+
+  const newHash = await bcrypt.hash(String(new_pin), BCRYPT_ROUNDS);
+  await supabaseAdmin.from('clients').update({ pin_hash: newHash, pin_attempts: 0 }).eq('id', client_id);
+  res.json({ success: true, message: 'PIN changed successfully.' });
+});
+
+// ── POST /api/auth/register ──────────────────────────────────
+// Creates the initial client record (no PIN yet — PIN is set after
+// onboarding in a dedicated /set-pin step).
+router.post('/register', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Database not configured.' });
+  }
+  const { phone_wa, full_name, ...rest } = req.body;
+  if (!phone_wa || !full_name) {
+    return res.status(400).json({ error: 'phone_wa and full_name are required' });
+  }
+
+  // Check for duplicate
+  const existing = await getClientByPhone(phone_wa);
+  if (existing) {
+    return res.status(409).json({ error: 'An account with this phone number already exists.' });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('clients')
+    .insert({ phone_wa, full_name, ...rest, pin_set: false, onboarding_complete: false })
+    .select('id')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true, client_id: data.id });
 });
 
 module.exports = router;
