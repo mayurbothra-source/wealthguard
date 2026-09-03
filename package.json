@@ -12,6 +12,7 @@
   "author": "WealthGuard",
   "license": "UNLICENSED",
   "dependencies": {
+    "bcrypt": "^5.1.1",
     "razorpay": "^2.9.2",
     "@anthropic-ai/sdk": "^0.120.0",
     "@google/generative-ai": "^0.24.1",
