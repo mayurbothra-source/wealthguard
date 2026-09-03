@@ -58,8 +58,8 @@ router.post('/check', async (req, res) => {
 // ── POST /api/auth/login ─────────────────────────────────────
 router.post('/login', async (req, res) => {
   const { phone_wa, pin } = req.body;
-  if (!phone_wa || !pin) {
-    return res.status(400).json({ error: 'phone_wa and pin are required' });
+  if (!phone_wa) {
+    return res.status(400).json({ error: 'phone_wa is required' });
   }
 
   const client = await getClientByPhone(phone_wa);
