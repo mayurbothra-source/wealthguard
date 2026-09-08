@@ -40,6 +40,7 @@ app.use('/api/brief',        require('./routes/brief'));
 app.use('/api/goals',        require('./routes/goals'));
 app.use('/api/whatsapp',     require('./routes/whatsapp'));
 app.use('/api/payments',     require('./routes/payments'));
+app.use('/api/admin',        require('./routes/admin'));
 
 // ── FRONTEND SPA fallback ─────────────────────────
 // Uses app.use() with no path pattern at all, instead of app.get('*', ...).
