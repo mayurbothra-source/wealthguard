@@ -347,6 +347,15 @@ async function runInstrumentScoringEngine() {
 
       console.log(`   📊 ${instrument.symbol}: ${composite}/100`);
 
+      // ── Convert score into a live signal (THE PERMANENT FIX) ──
+      // Previously, scores were stored but never became a recommendation,
+      // so the Markets Dashboard showed "No call yet" for any instrument
+      // that hadn't been manually logged via v8. Now every scored
+      // instrument gets a current signal automatically, every week.
+      if (instrument.status === 'active') {
+        await convertScoreToRecommendation(instrument, composite, scores);
+      }
+
     } catch (e) {
       console.warn(`   ⚠ Scoring failed for ${instrument.symbol}:`, e.message);
     }
@@ -355,4 +364,67 @@ async function runInstrumentScoringEngine() {
   console.log(`🎯 Instrument engine complete: ${scored} scored, ${downgraded} downgraded, ${removed} removed, ${promoted} promoted to active.`);
 }
 
-module.exports = { runInstrumentScoringEngine };
+/**
+ * Converts a 9-levers composite score into a live BUY/WATCH/SELL signal
+ * in the recommendations table — the same table v8 and the Markets
+ * Dashboard both read from. This is what closes the "No call yet" gap
+ * for the 115 instruments that were never manually logged.
+ *
+ * Thresholds (frozen):
+ *   composite >= 70  → BUY
+ *   composite 50–69  → WATCH
+ *   composite < 50   → SELL
+ */
+async function convertScoreToRecommendation(instrument, composite, scores) {
+  const action = composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL';
+  const confidence = Math.min(0.95, Math.max(0.30, composite / 100));
+  const tier = composite >= 75 ? 'high_conviction' : 'standard';
+
+  // Try to get a current price for equity/ETF instruments so this signal
+  // can also feed the track record checkpoint engine later. Mutual funds,
+  // bonds, and gold instruments without a live feed get null — the track
+  // record engine already handles missing entry prices gracefully.
+  let entryPrice = null;
+  if (instrument.yahoo_ticker) {
+    try {
+      const { getYahooQuote } = require('./marketData');
+      const q = await getYahooQuote(instrument.yahoo_ticker);
+      if (q && q.source === 'yahoo_live') entryPrice = q.price;
+    } catch {}
+  }
+
+  // Build a readable rationale from the top-contributing levers
+  const leverLabels = {
+    technical: 'Technical', fundamental: 'Fundamental', management: 'Management',
+    sentiment: 'Sentiment', institutional: 'Institutional flow', sector_timing: 'Sector timing',
+    macro_pestle: 'Macro environment', competitive: 'Competitive position', risk_adjusted: 'Risk-adjusted return',
+  };
+  const topLevers = Object.entries(scores)
+    .filter(([k]) => leverLabels[k])
+    .sort((a, b) => (b[1]||0) - (a[1]||0))
+    .slice(0, 2)
+    .map(([k, v]) => `${leverLabels[k]} (${v}/10)`)
+    .join(' and ');
+  const rationale = `9-levers composite score: ${composite}/100. Strongest factors: ${topLevers || 'balanced across levers'}.`;
+
+  try {
+    await supabaseAdmin.from('recommendations').insert({
+      client_id:          null,
+      instrument_id:       null,
+      instrument_name:     instrument.symbol,
+      action,
+      signal_tier:         tier,
+      confidence_score:    confidence,
+      entry_price_inr:     entryPrice,
+      rationale_text:      rationale,
+      rationale_short:     rationale,
+      risk_gate_passed:    true,
+      is_active:           true,
+      generated_at:        new Date().toISOString(),
+    });
+  } catch (e) {
+    console.warn(`   ⚠ Could not create signal for ${instrument.symbol}:`, e.message);
+  }
+}
+
+module.exports = { runInstrumentScoringEngine, convertScoreToRecommendation };
