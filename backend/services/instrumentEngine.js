@@ -7,7 +7,60 @@
  */
 
 const { supabaseAdmin } = require('../../config/supabase');
-const { getYahooQuote, getNSEQuote, getMacroIndicators } = require('./marketData');
+const { getYahooQuote, getNSEQuote, getMacroIndicators, getMFNav } = require('./marketData');
+const axios = require('axios');
+
+// ── SMART PRICE FETCHER ───────────────────────────────────────
+// Routes each instrument to the correct price source based on the
+// price_source column set in fix_instrument_data.sql:
+//   'yahoo'  → Yahoo Finance (.NS ticker)
+//   'mfapi'  → MFAPI.in via getMFNav (already proven in production)
+//   'static' → stored face/reference value (bonds — no live feed)
+//   'nse'    → NSE direct (equity fallback)
+async function fetchInstrumentPrice(instrument) {
+  const source = instrument.price_source;
+
+  // ── Static (bonds, G-Secs, SGBs) ─────────────────────────
+  if (source === 'static') {
+    if (instrument.static_price) {
+      return { price: instrument.static_price, change_pct: 0, source: 'static_reference' };
+    }
+    return null;
+  }
+
+  // ── Mutual Funds via MFAPI ────────────────────────────────
+  // Uses the same getMFNav function already proven in production
+  // (marketData.js uses this successfully for live NAV fetching).
+  if (source === 'mfapi' && instrument.amfi_code) {
+    try {
+      const nav = await getMFNav(instrument.amfi_code);
+      if (nav && nav.nav) {
+        return { price: nav.nav, change_pct: 0, source: 'mfapi_live' };
+      }
+    } catch (e) {
+      console.warn(`   ⚠ MFAPI failed for ${instrument.symbol}: ${e.message}`);
+    }
+    return null;
+  }
+
+  // ── Equity / ETF via Yahoo Finance ────────────────────────
+  if (instrument.yahoo_ticker) {
+    try {
+      const q = await getYahooQuote(instrument.yahoo_ticker);
+      if (q && q.source === 'yahoo_live') return q;
+    } catch {}
+  }
+
+  // ── Equity fallback: NSE direct ───────────────────────────
+  if (instrument.exchange === 'NSE' && instrument.instrument_type === 'equity') {
+    try {
+      const q = await getNSEQuote(instrument.symbol);
+      if (q && q.source === 'nse_live') return q;
+    } catch {}
+  }
+
+  return null; // honestly unavailable — never fake data
+}
 
 // Score thresholds per risk action
 const SCORE_DOWNGRADE  = 55; // drop below this → move down one category
@@ -63,19 +116,7 @@ async function scoreInstrument(instrument, macroData) {
     risk_adjusted:null,
   };
 
-  let priceData = null;
-  if (instrument.yahoo_ticker) {
-    try {
-      const q = await getYahooQuote(instrument.yahoo_ticker);
-      if (q && q.source === 'yahoo_live') priceData = q;
-    } catch {}
-  }
-  if (!priceData && instrument.exchange === 'NSE') {
-    try {
-      const q = await getNSEQuote(instrument.symbol);
-      if (q && q.source === 'nse_live') priceData = q;
-    } catch {}
-  }
+  let priceData = await fetchInstrumentPrice(instrument);
 
   // ── Lever 1: Technical ────────────────────────────────────
   // Uses 1-day price change as a proxy when full history is unavailable.
@@ -345,7 +386,7 @@ async function runInstrumentScoringEngine() {
         }
       }
 
-      console.log(`   📊 ${instrument.symbol}: ${composite}/100`);
+      console.log(`   📊 ${instrument.symbol}: ${composite}/100 [${instrument.price_source||'yahoo'}]`);
 
       // ── Convert score into a live signal (THE PERMANENT FIX) ──
       // Previously, scores were stored but never became a recommendation,
@@ -380,18 +421,12 @@ async function convertScoreToRecommendation(instrument, composite, scores) {
   const confidence = Math.min(0.95, Math.max(0.30, composite / 100));
   const tier = composite >= 75 ? 'high_conviction' : 'standard';
 
-  // Try to get a current price for equity/ETF instruments so this signal
-  // can also feed the track record checkpoint engine later. Mutual funds,
-  // bonds, and gold instruments without a live feed get null — the track
-  // record engine already handles missing entry prices gracefully.
+  // Get current price using the smart source router
   let entryPrice = null;
-  if (instrument.yahoo_ticker) {
-    try {
-      const { getYahooQuote } = require('./marketData');
-      const q = await getYahooQuote(instrument.yahoo_ticker);
-      if (q && q.source === 'yahoo_live') entryPrice = q.price;
-    } catch {}
-  }
+  try {
+    const priceData = await fetchInstrumentPrice(instrument);
+    if (priceData) entryPrice = priceData.price;
+  } catch {}
 
   // Build a readable rationale from the top-contributing levers
   const leverLabels = {
