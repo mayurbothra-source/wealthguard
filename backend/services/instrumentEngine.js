@@ -333,8 +333,10 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
     `Signal generated automatically — review alongside any active AI lever flags.`;
 
   // Deactivate previous engine-generated signals for this instrument only.
-  // Engine signals: instrument_id IS NULL and client_id IS NULL.
-  // This never touches manually-logged v8 signals (instrument_id is set there).
+  // Engine signals are identified by: instrument_id IS NULL, client_id IS NULL,
+  // AND generated_at within the last 8 days (never touch older manual predictions
+  // that the track record engine still needs to resolve at their checkpoints).
+  const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
   try {
     await supabaseAdmin
       .from('recommendations')
@@ -342,9 +344,9 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
       .eq('instrument_name', instrument.symbol)
       .is('instrument_id', null)
       .is('client_id', null)
-      .eq('is_active', true);
+      .eq('is_active', true)
+      .gte('generated_at', eightDaysAgo); // only touch recent engine signals
   } catch (e) {
-    // Non-fatal — old signals not deactivated, but new signal still inserted
     console.warn(`   ⚠ Could not deactivate old signals for ${instrument.symbol}: ${e.message}`);
   }
 
