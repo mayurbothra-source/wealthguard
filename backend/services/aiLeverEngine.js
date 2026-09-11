@@ -18,7 +18,7 @@ const genAI = process.env.GOOGLE_API_KEY
   ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY)
   : null;
 
-const MODEL = 'gemini-1.5-flash'; // free tier
+const MODEL = 'gemini-2.0-flash'; // free tier — updated Sept 2026
 const SCAN_START = Date.now();
 let geminiCallsUsed = 0;
 
