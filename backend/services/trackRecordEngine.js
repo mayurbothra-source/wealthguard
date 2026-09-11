@@ -22,15 +22,45 @@ const CHECKPOINTS = [
 // of outcomes is logged, reduce this back to 2 for precision going forward.
 const CHECKPOINT_TOLERANCE_DAYS = 14;
 
+// Map of non-symbol instrument names to their Yahoo Finance tickers.
+// These are instruments logged via v8 using plain names rather than
+// NSE symbols — Gold, mutual funds, etc.
+const NAME_TO_YAHOO = {
+  'Gold':                   'GC=F',
+  'Silver':                 'SI=F',
+  'Nifty 50':               '^NSEI',
+  'Nifty':                  '^NSEI',
+  'Sensex':                 '^BSESN',
+  'Invesco India Smallcap': null,  // MF — no Yahoo ticker, skip
+};
+
 /**
  * Fetch the current market price for a given instrument.
- * Tries NSE first, falls back to Yahoo Finance.
- * Returns null (never fake data) if both fail.
+ * Handles both NSE symbols (HDFCBANK, RELIANCE) and plain names
+ * (Gold, Invesco India Smallcap) that v8 logs use.
+ * Returns null (never fake data) if price unavailable.
  */
 async function fetchCurrentPrice(rec) {
   const symbol = rec.instrument_name;
 
-  // Try NSE for equity symbols
+  // Check if this is a known non-symbol name first
+  if (Object.prototype.hasOwnProperty.call(NAME_TO_YAHOO, symbol)) {
+    const yahooTicker = NAME_TO_YAHOO[symbol];
+    if (!yahooTicker) {
+      console.warn(`   ⚠ ${symbol}: no Yahoo ticker available — checkpoint skipped`);
+      return null;
+    }
+    try {
+      const q = await getYahooQuote(yahooTicker);
+      if (q && q.source === 'yahoo_live' && q.price) {
+        return { price: q.price, source: 'yahoo_live' };
+      }
+    } catch {}
+    console.warn(`   ⚠ ${symbol}: Yahoo fetch failed — checkpoint skipped`);
+    return null;
+  }
+
+  // Standard NSE equity symbol — try NSE first, then Yahoo .NS
   try {
     const nseData = await getNSEQuote(symbol);
     if (nseData && nseData.source === 'nse_live' && nseData.price) {
@@ -38,22 +68,14 @@ async function fetchCurrentPrice(rec) {
     }
   } catch {}
 
-  // Try Yahoo Finance (.NS suffix for NSE-listed instruments)
   try {
     const yahooSymbol = symbol.includes('.') ? symbol : symbol + '.NS';
     const yahooData = await getYahooQuote(yahooSymbol);
     if (yahooData && yahooData.source === 'yahoo_live' && yahooData.price) {
       return { price: yahooData.price, source: 'yahoo_live' };
     }
-    // Also try .BO (BSE) if .NS fails
-    const yahooDataBSE = await getYahooQuote(symbol + '.BO');
-    if (yahooDataBSE && yahooDataBSE.source === 'yahoo_live' && yahooDataBSE.price) {
-      return { price: yahooDataBSE.price, source: 'yahoo_live_bse' };
-    }
   } catch {}
 
-  // For mutual funds, gold, bonds — price not available via NSE/Yahoo
-  // These need manual price entry for now (flagged in logs)
   console.warn(`   ⚠ No live price available for ${symbol} — checkpoint skipped`);
   return null;
 }
@@ -153,12 +175,14 @@ async function runTrackRecordCheckpoints() {
       const returnPct = ((priceData.price - pred.entry_price_inr) / pred.entry_price_inr) * 100;
       const correct = isDirectionCorrect(pred.action, returnPct);
 
-      // Build the outcome row — only the relevant checkpoint field is set
+      // Build the outcome row — only the relevant checkpoint field is set.
+      // client_id is explicitly set to null for house calls — the column
+      // allows null for house-level outcomes (client-specific outcomes
+      // reference an actual client_id).
       const outcomeRow = {
         recommendation_id: pred.id,
+        client_id:         null,
         direction_correct: correct,
-        actual_price_inr:  priceData.price,
-        price_source:      priceData.source,
         measured_at:       now.toISOString(),
         [checkpoint.field]: parseFloat(returnPct.toFixed(2)),
       };
