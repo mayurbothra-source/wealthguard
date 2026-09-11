@@ -95,12 +95,19 @@ async function runTrackRecordCheckpoints() {
 
   const now = new Date();
 
-  // Fetch all house predictions (client_id IS NULL = general/house calls)
+  // Fetch all house predictions that need checkpoint resolution.
+  // Critically: we do NOT filter by is_active here.
+  // The scoring engine deactivates old signals when it generates new ones,
+  // but a prediction that has been deactivated still needs its 7/30/90-day
+  // checkpoints resolved — deactivation means "superseded by a newer signal",
+  // not "this prediction never happened."
+  // We identify predictions that still need resolution by checking whether
+  // recommendation_outcomes rows exist for them at each checkpoint.
   const { data: predictions, error } = await supabaseAdmin
     .from('recommendations')
     .select('id, instrument_name, action, entry_price_inr, generated_at, confidence_score')
     .is('client_id', null)
-    .eq('is_active', true)
+    .not('entry_price_inr', 'is', null)  // must have an entry price to calculate return
     .order('generated_at', { ascending: false })
     .limit(500);
 
