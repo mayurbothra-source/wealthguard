@@ -16,8 +16,11 @@ const CHECKPOINTS = [
   { days: 90, field: 'return_3m_pct',  label: 'Quarterly' },
 ];
 
-// Tolerance window — check fires if within ±2 days of the target day
-const CHECKPOINT_TOLERANCE_DAYS = 2;
+// Tolerance window — check fires if within ±2 days of the target day.
+// For the first run we use a wider window (±14 days) to catch any checkpoints
+// that were missed while the engine was being set up. Once the first batch
+// of outcomes is logged, reduce this back to 2 for precision going forward.
+const CHECKPOINT_TOLERANCE_DAYS = 14;
 
 /**
  * Fetch the current market price for a given instrument.
