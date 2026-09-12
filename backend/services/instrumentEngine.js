@@ -31,6 +31,9 @@
 
 const { supabaseAdmin } = require('../../config/supabase');
 const { getYahooQuote, getNSEQuote, getMacroIndicators, getMFNav } = require('./marketData');
+const { runRiskGate, createGateSession } = require('./riskGateEngine');
+const { reportRun } = require('./healthEngine');
+const emailEngine = require('./emailEngine');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -99,6 +102,93 @@ const LEVER_LABELS = {
   competitive:   'Competitive positioning',
   risk_adjusted: 'Risk-adjusted return',
 };
+
+// Expected return by category over the signal horizon.
+// Used to derive a concrete target price so a signal is a full thesis,
+// not just a direction. Conservative figures — based on long-run category
+// averages, deliberately not optimistic.
+const EXPECTED_RETURN_PCT = {
+  large_cap_equity: { weekly: 2.0, monthly: 6.0 },
+  mid_cap_equity:   { weekly: 3.0, monthly: 9.0 },
+  small_cap_equity: { weekly: 4.0, monthly: 12.0 },
+  large_cap_fund:   { weekly: 1.5, monthly: 5.0 },
+  flexi_mid_fund:   { weekly: 2.0, monthly: 6.5 },
+  index_etf:        { weekly: 1.5, monthly: 5.0 },
+  gold:             { weekly: 1.0, monthly: 3.0 },
+  bond_gsec:        { weekly: 0.5, monthly: 1.5 },
+  debt_fund:        { weekly: 0.5, monthly: 1.5 },
+  watchlist:        { weekly: 2.0, monthly: 6.0 },
+};
+
+// Stop-loss distance by risk level. Wider bands for more volatile
+// instruments so normal fluctuation doesn't trigger an unnecessary exit.
+const STOP_LOSS_PCT = {
+  low:           3.0,
+  low_moderate:  4.0,
+  moderate:      5.0,
+  moderate_high: 7.0,
+  high:          10.0,
+};
+
+// Signal horizon in days, by tier. High-conviction calls get a longer
+// runway because they rest on structural rather than momentary factors.
+const HORIZON_DAYS = { high_conviction: 30, standard: 14 };
+
+// Plain-English phrasing for each lever at different score levels.
+// This replaces engine output like "Technical momentum (8/10)" with
+// language an investor who has never read a research note can follow.
+const LEVER_PHRASES = {
+  technical: {
+    high: 'price action has been trending positively',
+    mid:  'price action is broadly stable',
+    low:  'price action has been weak recently',
+  },
+  fundamental: {
+    high: 'the underlying business fundamentals are solid',
+    mid:  'fundamentals are reasonable but not outstanding',
+    low:  'fundamentals show some areas of concern',
+  },
+  management: {
+    high: 'management quality and governance are strong',
+    mid:  'management record is acceptable',
+    low:  'there are governance factors worth monitoring',
+  },
+  sentiment: {
+    high: 'market sentiment is favourable',
+    mid:  'sentiment is neutral',
+    low:  'sentiment has turned cautious',
+  },
+  institutional: {
+    high: 'large institutional investors have been buying',
+    mid:  'institutional flows are balanced',
+    low:  'institutional investors have been reducing exposure',
+  },
+  sector_timing: {
+    high: 'this sector is currently in favour',
+    mid:  'the sector is neither in nor out of favour',
+    low:  'this sector is currently out of favour',
+  },
+  macro_pestle: {
+    high: 'the wider economic environment is supportive',
+    mid:  'macro conditions are mixed',
+    low:  'macro conditions are challenging for this type of investment',
+  },
+  competitive: {
+    high: 'it holds a strong competitive position',
+    mid:  'its competitive position is adequate',
+    low:  'it faces meaningful competitive pressure',
+  },
+  risk_adjusted: {
+    high: 'the return it offers justifies the risk taken',
+    mid:  'the risk-return balance is fair',
+    low:  'the return may not adequately compensate for the risk',
+  },
+};
+
+function leverPhrase(lever, score) {
+  const band = score >= 7 ? 'high' : score >= 5 ? 'mid' : 'low';
+  return LEVER_PHRASES[lever]?.[band] || null;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PRICE FETCHING
@@ -311,32 +401,89 @@ async function scoreInstrument(instrument, macroData, priceData) {
  * Manually-logged signals (from v8 Tab 1) are identified by a non-null
  * instrument_id and are never touched by this function.
  */
-async function convertScoreToRecommendation(instrument, composite, levers, entryPrice) {
-  const action     = composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL';
+async function convertScoreToRecommendation(instrument, composite, levers, entryPrice, gateResult) {
+  // Risk gate may have overridden the action (e.g. BUY vetoed to WATCH)
+  const rawAction = composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL';
+  const action     = gateResult?.action || rawAction;
+  const wasVetoed  = gateResult?.vetoed || false;
   const confidence = parseFloat(Math.min(0.95, Math.max(0.30, composite / 100)).toFixed(2));
-  const tier       = composite >= 75 ? 'high_conviction' : 'standard';
+  const tier       = composite >= 75 && !wasVetoed ? 'high_conviction' : 'standard';
+  const horizonDays = HORIZON_DAYS[tier] || 14;
 
-  // Build rationale: top two strongest levers + weakest lever if it's a risk
-  const sorted  = Object.entries(levers)
+  // ── Derive target price and stop-loss so the signal is a full thesis ──
+  const returns = EXPECTED_RETURN_PCT[instrument.category] || EXPECTED_RETURN_PCT.watchlist;
+  const expectedPct = horizonDays >= 30 ? returns.monthly : returns.weekly;
+  const stopPct = STOP_LOSS_PCT[instrument.risk_level] || 5.0;
+
+  let targetPrice = null, stopLoss = null;
+  if (entryPrice && !isNaN(entryPrice) && entryPrice > 0) {
+    if (action === 'BUY') {
+      targetPrice = parseFloat((entryPrice * (1 + expectedPct / 100)).toFixed(2));
+      stopLoss    = parseFloat((entryPrice * (1 - stopPct / 100)).toFixed(2));
+    } else if (action === 'SELL') {
+      targetPrice = parseFloat((entryPrice * (1 - expectedPct / 100)).toFixed(2));
+      stopLoss    = parseFloat((entryPrice * (1 + stopPct / 100)).toFixed(2));
+    }
+    // WATCH signals get no target/stop — there is no position to manage
+  }
+
+  // ── Build plain-English rationale ────────────────────────────────────
+  const sorted = Object.entries(levers)
     .filter(([k]) => LEVER_LABELS[k])
     .sort((a, b) => b[1] - a[1]);
-  const topTwo  = sorted.slice(0, 2)
-    .map(([k, v]) => `${LEVER_LABELS[k]} (${v}/10)`).join(', ');
+
+  const strengths = sorted.slice(0, 2)
+    .map(([k, v]) => leverPhrase(k, v))
+    .filter(Boolean);
   const weakest = sorted.at(-1);
-  const riskNote = weakest && weakest[1] < 5
-    ? ` Primary risk factor: ${LEVER_LABELS[weakest[0]]} (${weakest[1]}/10).`
-    : '';
+  const weakness = weakest && weakest[1] < 5 ? leverPhrase(weakest[0], weakest[1]) : null;
 
-  const rationale =
-    `9-levers composite: ${composite}/100. ` +
-    `Strongest factors: ${topTwo}.${riskNote} ` +
-    `Signal generated automatically — review alongside any active AI lever flags.`;
+  const actionVerb = action === 'BUY'
+    ? 'We see this as a buying opportunity'
+    : action === 'SELL'
+    ? 'We would be cautious on this right now'
+    : 'We are watching this closely rather than acting';
 
-  // Deactivate previous engine-generated signals for this instrument only.
-  // Engine signals are identified by: instrument_id IS NULL, client_id IS NULL,
-  // AND generated_at within the last 8 days (never touch older manual predictions
-  // that the track record engine still needs to resolve at their checkpoints).
-  const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+  let rationale = `${actionVerb}. `;
+  if (strengths.length) {
+    rationale += `On the positive side, ${strengths.join(', and ')}. `;
+  }
+  if (weakness) {
+    rationale += `The main thing to be aware of is that ${weakness}. `;
+  }
+  if (wasVetoed && gateResult?.reason) {
+    rationale += `${gateResult.reason} `;
+  }
+  if (gateResult?.caution && gateResult?.reason) {
+    rationale += `${gateResult.reason} `;
+  }
+  if (targetPrice && action !== 'WATCH') {
+    rationale += `Our ${horizonDays}-day view sees fair value around ₹${targetPrice.toLocaleString('en-IN')}, ` +
+                 `with ₹${stopLoss.toLocaleString('en-IN')} as the level where we would reconsider.`;
+  }
+
+  // ── Detect signal change vs the previous call ────────────────────────
+  let previousAction = null, changeNote = null;
+  try {
+    const { data: prev } = await supabaseAdmin
+      .from('recommendations')
+      .select('action, generated_at')
+      .eq('instrument_name', instrument.symbol)
+      .is('client_id', null)
+      .eq('is_active', true)
+      .order('generated_at', { ascending: false })
+      .limit(1);
+
+    if (prev?.length && prev[0].action !== action) {
+      previousAction = prev[0].action;
+      const topLever = sorted[0];
+      changeNote = `Changed from ${previousAction} to ${action} this week. ` +
+                   `The biggest factor was that ${leverPhrase(topLever[0], topLever[1])}.`;
+    }
+  } catch {}
+
+  // ── Deactivate previous engine signals (recent ones only) ────────────
+  const eightDaysAgo = new Date(Date.now() - 8 * 86400000).toISOString();
   try {
     await supabaseAdmin
       .from('recommendations')
@@ -345,24 +492,32 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
       .is('instrument_id', null)
       .is('client_id', null)
       .eq('is_active', true)
-      .gte('generated_at', eightDaysAgo); // only touch recent engine signals
+      .gte('generated_at', eightDaysAgo);
   } catch (e) {
     console.warn(`   ⚠ Could not deactivate old signals for ${instrument.symbol}: ${e.message}`);
   }
 
   const { error } = await supabaseAdmin.from('recommendations').insert({
-    client_id:        null,
-    instrument_id:    null,
-    instrument_name:  instrument.symbol,
+    client_id:            null,
+    instrument_id:        null,
+    instrument_name:      instrument.symbol,
     action,
-    signal_tier:      tier,
-    confidence_score: confidence,
-    entry_price_inr:  entryPrice ?? null,
-    rationale_text:   rationale,
-    rationale_short:  `9-levers: ${composite}/100 → ${action}`,
-    risk_gate_passed: true,
-    is_active:        true,
-    generated_at:     new Date().toISOString(),
+    signal_tier:          tier,
+    confidence_score:     confidence,
+    entry_price_inr:      entryPrice ?? null,
+    target_price_inr:     targetPrice,
+    stop_loss_inr:        stopLoss,
+    horizon_days:         horizonDays,
+    expected_return_pct:  action === 'WATCH' ? null : expectedPct,
+    valid_until:          new Date(Date.now() + horizonDays * 86400000).toISOString(),
+    rationale_text:       rationale.trim(),
+    rationale_short:      `${action} — ${composite}/100 confidence score`,
+    signal_change_note:   changeNote,
+    previous_action:      previousAction,
+    risk_gate_passed:     !wasVetoed,
+    risk_gate_veto_reason: wasVetoed ? gateResult.reason : null,
+    is_active:            true,
+    generated_at:         new Date().toISOString(),
   });
 
   if (error) {
@@ -392,23 +547,62 @@ async function notifyClientsOfCategoryChange(instrument, oldCat, newCat) {
       ? 'removed from our active list'
       : `moved to ${CATEGORY_LABEL[newCat] ?? newCat}`;
 
-    const body =
-      `⚠️ Risk category change: ${instrument.name} has been ${newLabel}. ` +
-      `Previously in: ${oldLabel}. ` +
-      `Please review this position against your risk profile. ` +
-      `Triggered automatically by our 9-levers scoring engine.`;
+    // Risk ranking so we can tell each client whether this matters for them
+    const RISK_RANK = { low: 1, low_moderate: 2, moderate: 3, moderate_high: 4, high: 5 };
+    const newRank = RISK_RANK[CATEGORY_RISK[newCat]] ?? 3;
 
-    const { error } = await supabaseAdmin.from('client_notifications').insert(
-      holdings.map(h => ({
+    // Fetch each client's risk tolerance so guidance is personal, not generic
+    const clientIds = holdings.map(h => h.client_id);
+    const { data: clients } = await supabaseAdmin
+      .from('clients')
+      .select('id, full_name, email, stated_risk_score, email_alerts_enabled')
+      .in('id', clientIds);
+
+    const notifications = [];
+
+    for (const h of holdings) {
+      const client = (clients || []).find(c => c.id === h.client_id);
+      const riskScore = client?.stated_risk_score ?? 5;
+      // Map a 1-10 stated risk score onto the same 1-5 rank scale
+      const clientRank = riskScore <= 3 ? 2 : riskScore <= 6 ? 3 : 5;
+
+      // Plain-English guidance based on whether this now exceeds their comfort
+      let guidance;
+      if (newCat === 'removed') {
+        guidance = 'We have removed this from our actively tracked list, which means we will no longer publish signals on it. ' +
+                   'This is not a recommendation to sell — it means we no longer have enough confidence in our analysis to guide you on it.';
+      } else if (newRank > clientRank) {
+        guidance = `This instrument is now classified as higher risk than your stated comfort level of ${riskScore}/10. ` +
+                   `You may wish to review whether this position still suits you.`;
+      } else if (newRank < clientRank) {
+        guidance = `This instrument has become more conservative than before. It remains well within your risk comfort level of ${riskScore}/10.`;
+      } else {
+        guidance = `This instrument remains within your stated risk comfort level of ${riskScore}/10. No immediate action is needed, but it is worth knowing.`;
+      }
+
+      const body = `${instrument.name} has been ${newLabel} (previously ${oldLabel}). ${guidance}`;
+
+      notifications.push({
         client_id:     h.client_id,
         type:          'category_change',
-        title:         `Category Change: ${instrument.name}`,
+        title:         `Risk category change: ${instrument.name}`,
         body,
         instrument_id: instrument.id,
         is_read:       false,
         created_at:    new Date().toISOString(),
-      }))
-    );
+      });
+
+      // Email the client as well, if they have an address and alerts on
+      if (client?.email && client.email_alerts_enabled !== false) {
+        emailEngine.sendCategoryChangeNotice(
+          client, instrument.name, oldLabel,
+          newCat === 'removed' ? 'no longer tracked' : (CATEGORY_LABEL[newCat] ?? newCat),
+          guidance
+        ).catch(() => {});  // never let email failure break the scoring run
+      }
+    }
+
+    const { error } = await supabaseAdmin.from('client_notifications').insert(notifications);
     if (error) throw new Error(error.message);
     return holdings.length;
   } catch (e) {
@@ -449,6 +643,7 @@ async function runInstrumentScoringEngine() {
 
   // Load shared macro indicators (one call, shared across all 120 scorings)
   let macroData = null;
+  let macroVix  = null;
   try {
     macroData = await getMacroIndicators();
     if (macroData) {
@@ -457,6 +652,14 @@ async function runInstrumentScoringEngine() {
   } catch (e) {
     console.warn('   ⚠ Macro data unavailable, levers 5 & 7 will use defaults:', e.message);
   }
+
+  // VIX drives the risk gate — fetch it separately so a macro failure
+  // doesn't leave the gate blind to market volatility
+  try {
+    const { getIndiaVIX } = require('./marketData');
+    macroVix = await getIndiaVIX();
+    if (macroVix != null) console.log(`   India VIX: ${Number(macroVix).toFixed(1)} (risk gate active)`);
+  } catch {}
 
   // Load all instruments including the new columns from fix_instrument_data.sql
   // (price_source, amfi_code, static_price, yahoo_ticker)
@@ -473,6 +676,10 @@ async function runInstrumentScoringEngine() {
   }
 
   console.log(`   Loaded ${instruments.length} instruments\n`);
+
+  // Risk gate session — scoped to this run so concentration limits
+  // apply per scoring cycle, not cumulatively across cycles
+  const gateSession = createGateSession();
 
   // Per-run counters
   let scored = 0, signalsCreated = 0;
@@ -596,10 +803,24 @@ async function runInstrumentScoringEngine() {
         }
       }
 
-      // 7. Generate live signal for active instruments
+      // 7. Risk gate, then generate live signal for active instruments
       if (instrument.status === 'active') {
+        const proposedAction = composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL';
+
+        // The gate can veto or downgrade any signal regardless of score.
+        // Capital preservation first — this is the safety layer.
+        const gateResult = await runRiskGate(
+          instrument, proposedAction, composite,
+          { vix: macroVix, priceSource: srcKey },
+          gateSession
+        );
+
+        if (gateResult.vetoed) {
+          console.log(`   🛡  GATE: ${instrument.symbol} ${proposedAction} → ${gateResult.action} (${gateResult.reason})`);
+        }
+
         const ok = await convertScoreToRecommendation(
-          instrument, composite, scores, priceData?.price ?? null
+          instrument, composite, scores, priceData?.price ?? null, gateResult
         );
         if (ok) signalsCreated++;
       }
@@ -622,9 +843,20 @@ async function runInstrumentScoringEngine() {
   console.log(`🎯 Instrument engine complete  (${elapsed}s)`);
   console.log(`   Instruments: ${scored} scored | ${failed} failed`);
   console.log(`   Signals:     ${signalsCreated} created/refreshed`);
+  console.log(`   Risk gate:   ${gateSession.vetoCount} vetoed | ${gateSession.cautionCount} flagged with caution`);
   console.log(`   Category:    ${downgraded} downgraded | ${removed} removed | ${promoted} promoted`);
   console.log(`   Price src:   Yahoo ${bySource.yahoo} | MFAPI ${bySource.mfapi} | Static ${bySource.static_reference} | NSE ${bySource.nse} | Missing ${bySource.no_price}`);
   console.log(line);
+
+  await reportRun({
+    engineName:     'instrumentEngine',
+    durationMs:     Date.now() - runStart,
+    itemsProcessed: scored,
+    itemsExpected:  instruments.length,
+    itemsFailed:    failed,
+    detail:         `${signalsCreated} signals, ${gateSession.vetoCount} gate vetoes, ` +
+                    `sources: yahoo=${bySource.yahoo} mfapi=${bySource.mfapi} static=${bySource.static_reference} missing=${bySource.no_price}`,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

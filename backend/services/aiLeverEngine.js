@@ -11,16 +11,13 @@
  */
 
 const axios       = require('axios');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { supabaseAdmin } = require('../../config/supabase');
+const aiProvider  = require('./aiProvider');
+const { reportRun } = require('./healthEngine');
 
-const genAI = process.env.GOOGLE_API_KEY
-  ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY)
-  : null;
-
-const MODEL = 'gemini-3.6-flash'; // Google-recommended model as of Sept 2026
-const SCAN_START = Date.now();
-let geminiCallsUsed = 0;
+// Model selection and provider fallback are handled entirely by aiProvider.
+// It auto-discovers the current Google model name (immune to Google's
+// frequent renames) and falls back to Anthropic if Google is unavailable.
 
 // ── SECTOR MAPPING ────────────────────────────────────────────
 // Maps real-world event keywords to instrument_universe categories.
@@ -49,19 +46,9 @@ function classifyHorizon(days) {
 
 // ── GEMINI HELPER ─────────────────────────────────────────────
 async function askGemini(prompt, expectJSON = true) {
-  if (!genAI) throw new Error('GOOGLE_API_KEY not configured');
-  const model = genAI.getGenerativeModel({ model: MODEL });
-  geminiCallsUsed++;
-  const result = await model.generateContent(
-    expectJSON
-      ? `${prompt}\n\nRespond ONLY with valid JSON. No markdown, no backticks, no explanation outside the JSON.`
-      : prompt
-  );
-  const text = result.response.text().trim();
-  if (!expectJSON) return text;
-  // Strip any accidental markdown fences
-  const clean = text.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
-  return JSON.parse(clean);
+  const result = await aiProvider.ask(prompt, expectJSON);
+  if (result === null) throw new Error('All AI providers unavailable');
+  return result;
 }
 
 // ── DEPTH 1: EVENT DETECTION ──────────────────────────────────
@@ -333,10 +320,112 @@ async function resolveExpiredFlags() {
     .lt('auto_resolve_at', now);
 }
 
+// ── CORPORATE ACTION DETECTION (fully automated) ──────────────
+/**
+ * Scans news for corporate actions affecting tracked instruments and sets
+ * the corporate_action_flag automatically. No manual monitoring required.
+ *
+ * Corporate actions materially distort price signals — a stock that drops
+ * 40% on an ex-dividend or split date has not "fallen"; the price simply
+ * reflects a structural change. Flagging these prevents the engine from
+ * generating a misleading signal and warns clients before they act.
+ */
+async function detectCorporateActions(newsItems) {
+  if (!supabaseAdmin || !newsItems?.length) return 0;
+
+  try {
+    const { data: instruments } = await supabaseAdmin
+      .from('instrument_universe')
+      .select('id, symbol, name')
+      .in('status', ['active', 'watchlist']);
+
+    if (!instruments?.length) return 0;
+
+    // Only send headlines that mention a tracked instrument — keeps the
+    // prompt small and the AI focused
+    const relevant = [];
+    for (const item of newsItems) {
+      const title = item.title.toLowerCase();
+      for (const inst of instruments) {
+        const nameFirst = inst.name.split(' ')[0].toLowerCase();
+        if (nameFirst.length >= 4 && title.includes(nameFirst)) {
+          relevant.push({ headline: item.title, symbol: inst.symbol, id: inst.id, link: item.link });
+          break;
+        }
+      }
+    }
+
+    if (!relevant.length) return 0;
+
+    const result = await askGemini(`
+You are monitoring Indian listed companies for CORPORATE ACTIONS that would
+structurally distort their share price or NAV.
+
+Corporate actions include: stock splits, bonus issues, rights issues, dividends
+with an ex-date, mergers, demergers, buybacks, delisting, fund manager changes,
+scheme mergers for mutual funds, or a change in fund mandate.
+
+NOT corporate actions: routine earnings results, analyst rating changes,
+general market commentary, price movement stories.
+
+HEADLINES (each tagged with the instrument it mentions):
+${relevant.slice(0, 25).map((r, i) => `${i + 1}. [${r.symbol}] ${r.headline}`).join('\n')}
+
+Return a JSON array. Include ONLY genuine corporate actions:
+[{"index": 1, "symbol": "RELIANCE", "action_type": "bonus issue", "note": "one sentence plain-English summary for an investor"}]
+
+If none of these are corporate actions, return []
+`, true);
+
+    if (!Array.isArray(result) || !result.length) return 0;
+
+    let flagged = 0;
+    for (const action of result) {
+      const match = relevant.find(r => r.symbol === action.symbol);
+      if (!match) continue;
+
+      const { error } = await supabaseAdmin
+        .from('instrument_universe')
+        .update({
+          corporate_action_flag:   true,
+          corporate_action_note:   `${action.action_type}: ${action.note}`,
+          corporate_action_set_at: new Date().toISOString(),
+        })
+        .eq('id', match.id);
+
+      if (!error) {
+        flagged++;
+        console.log(`   🏷  CORPORATE ACTION: ${action.symbol} — ${action.action_type}`);
+      }
+    }
+    return flagged;
+  } catch (e) {
+    console.warn(`   ⚠ Corporate action detection failed: ${e.message}`);
+    return 0;
+  }
+}
+
+/**
+ * Clears corporate action flags older than 30 days. Most corporate actions
+ * resolve within a month; leaving a stale flag would permanently caveat an
+ * instrument for no reason.
+ */
+async function expireCorporateActions() {
+  if (!supabaseAdmin) return;
+  try {
+    const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+    await supabaseAdmin
+      .from('instrument_universe')
+      .update({ corporate_action_flag: false, corporate_action_note: null })
+      .eq('corporate_action_flag', true)
+      .lt('corporate_action_set_at', cutoff);
+  } catch {}
+}
+
 // ── MAIN ENGINE ───────────────────────────────────────────────
 async function runAILeverScan() {
-  if (!genAI) {
-    console.log('🤖 AI Lever: GOOGLE_API_KEY not set — add it to Render environment variables.');
+  if (!aiProvider.isConfigured()) {
+    console.log('🤖 AI Lever: no AI provider configured. Set GOOGLE_API_KEY (free) or ANTHROPIC_API_KEY in Render.');
     return;
   }
   if (!supabaseAdmin) {
@@ -346,7 +435,7 @@ async function runAILeverScan() {
 
   const scanStart = Date.now();
   console.log('🤖 Running AI Lever scan (3-depth probabilistic engine)...');
-  geminiCallsUsed = 0;
+  aiProvider.resetUsage();
   const errors = [];
   let eventsDetected = 0, flagsGenerated = 0, signalsOverridden = 0, criticalFires = 0;
 
@@ -359,13 +448,19 @@ async function runAILeverScan() {
     const newsItems = await gatherMarketNews();
     console.log(`   Parsed ${newsItems.length} news items`);
 
+    // Corporate action detection runs on the same news set — no extra fetch
+    await expireCorporateActions();
+    const corpFlagged = await detectCorporateActions(newsItems);
+    if (corpFlagged) console.log(`   Flagged ${corpFlagged} corporate action(s)`);
+
     const events = await detectEventsFromNews(newsItems);
     console.log(`   Detected ${events.length} significant market events`);
     eventsDetected = events.length;
 
     if (!events.length) {
       console.log('🤖 AI Lever scan complete — no material events detected today.');
-      await logScan(0, 0, 0, 0, geminiCallsUsed, newsItems.length, Date.now()-scanStart, []);
+      const usage0 = aiProvider.getUsage();
+      await logScan(0, 0, 0, 0, usage0.google + usage0.anthropic, newsItems.length, Date.now()-scanStart, []);
       return;
     }
 
@@ -430,8 +525,18 @@ async function runAILeverScan() {
     console.error('🤖 AI scan error:', e.message);
   }
 
-  await logScan(eventsDetected, flagsGenerated, signalsOverridden, criticalFires, geminiCallsUsed, 0, Date.now()-scanStart, errors);
-  console.log(`🤖 AI Lever scan complete: ${eventsDetected} events, ${flagsGenerated} flags, ${signalsOverridden} overrides, ${geminiCallsUsed} Gemini calls used.`);
+  const aiUsage = aiProvider.getUsage();
+  await logScan(eventsDetected, flagsGenerated, signalsOverridden, criticalFires, aiUsage.google + aiUsage.anthropic, 0, Date.now()-scanStart, errors);
+  console.log(`🤖 AI Lever scan complete: ${eventsDetected} events, ${flagsGenerated} flags, ${signalsOverridden} overrides, ${aiUsage.google + aiUsage.anthropic} AI calls (google=${aiUsage.google} anthropic=${aiUsage.anthropic} fallbacks=${aiUsage.fallbacks}).`);
+
+  await reportRun({
+    engineName:     'aiLeverEngine',
+    durationMs:     Date.now() - scanStart,
+    itemsProcessed: eventsDetected,
+    itemsExpected:  null,   // zero events on a quiet news day is valid
+    itemsFailed:    errors.length,
+    detail:         `${flagsGenerated} flags, ${criticalFires} critical, AI: ${JSON.stringify(aiUsage)}`,
+  });
 }
 
 async function logScan(events, flags, overrides, critical, calls, news, duration, errors) {

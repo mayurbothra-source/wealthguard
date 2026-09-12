@@ -7,6 +7,8 @@
  */
 
 const { supabaseAdmin } = require('../../config/supabase');
+const { reportRun } = require('./healthEngine');
+const emailEngine = require('./emailEngine');
 const { getYahooQuote, getIndiaVIX, getNSEQuote } = require('./marketData');
 
 // Thresholds (frozen in design discussions, Sept 2026)
@@ -102,37 +104,105 @@ async function logFlashAlert(instrument, movePct, priceNow, pricePrev, isMarketW
   return alert;
 }
 
+/**
+ * Builds the "so what should I do?" sentence that turns a raw price move
+ * into something actionable. A 3% move means nothing on its own — it means
+ * something relative to what we told the client to expect.
+ */
+function buildSignalContext(currentSignal, movePct, stopLoss) {
+  const rising = movePct > 0;
+
+  if (!currentSignal) {
+    return 'We do not currently have an active signal on this instrument. ' +
+           'This move will be factored into our next scoring run.';
+  }
+
+  if (currentSignal.action === 'BUY') {
+    if (rising) {
+      return `This move is consistent with our BUY call — the position is behaving as we expected.`;
+    }
+    const stopNote = stopLoss
+      ? ` Our stated reconsider level is ₹${Number(stopLoss).toLocaleString('en-IN')}.`
+      : '';
+    return `This move runs counter to our BUY call.${stopNote} ` +
+           `A single session does not invalidate a thesis, but it is worth watching.`;
+  }
+
+  if (currentSignal.action === 'SELL') {
+    if (!rising) {
+      return 'This move is consistent with our cautious view on this instrument.';
+    }
+    return 'This move runs counter to our cautious view. If it sustains, our next ' +
+           'scoring run may revise the signal.';
+  }
+
+  // WATCH
+  return `We are currently on WATCH for this instrument, which means we have not ` +
+         `seen enough conviction either way. A move of this size is exactly the kind ` +
+         `of signal our next scoring run will weigh.`;
+}
+
 async function notifyClientsForAlert(alert, instrument) {
   if (!supabaseAdmin || !alert) return 0;
-  // Find clients who hold this instrument
   try {
+    // Who holds this instrument?
     const { data: holdings } = await supabaseAdmin
       .from('portfolio_holdings')
       .select('client_id')
       .eq('instrument_name', instrument.symbol)
       .eq('is_active', true);
 
-    if (!holdings || !holdings.length) return 0;
+    if (!holdings?.length) return 0;
 
-    const direction = alert.move_pct > 0 ? '📈 Rising steeply' : '📉 Falling steeply';
-    const message = `⚡ FLASH ALERT: ${instrument.name} is ${direction} (${alert.move_pct > 0 ? '+' : ''}${alert.move_pct.toFixed(1)}% this hour). ${alert.context_note}`;
+    // What is our current call on it? This is what makes the alert useful.
+    const { data: sig } = await supabaseAdmin
+      .from('recommendations')
+      .select('action, stop_loss_inr, target_price_inr')
+      .eq('instrument_name', instrument.symbol)
+      .is('client_id', null)
+      .eq('is_active', true)
+      .order('generated_at', { ascending: false })
+      .limit(1);
 
-    // Store notification for dashboard display
+    const currentSignal = sig?.[0] || null;
+    const signalContext = buildSignalContext(
+      currentSignal, alert.move_pct, currentSignal?.stop_loss_inr
+    );
+
+    const direction = alert.move_pct > 0 ? 'rising sharply' : 'falling sharply';
+    const body = `${instrument.name} is ${direction} (${alert.move_pct > 0 ? '+' : ''}` +
+                 `${Number(alert.move_pct).toFixed(1)}% this hour). ` +
+                 `${alert.context_note || ''} ${signalContext}`;
+
     const notifications = holdings.map(h => ({
-      client_id:    h.client_id,
-      type:         'flash_alert',
-      title:        `Flash Alert: ${instrument.name}`,
-      body:         message,
+      client_id:     h.client_id,
+      type:          'flash_alert',
+      title:         `Flash alert: ${instrument.name}`,
+      body,
       instrument_id: instrument.id,
-      alert_id:     alert.id,
-      is_read:      false,
-      created_at:   new Date().toISOString(),
+      alert_id:      alert.id,
+      is_read:       false,
+      created_at:    new Date().toISOString(),
     }));
 
     await supabaseAdmin.from('client_notifications').insert(notifications);
     await supabaseAdmin.from('flash_alerts')
       .update({ clients_notified: holdings.length })
       .eq('id', alert.id);
+
+    // Email clients who have alerts enabled — fire and forget so a slow
+    // mail server never blocks the hourly scan
+    const { data: clients } = await supabaseAdmin
+      .from('clients')
+      .select('id, full_name, email, email_alerts_enabled')
+      .in('id', holdings.map(h => h.client_id));
+
+    for (const client of (clients || [])) {
+      if (client.email && client.email_alerts_enabled !== false) {
+        emailEngine.sendFlashAlert(client, { ...alert, signal_context: signalContext })
+          .catch(() => {});
+      }
+    }
 
     return holdings.length;
   } catch (e) {
@@ -164,6 +234,7 @@ async function runFlashAlertScan() {
     console.log('⚡ Flash alert engine: Supabase not configured, skipping.');
     return;
   }
+  const scanStart = Date.now();
   console.log('⚡ Running flash alert scan...');
 
   // Get current VIX for context
@@ -234,6 +305,17 @@ async function runFlashAlertScan() {
   } else {
     console.log(`⚡ Flash alert scan complete — ${alertsFired} alert(s) fired.`);
   }
+
+  // Zero alerts is a completely normal outcome on a calm day, so we pass
+  // itemsExpected as null — this must not be treated as an anomaly.
+  await reportRun({
+    engineName:     'flashAlertEngine',
+    durationMs:     Date.now() - scanStart,
+    itemsProcessed: instruments.length,
+    itemsExpected:  null,
+    itemsFailed:    0,
+    detail:         `${alertsFired} alerts fired across ${instruments.length} instruments scanned`,
+  });
 }
 
 module.exports = { runFlashAlertScan, isMarketHours };
