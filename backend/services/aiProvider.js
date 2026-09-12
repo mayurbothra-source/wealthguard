@@ -60,8 +60,54 @@ const REQUEST_TIMEOUT  = 45000;
 let _googleModel      = null;
 let _googleModelTried = false;
 
+// ── RATE LIMITING ────────────────────────────────────────────────────
+// Google's free tier allows roughly 15 requests/minute. Firing 100 calls
+// back-to-back (as Depth 3 does across 120 instruments) triggers a wall of
+// HTTP 429s and loses almost all the analysis.
+//
+// Two protections:
+//   1. Throttle — enforce a minimum gap between consecutive calls
+//   2. Circuit breaker — after N consecutive 429s, stop calling for a
+//      cooldown period instead of hammering a limit that is already tripped
+const MIN_CALL_GAP_MS      = 4500;   // ~13 calls/min, safely under the limit
+const BREAKER_THRESHOLD    = 3;      // consecutive 429s before opening
+const BREAKER_COOLDOWN_MS  = 60000;  // wait a full minute before retrying
+
+let _lastCallAt        = 0;
+let _consecutive429s   = 0;
+let _breakerOpenUntil  = 0;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/** Enforces the minimum gap between calls. */
+async function throttle() {
+  const since = Date.now() - _lastCallAt;
+  if (since < MIN_CALL_GAP_MS) {
+    await sleep(MIN_CALL_GAP_MS - since);
+  }
+  _lastCallAt = Date.now();
+}
+
+/** True when the breaker is open and we should not call at all. */
+function breakerOpen() {
+  return Date.now() < _breakerOpenUntil;
+}
+
+function recordRateLimit() {
+  _consecutive429s++;
+  if (_consecutive429s >= BREAKER_THRESHOLD) {
+    _breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS;
+    console.warn(`   ⏸ AI provider: rate limit hit ${_consecutive429s}x — pausing calls for ${BREAKER_COOLDOWN_MS / 1000}s`);
+    _consecutive429s = 0;
+  }
+}
+
+function recordSuccess() {
+  _consecutive429s = 0;
+}
+
 // Usage counters — surfaced in health logs
-const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0 };
+const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0, rateLimited: 0, throttleWaits: 0 };
 
 // ─────────────────────────────────────────────────────────────────────
 // GOOGLE MODEL AUTO-DISCOVERY
@@ -131,6 +177,11 @@ async function callGoogle(prompt, expectJSON) {
   const model = await discoverGoogleModel();
   if (!model) throw new Error('No Google model available');
 
+  if (breakerOpen()) {
+    throw new Error('Rate limit cooldown active — skipping Google call');
+  }
+  await throttle();
+
   const fullPrompt = expectJSON
     ? `${prompt}\n\nRespond ONLY with valid JSON. No markdown fences, no commentary before or after the JSON.`
     : prompt;
@@ -144,6 +195,7 @@ async function callGoogle(prompt, expectJSON) {
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error('Empty response from Google');
   usage.google++;
+  recordSuccess();
   return text.trim();
 }
 
@@ -241,15 +293,31 @@ async function ask(prompt, expectJSON = true) {
 
     } catch (e) {
       lastError = e;
+
+      // Track rate limiting specifically so the breaker can open
+      const is429 = e.response?.status === 429 || /429/.test(e.message);
+      if (is429 && provider === 'google') {
+        usage.rateLimited++;
+        recordRateLimit();
+      }
+
       const isLast = i === order.length - 1;
-      if (!isLast) {
+      // Only log the fallback attempt once per breaker cycle — otherwise a
+      // rate-limited run produces a hundred identical log lines
+      if (!isLast && !is429) {
         console.warn(`   ⚠ AI provider ${provider} failed (${e.message}) — trying fallback`);
       }
     }
   }
 
   usage.failures++;
-  console.warn(`   ⚠ AI provider: all providers failed — ${lastError?.message || 'unknown'}`);
+  // Log the first few failures then go quiet — a rate-limited run should not
+  // produce hundreds of identical lines that bury the useful output
+  if (usage.failures <= 3) {
+    console.warn(`   ⚠ AI provider: all providers failed — ${lastError?.message || 'unknown'}`);
+  } else if (usage.failures === 4) {
+    console.warn(`   ⚠ AI provider: further failures suppressed (see summary at end of run)`);
+  }
   return null; // caller must handle gracefully — never fabricate
 }
 
@@ -268,7 +336,9 @@ function getUsage() {
 }
 
 function resetUsage() {
-  usage.google = 0; usage.anthropic = 0; usage.failures = 0; usage.fallbacks = 0;
+  usage.google = 0; usage.anthropic = 0; usage.failures = 0;
+  usage.fallbacks = 0; usage.rateLimited = 0; usage.throttleWaits = 0;
+  _consecutive429s = 0; _breakerOpenUntil = 0;
 }
 
 module.exports = {

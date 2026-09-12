@@ -23,96 +23,85 @@ const CHECKPOINTS = [
 // of outcomes is logged, reduce this back to 2 for precision going forward.
 const CHECKPOINT_TOLERANCE_DAYS = 14;
 
-// Map of non-symbol instrument names to their Yahoo Finance tickers.
-// These are instruments logged via v8 using plain names rather than
-// NSE symbols — Gold, mutual funds, etc.
-const NAME_TO_YAHOO = {
-  'Gold':                   'GC=F',
-  'Silver':                 'SI=F',
-  'Nifty 50':               '^NSEI',
-  'Nifty':                  '^NSEI',
-  'Sensex':                 '^BSESN',
-  'Invesco India Smallcap': null,  // MF — no Yahoo ticker, skip
-};
-
 /**
- * Fetch the current market price for a given instrument.
- * Handles both NSE symbols (HDFCBANK, RELIANCE) and plain names
- * (Gold, Invesco India Smallcap) that v8 logs use.
- * Returns null (never fake data) if price unavailable.
+ * Fetches the current price for a prediction, using the SAME source routing
+ * as the scoring engine.
+ *
+ * This is critical for data integrity. Previously this function guessed at a
+ * Yahoo ticker from the instrument name, which produced two failure modes:
+ *
+ *   1. Gold: entry price was Rs.158,660 (Indian retail per 10g) but the
+ *      checkpoint fetched GC=F — gold futures in USD per troy ounce (~$4,300).
+ *      Result: a reported -97% "return" that never happened.
+ *
+ *   2. Bonds: tried SGB.NS, GSEC10Y.NS etc. on Yahoo. These do not exist as
+ *      exchange tickers, so every bond checkpoint was skipped.
+ *
+ * The fix is to look the instrument up in instrument_universe and use its
+ * declared price_source, exactly as the scoring engine does. If the units of
+ * the entry price and the current price cannot be reconciled, we skip the
+ * checkpoint rather than publish a meaningless number.
  */
 async function fetchCurrentPrice(rec) {
   const symbol = rec.instrument_name;
+  if (!supabaseAdmin) return null;
 
-  // Check if this is a known non-symbol name first
-  if (Object.prototype.hasOwnProperty.call(NAME_TO_YAHOO, symbol)) {
-    const yahooTicker = NAME_TO_YAHOO[symbol];
-    if (!yahooTicker) {
-      console.warn(`   ⚠ ${symbol}: no Yahoo ticker available — checkpoint skipped`);
-      return null;
-    }
+  // Look up the instrument's declared price source
+  let instrument = null;
+  try {
+    const { data } = await supabaseAdmin
+      .from('instrument_universe')
+      .select('symbol, name, instrument_type, exchange, yahoo_ticker, amfi_code, static_price, price_source')
+      .or(`symbol.eq.${symbol},name.eq.${symbol}`)
+      .limit(1);
+    instrument = data?.[0] || null;
+  } catch {}
+
+  if (instrument) {
+    // Use the scoring engine's router — single source of truth for pricing
     try {
-      const q = await getYahooQuote(yahooTicker);
-      if (q && q.source === 'yahoo_live' && q.price) {
-        return { price: q.price, source: 'yahoo_live' };
+      const { fetchInstrumentPrice } = require('./instrumentEngine');
+      const priceData = await fetchInstrumentPrice(instrument);
+
+      if (priceData) {
+        // A static reference price never changes, so a "return" computed
+        // against it is always 0% and tells the client nothing. Skip it.
+        if (priceData.source === 'static_reference') {
+          console.warn(`   ⚠ ${symbol}: static reference price — no meaningful return to measure, skipped`);
+          return null;
+        }
+        return priceData;
       }
-    } catch {}
-    console.warn(`   ⚠ ${symbol}: Yahoo fetch failed — checkpoint skipped`);
+    } catch (e) {
+      console.warn(`   ⚠ ${symbol}: price router failed — ${e.message}`);
+    }
     return null;
   }
 
-  // Standard NSE equity symbol — try NSE first, then Yahoo .NS
+  // Not in our universe — this is a legacy manually-logged prediction.
+  // Only proceed for plain NSE equity symbols where units are unambiguous.
+  const looksLikeNSESymbol = /^[A-Z][A-Z0-9&-]{1,19}$/.test(symbol);
+  if (!looksLikeNSESymbol) {
+    console.warn(`   ⚠ ${symbol}: not in instrument universe and not a recognisable NSE symbol — skipped`);
+    return null;
+  }
+
   try {
     const nseData = await getNSEQuote(symbol);
-    if (nseData && nseData.source === 'nse_live' && nseData.price) {
+    if (nseData?.source === 'nse_live' && nseData.price) {
       return { price: nseData.price, source: 'nse_live' };
     }
   } catch {}
 
   try {
-    const yahooSymbol = symbol.includes('.') ? symbol : symbol + '.NS';
-    const yahooData = await getYahooQuote(yahooSymbol);
-    if (yahooData && yahooData.source === 'yahoo_live' && yahooData.price) {
+    const yahooData = await getYahooQuote(symbol + '.NS');
+    if (yahooData?.source === 'yahoo_live' && yahooData.price) {
       return { price: yahooData.price, source: 'yahoo_live' };
     }
   } catch {}
 
   console.warn(`   ⚠ No live price available for ${symbol} — checkpoint skipped`);
   return null;
-}
-
-/**
- * Fetches Nifty 50's return over the same window as a prediction.
- * This is the passive baseline — the return a client would have got by
- * doing nothing except buying the index.
- *
- * Alpha = our return minus this. It is the honest measure of whether the
- * engine adds value, because a rising market makes almost any BUY look right.
- */
-async function getNiftyReturnForPeriod(fromDate, toDate) {
-  try {
-    const { getYahooQuote } = require('./marketData');
-    const now = await getYahooQuote('^NSEI');
-    if (!now?.price) return null;
-
-    // Look up the Nifty level we cached at signal time
-    if (!supabaseAdmin) return null;
-    const { data } = await supabaseAdmin
-      .from('instrument_price_hourly')
-      .select('price, recorded_at')
-      .eq('symbol', 'NIFTY50')
-      .gte('recorded_at', new Date(new Date(fromDate).getTime() - 2 * 86400000).toISOString())
-      .lte('recorded_at', new Date(new Date(fromDate).getTime() + 2 * 86400000).toISOString())
-      .order('recorded_at', { ascending: true })
-      .limit(1);
-
-    const thenPrice = data?.[0]?.price;
-    if (!thenPrice) return null;
-
-    return parseFloat((((now.price - thenPrice) / thenPrice) * 100).toFixed(2));
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -209,6 +198,24 @@ async function runTrackRecordCheckpoints() {
       if (!priceData) { skipped++; continue; }
 
       const returnPct = ((priceData.price - pred.entry_price_inr) / pred.entry_price_inr) * 100;
+
+      // SANITY GATE — a last line of defence against unit mismatches.
+      // No real instrument moves +/-50% in a week or +/-90% in a quarter.
+      // A number outside these bounds means the entry price and the current
+      // price are in different units (this is exactly how Gold produced a
+      // "-97.2%" week). Publishing that would destroy client trust and
+      // corrupt every aggregate accuracy figure, so we refuse to store it.
+      const IMPLAUSIBLE = { 7: 50, 30: 70, 90: 90 };
+      const bound = IMPLAUSIBLE[checkpoint.days] || 70;
+      if (Math.abs(returnPct) > bound) {
+        console.warn(`   🚫 ${pred.instrument_name} ${checkpoint.label}: computed ${returnPct.toFixed(1)}% ` +
+                     `exceeds plausible bound of ±${bound}%. Entry ₹${pred.entry_price_inr}, ` +
+                     `current ₹${priceData.price} [${priceData.source}]. ` +
+                     `Likely a unit mismatch — checkpoint rejected, not stored.`);
+        skipped++;
+        continue;
+      }
+
       const correct = isDirectionCorrect(pred.action, returnPct);
 
       // Fetch the passive baseline so we can compute honest alpha.

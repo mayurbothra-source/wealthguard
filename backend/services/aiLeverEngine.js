@@ -493,13 +493,51 @@ async function runAILeverScan() {
 
     if (!instruments) return;
 
-    for (const instrument of instruments) {
-      // Only analyze if this instrument's category is in any affected sector
-      const relevantEvents = eventsWithProb.filter(e =>
-        e.affectedCategories.includes(instrument.category) ||
-        e.severity === 'CRITICAL'
-      );
-      if (!relevantEvents.length) continue;
+    // Depth 3 makes one AI call per instrument. Running it across all 120
+    // exhausts the free tier in under a minute and loses most of the analysis.
+    //
+    // Instead we prioritise. An instrument earns a Depth 3 call if it is:
+    //   1. Held by at least one client (their money is actually at risk), or
+    //   2. Affected by a CRITICAL event, or
+    //   3. Among the highest-scoring instruments (most likely to be acted on)
+    //
+    // Everything else is covered by the 9-lever score and the sector-level
+    // event mapping from Depth 2 — no AI call needed.
+    const DEPTH3_BUDGET = 25;
+
+    let heldSymbols = new Set();
+    try {
+      const { data: holdings } = await supabaseAdmin
+        .from('portfolio_holdings')
+        .select('instrument_name')
+        .eq('is_active', true);
+      heldSymbols = new Set((holdings || []).map(h => h.instrument_name));
+    } catch {}
+
+    const hasCriticalEvent = eventsWithProb.some(e => e.severity === 'CRITICAL');
+
+    const prioritised = instruments
+      .map(inst => {
+        const relevantEvents = eventsWithProb.filter(e =>
+          e.affectedCategories.includes(inst.category) || e.severity === 'CRITICAL'
+        );
+        if (!relevantEvents.length) return null;
+
+        let priority = 0;
+        if (heldSymbols.has(inst.symbol)) priority += 100;  // client money at risk
+        if (hasCriticalEvent)             priority += 50;
+        priority += (inst.current_score || 0) / 10;
+
+        return { inst, relevantEvents, priority };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, DEPTH3_BUDGET);
+
+    console.log(`   Depth 3 scope: ${prioritised.length} of ${instruments.length} instruments ` +
+                `(${heldSymbols.size} client-held prioritised, budget ${DEPTH3_BUDGET})`);
+
+    for (const { inst: instrument, relevantEvents } of prioritised) {
 
       try {
         const positioning = await analyzeInstrumentPositioning(instrument, relevantEvents);
