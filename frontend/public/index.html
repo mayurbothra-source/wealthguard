@@ -667,28 +667,110 @@ table.data-table{width:100%;border-collapse:collapse;}
   <div class="hero">
     <div class="eyebrow">Investment Analysis & Strategy for India</div>
     <h1>Capital preservation first.<br><em>Wealth</em> as the consequence.</h1>
+    <p style="font-size:15px;color:var(--muted);margin:-18px 0 22px;line-height:1.6;">
+      Full access free until 31 December 2026. No credit card required.<br>
+      <span style="font-size:13px;">Joining after 31 Dec? One month free, then from ₹299/month.</span>
+    </p>
     <div class="hero-actions">
-      <button class="btn btn-primary" onclick="goTo('onboarding')">Create Free Account</button>
+      <button class="btn btn-primary" onclick="goTo('onboarding')">Start for Free</button>
       <button class="btn btn-outline" onclick="goTo('login')">Log In</button>
     </div>
   </div>
-  <div class="section">
-    <div class="section-head"><h2>Our Track Record</h2><p>Every prediction is dated, published, and checked three separate times as it plays out — at 1 week, 1 month, and 1 quarter. Wins and misses both shown.</p></div>
-    <div id="track-record-container">
-      <div class="track-empty">
-        <div class="ic">📋</div>
-        <h3>Our track record starts 9th September 2026</h3>
-        <p>We publish every signal the day we make it, and show you exactly how it performed at each checkpoint. Check back after our first week live.</p>
-        <span class="badge">Launching 9 Sept 2026</span>
+
+  <!-- HOW WEALTHGUARD WORKS -->
+  <div class="section" style="background:var(--paper-alt,#F0F2EE);border-radius:16px;margin:0 16px 32px;padding:32px 24px;">
+    <div class="section-head" style="margin-bottom:24px;">
+      <h2>How WealthGuard works</h2>
+      <p>Three steps. No jargon. No trades executed on your behalf — just clear analysis you can act on.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;">
+      <div style="background:#fff;border-radius:12px;padding:20px;border:1px solid var(--line);">
+        <div style="font-size:28px;margin-bottom:10px;">📊</div>
+        <div style="font-weight:700;font-family:var(--serif);margin-bottom:8px;font-size:15px;">We score 120 instruments every week</div>
+        <div style="font-size:13px;color:var(--muted);line-height:1.6;">Our engine analyses every instrument across 9 analytical factors — from price momentum to macro environment — and an AI layer that scans daily news for events that might change the picture.</div>
+      </div>
+      <div style="background:#fff;border-radius:12px;padding:20px;border:1px solid var(--line);">
+        <div style="font-size:28px;margin-bottom:10px;">🎯</div>
+        <div style="font-weight:700;font-family:var(--serif);margin-bottom:8px;font-size:15px;">We tell you plainly: Buy, Watch, or Sell</div>
+        <div style="font-size:13px;color:var(--muted);line-height:1.6;">Each call comes with a plain-English explanation, a target price, and the level at which we'd reconsider. Not charts, not jargon — a clear view on where we stand and why.</div>
+      </div>
+      <div style="background:#fff;border-radius:12px;padding:20px;border:1px solid var(--line);">
+        <div style="font-size:28px;margin-bottom:10px;">📋</div>
+        <div style="font-weight:700;font-family:var(--serif);margin-bottom:8px;font-size:15px;">We check every prediction — wins and misses</div>
+        <div style="font-size:13px;color:var(--muted);line-height:1.6;">Every call is dated when we make it and checked automatically at 1 week, 1 month, and 1 quarter. We publish the accuracy — including when we're wrong. You can see exactly how the engine has performed.</div>
       </div>
     </div>
-    <div class="precision-row" id="precision-row">
-      <div class="prec-card"><div class="lbl">Short-Term</div><div class="sub-lbl">(Weekly checkpoint)</div><div class="val">—</div><div class="count">Accuracy pending launch</div></div>
-      <div class="prec-card"><div class="lbl">Mid-Term</div><div class="sub-lbl">(Monthly checkpoint)</div><div class="val">—</div><div class="count">Accuracy pending launch</div></div>
-      <div class="prec-card"><div class="lbl">Long-Term</div><div class="sub-lbl">(Quarterly checkpoint)</div><div class="val">—</div><div class="count">Accuracy pending launch</div></div>
-    </div>
   </div>
-  <div class="footer">WealthGuard · Independent investment analysis & strategy · Not SEBI registered advice · We do not execute trades on your behalf</div>
+
+  <!-- SAMPLE SIGNAL CARD (visible without login) -->
+  <div class="section" style="margin-bottom:32px;">
+    <div class="section-head" style="margin-bottom:20px;">
+      <h2>What a WealthGuard signal looks like</h2>
+      <p>This is an example of what you'll see on the Markets Dashboard. All signals include a plain-English reason, a target, and a reconsider level.</p>
+    </div>
+    <div style="max-width:480px;margin:0 auto;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:20px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">
+        <div>
+          <div style="font-weight:700;font-size:16px;font-family:var(--serif);">HDFC Bank</div>
+          <div style="font-size:12px;color:var(--muted);">Large-Cap Equity · Moderate risk</div>
+        </div>
+        <span style="background:#E8F5EE;color:#2E7D52;font-weight:700;font-size:12px;padding:4px 12px;border-radius:20px;">BUY</span>
+      </div>
+      <div style="font-size:13px;color:var(--ink);line-height:1.65;margin-bottom:14px;padding:12px;background:#F6F7F4;border-radius:8px;">
+        We see this as a buying opportunity. Price action has been trending positively, and the underlying business fundamentals are solid. Our 30-day view sees fair value around ₹780, with ₹685 as the level where we would reconsider.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px;">
+        <div style="text-align:center;padding:8px;background:#F6F7F4;border-radius:8px;">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:2px;">Entry</div>
+          <div style="font-weight:700;font-size:13px;">₹719</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:#E8F5EE;border-radius:8px;">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:2px;">Target</div>
+          <div style="font-weight:700;font-size:13px;color:#2E7D52;">₹780</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:#FBEAE7;border-radius:8px;">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:2px;">Reconsider at</div>
+          <div style="font-weight:700;font-size:13px;color:#A23B2E;">₹685</div>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px;">
+        9-levers score: 74/100 · High conviction · 30-day horizon · Not investment advice
+      </div>
+    </div>
+    <p style="text-align:center;margin-top:16px;font-size:13px;color:var(--muted);">
+      <button class="btn btn-primary" onclick="goTo('onboarding')" style="font-size:13px;padding:10px 24px;">See live signals for free →</button>
+    </p>
+  </div>
+  <div class="section">
+    <div class="section-head">
+      <h2>Our Track Record</h2>
+      <p>Every prediction is dated the day we make it and checked automatically at 1 week, 1 month, and 1 quarter. Wins and misses both shown. Data below is live — it updates every week as new checkpoints resolve.</p>
+    </div>
+
+    <!-- PLATFORM-WIDE PRECISION SUMMARY -->
+    <div class="precision-row" id="precision-row">
+      <div class="prec-card"><div class="lbl">Short-Term</div><div class="sub-lbl">(Weekly checkpoint)</div><div class="val" id="prec-week">—</div><div class="count" id="prec-week-n">Loading…</div></div>
+      <div class="prec-card"><div class="lbl">Mid-Term</div><div class="sub-lbl">(Monthly checkpoint)</div><div class="val" id="prec-month">—</div><div class="count" id="prec-month-n">First checkpoint: 9 Oct 2026</div></div>
+      <div class="prec-card"><div class="lbl">Long-Term</div><div class="sub-lbl">(Quarterly checkpoint)</div><div class="val" id="prec-qtr">—</div><div class="count" id="prec-qtr-n">First checkpoint: 9 Dec 2026</div></div>
+    </div>
+
+    <!-- CATEGORY BREAKDOWN -->
+    <div id="category-accuracy-grid" style="margin-top:24px;">
+      <div style="text-align:center;padding:20px;color:var(--muted);font-size:13px;">Loading category breakdown…</div>
+    </div>
+
+    <!-- INDIVIDUAL PREDICTION CARDS -->
+    <div id="track-record-container" style="margin-top:24px;"></div>
+  </div>
+  <div class="footer" style="line-height:1.7;">
+    WealthGuard · Independent investment analysis &amp; strategy<br>
+    <span style="font-size:11px;opacity:0.8;">
+      WealthGuard is not a SEBI-registered investment adviser. All signals and analysis are for informational
+      and educational purposes only and do not constitute financial advice. Past accuracy does not guarantee
+      future performance. Please consult a qualified financial adviser before making investment decisions.
+      WealthGuard does not execute trades on your behalf.
+    </span>
+  </div>
 </div>
 
 <!-- ============================================================
@@ -1169,8 +1251,8 @@ table.data-table{width:100%;border-collapse:collapse;}
    Leave blank to keep the homepage Track Record section in its
    honest "starting soon" empty state.
 ============================================================ */
-const SUPABASE_URL = 'https://mvuezfomqtgnxwrlnrvd.supabase.co';       // e.g. 'https://xxxxx.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12dWV6Zm9tcXRnbnh3cmxucnZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3MzM2MTAsImV4cCI6MjEwMzMwOTYxMH0.LVtJSB94mFSlpFudQWdKGI6r1zQa-UR0eavf-ticswM';  // e.g. 'eyJhbGciOi...'
+const SUPABASE_URL = '';       // e.g. 'https://xxxxx.supabase.co'
+const SUPABASE_ANON_KEY = '';  // e.g. 'eyJhbGciOi...'
 let sb = null;
 if (SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase) {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -1726,14 +1808,99 @@ async function loadHomepageTicker(){
 ============================================================ */
 async function loadTrackRecord(){
   const container = document.getElementById('track-record-container');
-  const precRow = document.getElementById('precision-row');
-  if (!sb){ return; } // stays in honest empty state — no keys configured yet
+  if (!sb){ return; }
 
   try {
-    // Fetch enough rows to cover multiple checkpoints per prediction —
-    // each checkpoint (weekly/monthly/quarterly) is its own row sharing
-    // the same recommendation_id, so we need a higher limit than before
-    // to have a full picture per prediction.
+    // ── 1. Category accuracy summary ─────────────────────────────────────
+    const { data: catRows } = await sb
+      .from('category_accuracy_summary')
+      .select('category,weekly_total,weekly_correct,monthly_total,monthly_correct,quarterly_total,quarterly_correct,avg_alpha');
+
+    const { data: benchmarks } = await sb
+      .from('category_benchmarks')
+      .select('category,benchmark_1w_pct,benchmark_1m_pct')
+      .order('period_month', { ascending:false })
+      .limit(9);
+
+    const benchMap = {};
+    (benchmarks||[]).forEach(b => { if (!benchMap[b.category]) benchMap[b.category] = b; });
+
+    const CAT_LABEL = {
+      large_cap_equity:'Large-Cap Equity', mid_cap_equity:'Mid-Cap Equity',
+      small_cap_equity:'Small-Cap Equity', large_cap_fund:'Large-Cap Funds',
+      flexi_mid_fund:'Flexi / Mid-Cap Funds', index_etf:'Index ETFs',
+      gold:'Gold', bond_gsec:'Bonds & G-Secs', debt_fund:'Debt Funds',
+    };
+
+    const pctStr = (correct, total) => {
+      if (!total || total < 3) return null; // need min 3 to show a percentage
+      return Math.round((correct/total)*100)+'%';
+    };
+
+    const catGrid = document.getElementById('category-accuracy-grid');
+    if (catRows && catRows.length) {
+      const rows = catRows.map(c => {
+        const bench = benchMap[c.category];
+        const wPct = pctStr(c.weekly_correct, c.weekly_total);
+        const mPct = pctStr(c.monthly_correct, c.monthly_total);
+        const bPct = bench ? bench.benchmark_1w_pct+'%' : '60%';
+        const beating = wPct && bench ? parseInt(wPct) >= bench.benchmark_1w_pct : null;
+        return `<div style="background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px 16px;">
+          <div style="font-weight:700;font-size:13px;margin-bottom:10px;font-family:var(--serif);">${CAT_LABEL[c.category]||c.category}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center;">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Weekly</div>
+              <div style="font-weight:700;font-size:16px;color:${wPct?(beating?'var(--safe)':'var(--ink)'):'var(--muted)'};">${wPct||'—'}</div>
+              <div style="font-size:10px;color:var(--muted);">${c.weekly_total||0} checked</div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Monthly</div>
+              <div style="font-weight:700;font-size:16px;color:var(--muted);">${mPct||'—'}</div>
+              <div style="font-size:10px;color:var(--muted);">${c.monthly_total||0} checked</div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Benchmark</div>
+              <div style="font-weight:700;font-size:16px;color:var(--muted);">${bPct}</div>
+              <div style="font-size:10px;color:var(--muted);">our target</div>
+            </div>
+          </div>
+          ${beating?`<div style="font-size:11px;color:var(--safe);margin-top:8px;text-align:center;">↑ Above our benchmark</div>`:''}
+        </div>`;
+      }).join('');
+      catGrid.innerHTML = `
+        <p style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+          Benchmark is our own published accuracy target for each category, auto-set monthly from trailing results. Signal clock started 9 September 2026. Monthly and quarterly checkpoints accrue over time.
+        </p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;">${rows}</div>`;
+    } else {
+      catGrid.innerHTML = '';
+    }
+
+    // ── 2. Platform-wide precision cards ─────────────────────────────────
+    const allOutcomes = (catRows||[]);
+    const totW = allOutcomes.reduce((s,c)=>s+(c.weekly_total||0),0);
+    const corW = allOutcomes.reduce((s,c)=>s+(c.weekly_correct||0),0);
+    const totM = allOutcomes.reduce((s,c)=>s+(c.monthly_total||0),0);
+    const corM = allOutcomes.reduce((s,c)=>s+(c.monthly_correct||0),0);
+
+    const wEl = document.getElementById('prec-week');
+    const wNEl = document.getElementById('prec-week-n');
+    if (wEl && totW >= 3) {
+      wEl.textContent = Math.round((corW/totW)*100)+'%';
+      if (wNEl) wNEl.textContent = `${corW} correct of ${totW} checked`;
+    } else if (wEl) {
+      wEl.textContent = '—';
+      if (wNEl) wNEl.textContent = totW ? `${totW} checked — need more data` : 'Building…';
+    }
+    const mEl = document.getElementById('prec-month');
+    const mNEl = document.getElementById('prec-month-n');
+    if (mEl && totM >= 3) {
+      mEl.textContent = Math.round((corM/totM)*100)+'%';
+      if (mNEl) mNEl.textContent = `${corM} correct of ${totM} checked`;
+    }
+
+    // ── 3. Individual prediction cards ───────────────────────────────────
+    // (existing logic below — reads from recommendation_outcomes)
     const { data: outcomes, error } = await sb
       .from('recommendation_outcomes')
       .select('*, recommendations(instrument_name, action, generated_at, signal_tier)')
@@ -2701,76 +2868,176 @@ async function loadMarketsDashboard(){
 
 async function renderInstrumentSections(){
   if (!sb) return;
-  const { data: instruments } = await sb.from('instrument_universe')
-    .select('*, ai_instrument_flags(risk_level, horizon_label, is_active)')
-    .eq('status','active').eq('is_watchlist',false)
-    .order('current_score',{ascending:false});
+
+  // ── Fetch all data in parallel ──────────────────────────────────────────
+  const [
+    { data: instruments },
+    { data: activeFlags },
+    { data: recs },
+    { data: accuracyRows },
+    { data: benchmarks },
+    { data: corpActions },
+  ] = await Promise.all([
+    sb.from('instrument_universe')
+      .select('id,symbol,name,category,risk_level,current_score,corporate_action_flag,corporate_action_note')
+      .eq('status','active').eq('is_watchlist',false)
+      .order('current_score',{ascending:false}),
+    sb.from('ai_instrument_flags')
+      .select('instrument_id,risk_level,horizon_label').eq('is_active',true),
+    sb.from('recommendations')
+      .select('instrument_name,action,confidence_score,rationale_text,rationale_short,entry_price_inr,target_price_inr,stop_loss_inr,horizon_days,signal_change_note,generated_at')
+      .is('client_id',null).eq('is_active',true)
+      .order('generated_at',{ascending:false}).limit(150),
+    sb.from('instrument_accuracy_summary')
+      .select('instrument_name,weekly_total,weekly_correct,monthly_total,monthly_correct'),
+    sb.from('category_benchmarks')
+      .select('category,benchmark_1w_pct').order('period_month',{ascending:false}).limit(9),
+    sb.from('instrument_universe')
+      .select('symbol,corporate_action_flag,corporate_action_note')
+      .eq('corporate_action_flag',true),
+  ]);
+
   if (!instruments) return;
 
-  // Fetch active AI flags for quick lookup
-  const { data: activeFlags } = await sb.from('ai_instrument_flags')
-    .select('instrument_id, risk_level, horizon_label').eq('is_active',true);
-  const flagMap = {};
-  (activeFlags||[]).forEach(f => { flagMap[f.instrument_id] = f; });
+  // ── Build lookup maps ───────────────────────────────────────────────────
+  const flagMap = {}; (activeFlags||[]).forEach(f=>{ flagMap[f.instrument_id]=f; });
+  const recMap  = {}; (recs||[]).forEach(r=>{ if(!recMap[r.instrument_name]) recMap[r.instrument_name]=r; });
+  const accMap  = {}; (accuracyRows||[]).forEach(a=>{ accMap[a.instrument_name]=a; });
+  const benchMap= {}; (benchmarks||[]).forEach(b=>{ if(!benchMap[b.category]) benchMap[b.category]=b; });
+  const corpMap = {}; (corpActions||[]).forEach(c=>{ corpMap[c.symbol]=c; });
 
-  // Fetch latest calls from recommendations
-  const { data: recs } = await sb.from('recommendations')
-    .select('instrument_name, action, confidence_score, rationale_text')
-    .is('client_id', null).eq('is_active', true).order('generated_at',{ascending:false}).limit(150);
-  const recMap = {};
-  (recs||[]).forEach(r => { if (!recMap[r.instrument_name]) recMap[r.instrument_name] = r; });
+  // ── Helpers ─────────────────────────────────────────────────────────────
+  const fmtINR = n => n != null ? '₹'+Number(n).toLocaleString('en-IN',{maximumFractionDigits:2}) : '—';
+  const accPct = (correct,total) => (total>=3) ? Math.round(correct/total*100)+'%' : null;
 
-  // Build category groups
+  // Live price movement since our call (from market data cache)
+  // Computed as % change from entry_price to current cached price
+  async function getLiveMovement(symbol, rec) {
+    if (!rec || !rec.entry_price_inr) return null;
+    try {
+      const { data } = await sb.from('market_data_cache')
+        .select('price').eq('symbol',symbol).limit(1);
+      const cur = data?.[0]?.price;
+      if (!cur) return null;
+      const pct = ((cur - rec.entry_price_inr) / rec.entry_price_inr) * 100;
+      const action = rec.action;
+      // Is this moving in the predicted direction?
+      const correct = action==='BUY' ? pct>0 : action==='SELL' ? pct<0 : Math.abs(pct)<1;
+      return { pct, correct, current: cur };
+    } catch { return null; }
+  }
+
+  // ── Build grouped structure ─────────────────────────────────────────────
   const grouped = {};
-  instruments.forEach(inst => {
-    if (!grouped[inst.category]) grouped[inst.category] = [];
+  instruments.forEach(inst=>{
+    if (!grouped[inst.category]) grouped[inst.category]=[];
     grouped[inst.category].push(inst);
   });
 
-  // Find container — look for the section after FD rates
-  const equityGrid = document.getElementById('equity-grid');
-  const fundGrid   = document.getElementById('fund-grid');
-  if (!equityGrid) return;
-
-  // Replace both grids with a comprehensive instruments section
-  // Insert all categories into equity-grid, clear fund-grid
-  const allCategoryHTML = CATEGORY_CONFIG.map(cat => {
+  // ── Render each category ────────────────────────────────────────────────
+  const allCategoryHTML = (await Promise.all(CATEGORY_CONFIG.map(async cat => {
     const insts = grouped[cat.key] || [];
     if (!insts.length) return '';
-    const cards = insts.map(inst => {
-      const rec = recMap[inst.symbol];
+    const bench = benchMap[cat.key];
+
+    const cards = await Promise.all(insts.map(async inst => {
+      const rec  = recMap[inst.symbol];
       const flag = flagMap[inst.id];
+      const acc  = accMap[inst.symbol];
+      const corp = corpMap[inst.symbol];
+      const mv   = await getLiveMovement(inst.symbol, rec);
+
       const stampCls = !rec ? 'stamp-watch'
-        : rec.action==='BUY'?'stamp-buy' : rec.action==='SELL'?'stamp-sell':'stamp-watch';
+        : rec.action==='BUY' ? 'stamp-buy'
+        : rec.action==='SELL' ? 'stamp-sell'
+        : 'stamp-watch';
+
+      // AI flag pill
       const flagHTML = flag && (flag.risk_level==='HIGH'||flag.risk_level==='CRITICAL')
-        ? `<div class="ai-flag-pill">🤖 AI Influenced — ${flag.horizon_label}</div>`
+        ? `<div class="ai-flag-pill">🤖 AI Influenced — ${flag.horizon_label||'Mid-Term'}</div>`
         : '';
+
+      // Corporate action warning
+      const corpHTML = corp
+        ? `<div style="background:#FBF0DA;border-radius:6px;padding:6px 10px;margin-top:8px;font-size:11px;color:#9A6B12;">
+             ⚠ Corporate action: ${corp.corporate_action_note||'Verify before acting on this signal'}
+           </div>`
+        : '';
+
+      // Signal change note
+      const changeHTML = rec?.signal_change_note
+        ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;font-style:italic;">${rec.signal_change_note}</div>`
+        : '';
+
+      // Live movement since our call
+      let mvHTML = '';
+      if (mv !== null) {
+        const dir = mv.pct >= 0 ? '↑' : '↓';
+        const col = mv.correct ? 'var(--safe)' : 'var(--warn)';
+        const tick = mv.correct ? '✓' : '';
+        mvHTML = `<div style="font-size:12px;color:${col};margin-top:6px;font-weight:600;">
+          ${dir} ${mv.pct>=0?'+':''}${mv.pct.toFixed(1)}% since our call ${tick}
+        </div>`;
+      }
+
+      // Target + stop-loss row
+      const thesisHTML = (rec?.target_price_inr || rec?.stop_loss_inr)
+        ? `<div style="display:flex;gap:8px;margin-top:8px;">
+             ${rec.target_price_inr?`<div style="flex:1;text-align:center;padding:5px;background:#E8F5EE;border-radius:6px;font-size:11px;"><div style="color:var(--muted);">Target</div><div style="font-weight:700;color:var(--safe);">${fmtINR(rec.target_price_inr)}</div></div>`:''}
+             ${rec.stop_loss_inr?`<div style="flex:1;text-align:center;padding:5px;background:#FBEAE7;border-radius:6px;font-size:11px;"><div style="color:var(--muted);">Reconsider at</div><div style="font-weight:700;color:var(--danger);">${fmtINR(rec.stop_loss_inr)}</div></div>`:''}
+           </div>`
+        : '';
+
+      // Directional accuracy for this instrument
+      const wPct = acc ? accPct(acc.weekly_correct, acc.weekly_total) : null;
+      const accHTML = wPct
+        ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;">
+             Our accuracy on ${inst.symbol}: Weekly ${wPct} (${acc.weekly_total} checked)
+             ${bench?` · Benchmark ${bench.benchmark_1w_pct}%`:''}
+           </div>`
+        : '';
+
       return `<div class="mkt-inst-card" style="min-width:0;">
         <div class="mkt-inst-top">
           <div>
             <div class="mkt-inst-name">${inst.symbol}</div>
             <div class="mkt-inst-type">${inst.name}</div>
           </div>
-          <span class="mkt-risk-chip mkt-risk-${inst.risk_level.replace('_','-')}">${inst.risk_level.replace(/_/g,' ').toUpperCase()}</span>
+          <span class="mkt-risk-chip mkt-risk-${(inst.risk_level||'moderate').replace(/_/g,'-')}">${(inst.risk_level||'—').replace(/_/g,' ').toUpperCase()}</span>
         </div>
         <div class="view-box">
           ${rec
             ? `<span class="view-stamp ${stampCls}">${rec.action}</span>
                <span class="view-conf">${rec.confidence_score!=null?Math.round(rec.confidence_score*100)+'%':''}</span>
-               <div class="view-reason">${rec.rationale_text||''}</div>`
-            : `<span class="view-stamp stamp-watch">NO CALL</span><div class="view-reason" style="color:var(--muted);font-size:10.5px;">No analysis logged yet for this instrument.</div>`
+               <div class="view-reason" style="font-size:12px;line-height:1.55;">${rec.rationale_text||rec.rationale_short||''}</div>`
+            : `<span class="view-stamp stamp-watch">NO CALL</span>
+               <div class="view-reason" style="color:var(--muted);font-size:10.5px;">Scoring pending — next run Sunday 8 PM IST.</div>`
           }
         </div>
+        ${thesisHTML}
+        ${mvHTML}
+        ${changeHTML}
         ${flagHTML}
+        ${corpHTML}
+        ${accHTML}
       </div>`;
-    }).join('');
-    return `<div class="mkt-category-head">${cat.label}</div>
-<div class="mkt-category-sub">${cat.risk}</div>
-<div class="${cat.gridClass}" style="margin-bottom:24px;">${cards}</div>`;
-  }).join('');
+    }));
 
+    // Category header with benchmark
+    const bench_line = bench
+      ? `<span style="font-size:12px;color:var(--muted);margin-left:10px;">Accuracy benchmark: ${bench.benchmark_1w_pct}% weekly</span>`
+      : '';
+
+    return `<div class="mkt-category-head">${cat.label}${bench_line}</div>
+<div class="mkt-category-sub">${cat.risk}</div>
+<div class="${cat.gridClass}" style="margin-bottom:24px;">${cards.join('')}</div>`;
+  }))).join('');
+
+  const equityGrid = document.getElementById('equity-grid');
+  const fundGrid   = document.getElementById('fund-grid');
+  if (!equityGrid) return;
   equityGrid.outerHTML = `<div id="instruments-section">${allCategoryHTML}</div>`;
-  if (fundGrid) fundGrid.outerHTML = ''; // merged into instruments-section
+  if (fundGrid) fundGrid.outerHTML = '';
 }
 
 async function renderWatchlist(){
