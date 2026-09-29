@@ -48,9 +48,18 @@ app.use('/api/admin',        require('./routes/admin'));
 // which is exactly what crashed above — app.use() with no path never goes
 // through that parser, so this form is safe under any router version.
 app.use((req, res) => {
-  if (!req.path.startsWith('/api')) {
-    res.sendFile(path.join(__dirname, '../frontend/public/index.html'));
+  // An /api path that matched no route must 404. This handler used to do
+  // NOTHING in that case — no response, no next() — so the socket stayed open
+  // until the caller timed out. A single missing route therefore looked like a
+  // dead server, and any future typo in an API path would do the same.
+  if (req.path.startsWith('/api')) {
+    console.warn(`   ⚠ 404 — no route for ${req.method} ${req.path}`);
+    return res.status(404).json({
+      error: `No such endpoint: ${req.method} ${req.path}`,
+      hint: 'Check the path against backend/routes/. A mismatch here used to hang the request.',
+    });
   }
+  res.sendFile(path.join(__dirname, '../frontend/public/index.html'));
 });
 
 // ── ERROR HANDLER ─────────────────────────────────

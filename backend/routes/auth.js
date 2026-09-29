@@ -179,29 +179,140 @@ router.post('/change-pin', async (req, res) => {
 // ── POST /api/auth/register ──────────────────────────────────
 // Creates the initial client record (no PIN yet — PIN is set after
 // onboarding in a dedicated /set-pin step).
+// Which onboarding field belongs to which table. The schema splits a client
+// across four tables on purpose; this used to spread the whole payload into
+// `clients`, which included `goals` (an array) and therefore failed every time.
+const CLIENT_FIELDS = [
+  'phone_wa', 'full_name', 'email', 'tax_bracket', 'pan_hash', 'kyc_status',
+];
+const LIFE_FIELDS = [
+  'age', 'retirement_age', 'income_type', 'monthly_income_inr', 'income_stability',
+  'monthly_committed_expenses', 'client_tier', 'marital_status', 'num_children',
+  'dual_income', 'health_status', 'health_insurance_cover_inr', 'term_cover_inr',
+  'has_critical_illness_cover', 'has_disability_cover',
+];
+const BEHAVIOURAL_FIELDS = [
+  'stated_risk_score', 'effective_risk_score', 'risk_category', 'panic_history',
+  'portfolio_check_frequency', 'money_relationship', 'decision_style',
+  'prior_loss_experience', 'communication_preference', 'trust_disposition',
+  'sleep_test_threshold_pct', 'max_single_position_pct', 'max_drawdown_tolerance_pct',
+];
+
+/** Keeps only the named fields that are actually present. */
+function pick(src, fields) {
+  const out = {};
+  for (const f of fields) {
+    if (src[f] !== undefined && src[f] !== null && src[f] !== '') out[f] = src[f];
+  }
+  return out;
+}
+
 router.post('/register', async (req, res) => {
   if (!supabaseAdmin) {
     return res.status(503).json({ error: 'Database not configured.' });
   }
-  const { phone_wa, full_name, ...rest } = req.body;
+
+  const body = req.body || {};
+  const { phone_wa, full_name } = body;
   if (!phone_wa || !full_name) {
     return res.status(400).json({ error: 'phone_wa and full_name are required' });
   }
 
-  // Check for duplicate
   const existing = await getClientByPhone(phone_wa);
   if (existing) {
     return res.status(409).json({ error: 'An account with this phone number already exists.' });
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('clients')
-    .insert({ phone_wa, full_name, ...rest, pin_set: false, onboarding_complete: false })
-    .select('id')
-    .single();
+  // clients.email is UNIQUE. Say so plainly rather than surfacing a raw
+  // Postgres constraint name to someone signing up.
+  if (body.email) {
+    const { data: dupe } = await supabaseAdmin
+      .from('clients').select('id').eq('email', String(body.email).trim().toLowerCase()).limit(1);
+    if (dupe && dupe.length) {
+      return res.status(409).json({ error: 'An account with this email address already exists.' });
+    }
+  }
 
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ success: true, client_id: data.id });
+  // Warn about anything the form sends that no table claims — a silent drop
+  // is how a field goes missing for weeks without anyone noticing.
+  const known = new Set([...CLIENT_FIELDS, ...LIFE_FIELDS, ...BEHAVIOURAL_FIELDS, 'goals']);
+  const unknown = Object.keys(body).filter(k => !known.has(k));
+  if (unknown.length) {
+    console.warn(`   ⚠ /auth/register ignored unrecognised field(s): ${unknown.join(', ')}. ` +
+                 `Add them to the right allow-list in routes/auth.js if they should persist.`);
+  }
+
+  // ── 1. The client row ────────────────────────────────────────────
+  const clientRow = {
+    ...pick(body, CLIENT_FIELDS),
+    phone_wa: String(phone_wa).trim(),
+    full_name: String(full_name).trim(),
+    pin_set: false,
+    onboarding_complete: false,
+  };
+  if (clientRow.email) clientRow.email = String(clientRow.email).trim().toLowerCase();
+
+  const { data, error } = await supabaseAdmin
+    .from('clients').insert(clientRow).select('id').single();
+
+  if (error) {
+    console.error(`   ❌ /auth/register: clients insert failed — ${error.message}`);
+    return res.status(500).json({ error: error.message });
+  }
+  const clientId = data.id;
+
+  // ── 2. The three child records ───────────────────────────────────
+  // Each is attempted independently. The account already exists at this point,
+  // so a failure here must not fail the whole registration and leave the user
+  // unable to sign up — it is reported and the account still works.
+  const warnings = [];
+
+  const life = pick(body, LIFE_FIELDS);
+  if (Object.keys(life).length) {
+    const { error: e } = await supabaseAdmin
+      .from('client_life_profiles').insert({ client_id: clientId, ...life });
+    if (e) { warnings.push(`life profile: ${e.message}`); console.warn(`   ⚠ ${e.message}`); }
+  }
+
+  const behav = pick(body, BEHAVIOURAL_FIELDS);
+  if (Object.keys(behav).length) {
+    const { error: e } = await supabaseAdmin
+      .from('client_behavioural_profiles').insert({ client_id: clientId, ...behav });
+    if (e) { warnings.push(`behavioural profile: ${e.message}`); console.warn(`   ⚠ ${e.message}`); }
+  }
+
+  // goals is an ARRAY. Spreading it into `clients` is what broke registration.
+  if (Array.isArray(body.goals) && body.goals.length) {
+    const rows = body.goals
+      .filter(g => g && g.goal_name)
+      .map((g, i) => ({
+        client_id:         clientId,
+        goal_name:         String(g.goal_name).slice(0, 200),
+        target_amount_inr: Number(g.target_amount_inr) || null,
+        // The form collects a year ("2045"); the column is a DATE.
+        target_date:       g.target_date
+          ? (/^\d{4}$/.test(String(g.target_date).trim())
+              ? `${String(g.target_date).trim()}-03-31`
+              : g.target_date)
+          : null,
+        bucket_number:     i + 1,
+        priority_rank:     i + 1,
+        is_active:         true,
+      }));
+    if (rows.length) {
+      const { error: e } = await supabaseAdmin.from('client_goals').insert(rows);
+      if (e) { warnings.push(`goals: ${e.message}`); console.warn(`   ⚠ goals insert: ${e.message}`); }
+    }
+  }
+
+  console.log(`   ✓ Registered ${clientRow.full_name} (${clientId})` +
+              (warnings.length ? ` with ${warnings.length} warning(s)` : ''));
+
+  res.json({
+    success: true,
+    client_id: clientId,
+    ...(warnings.length ? { warnings } : {}),
+  });
 });
 
 module.exports = router;
