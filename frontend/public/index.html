@@ -1561,23 +1561,19 @@ async function checkPhone(){
     return;
   }
   try {
-    const { data: client, error } = await sb
-      .from('clients')
-      .select('id, pin_set')
-      .eq('phone_wa', phone)
-      .single();
+    const result = await API.post('/auth/check', { phone_wa: phone });
 
     document.getElementById('login-btn').disabled = false;
 
-    if (error || !client){
+    if (!result || !result.exists){
       msg.textContent='No account found with that number. Want to create one?';
       msg.className='login-msg bad'; return;
     }
 
     // Store client id for the next step
-    _loginClientId = client.id;
+    _loginClientId = result.client_id;
 
-    if (client.pin_set){
+    if (result.pin_set){
       // Account has a PIN — show PIN field, backend does the verification
       document.getElementById('login-pin-wrap').style.display = 'block';
       document.getElementById('login-btn').textContent = 'Log In →';
