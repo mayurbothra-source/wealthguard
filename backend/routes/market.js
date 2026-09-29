@@ -35,7 +35,6 @@ router.get('/instruments', async (req, res) => {
     const { data, error } = await supabaseAdmin
       .from('instrument_universe')
       .select('symbol, name, category')
-      .eq('is_active', true)
       .order('category')
       .order('name');
     if (error) return res.status(500).json({ error: error.message });
