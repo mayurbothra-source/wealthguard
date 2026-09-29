@@ -26,4 +26,23 @@ router.get('/regime', async (req, res) => {
   res.json({ vix, ...regime });
 });
 
+// GET /api/market/instruments — full universe list for the Add Holding dropdown
+// Returns name, symbol, category/asset_class for every tracked instrument.
+// Public — no auth needed; the list itself is not sensitive.
+router.get('/instruments', async (req, res) => {
+  try {
+    const { supabaseAdmin } = require('../../config/supabase');
+    const { data, error } = await supabaseAdmin
+      .from('instrument_universe')
+      .select('symbol, name, category')
+      .eq('is_active', true)
+      .order('category')
+      .order('name');
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ instruments: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
