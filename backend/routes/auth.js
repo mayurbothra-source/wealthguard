@@ -52,7 +52,7 @@ router.post('/check', async (req, res) => {
     // Deliberate vague response — don't confirm whether the number exists
     return res.json({ exists: false, pin_set: false });
   }
-  res.json({ exists: true, pin_set: !!client.pin_set });
+  res.json({ exists: true, pin_set: !!client.pin_set, client_id: client.id });
 });
 
 // ── POST /api/auth/login ─────────────────────────────────────
