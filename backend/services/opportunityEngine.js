@@ -81,7 +81,13 @@ async function findBreakouts() {
       const pair = bySymbol[inst.symbol];
       if (!pair || pair.first.price === pair.last.price) continue;
 
-      const movePct = ((pair.last.price - pair.first.price) / pair.first.price) * 100;
+      // A zero or missing opening price makes the division Infinity, which
+      // then passes the threshold test and writes a nonsense opportunity.
+      const openPrice = Number(pair.first.price);
+      const lastPrice = Number(pair.last.price);
+      if (!openPrice || !lastPrice || !isFinite(openPrice) || !isFinite(lastPrice)) continue;
+
+      const movePct = ((lastPrice - openPrice) / openPrice) * 100;
       if (Math.abs(movePct) < BREAKOUT_THRESHOLD_PCT) continue;
 
       const dir = movePct > 0 ? 'upward' : 'downward';
@@ -93,7 +99,7 @@ async function findBreakouts() {
         instrument_name:  inst.name,
         opportunity_type: 'technical_breakout',
         headline:         `${inst.name} moved ${movePct > 0 ? '+' : ''}${movePct.toFixed(1)}% in a single session`,
-        detail:           `A ${dir} move of this size in one session is unusual for a ${inst.category.replace(/_/g, ' ')} instrument. ` +
+        detail:           `A ${dir} move of this size in one session is unusual for a ${String(inst.category || 'tracked').replace(/_/g, ' ')} instrument. ` +
                           `Our current signal is ${currentSignal}. A move of this magnitude between weekly scoring cycles ` +
                           `may indicate new information entering the market that our next scoring run will pick up.`,
         conviction:       Math.abs(movePct) >= BREAKOUT_THRESHOLD_PCT * 1.5 ? 'high' : 'medium',
@@ -142,7 +148,25 @@ async function findDualAgreement() {
     const sigMap = {};
     (signals || []).forEach(s => { sigMap[s.instrument_name] = s.action; });
 
-    for (const flag of flags) {
+    // ── Collapse to ONE flag per instrument ──────────────────────────
+    // ai_instrument_flags holds a row per (instrument, event), so an
+    // instrument caught by three active events appeared three times in
+    // `flags` and produced three identical cards. Keep only the most
+    // severe flag per instrument: CRITICAL > HIGH > everything else, and
+    // within a tie the higher ai_lever_score.
+    const SEVERITY = { CRITICAL: 3, HIGH: 2, LOW: 1, NONE: 0 };
+    const worstByInstrument = new Map();
+    for (const f of flags) {
+      if (!f.instrument_id) continue;
+      const prev = worstByInstrument.get(f.instrument_id);
+      if (!prev) { worstByInstrument.set(f.instrument_id, f); continue; }
+      const a = SEVERITY[f.risk_level] ?? 0, b = SEVERITY[prev.risk_level] ?? 0;
+      if (a > b || (a === b && (f.ai_lever_score ?? 0) > (prev.ai_lever_score ?? 0))) {
+        worstByInstrument.set(f.instrument_id, f);
+      }
+    }
+
+    for (const flag of worstByInstrument.values()) {
       const inst = (instruments || []).find(i => i.id === flag.instrument_id);
       if (!inst || inst.current_score == null) continue;
 
@@ -150,24 +174,19 @@ async function findDualAgreement() {
       const strongAIPositive = flag.opportunity_level === 'HIGH' && (flag.ai_lever_score ?? 5) >= 7;
       const strongAINegative = flag.risk_level === 'HIGH' || flag.risk_level === 'CRITICAL';
 
-      // Positive dual agreement: both engines bullish
-      if (strongNineLever && strongAIPositive) {
-        found.push({
-          instrument_id:    inst.id,
-          symbol:           inst.symbol,
-          instrument_name:  inst.name,
-          opportunity_type: 'dual_agreement',
-          headline:         `${inst.name}: both our engines are aligned positively`,
-          detail:           `Our structural 9-lever analysis scores this ${inst.current_score}/100, and our AI event analysis ` +
-                            `independently identifies a positive positioning over a ${flag.horizon_label || 'medium'} horizon. ` +
-                            `When two independent methods agree, conviction is higher than either alone.`,
-          conviction:       'high',
-          current_signal:   sigMap[inst.symbol] || 'WATCH',
-        });
-      }
+      if (!strongNineLever) continue;
 
-      // Negative dual agreement: strong score but AI sees material risk — worth flagging
-      if (strongNineLever && strongAINegative) {
+      // ── MUTUALLY EXCLUSIVE, RISK FIRST ────────────────────────────
+      // These were two independent `if` blocks. An instrument that was
+      // both a HIGH opportunity and a HIGH risk satisfied both and
+      // produced two contradictory cards on the same day — one saying
+      // the engines agree positively, one warning of near-term risk.
+      //
+      // The risk branch is checked first on purpose. When our own AI
+      // sees material near-term risk, telling a client "both engines
+      // are aligned positively" is the wrong call regardless of the
+      // structural score. Capital preservation first.
+      if (strongAINegative) {
         found.push({
           instrument_id:    inst.id,
           symbol:           inst.symbol,
@@ -178,6 +197,19 @@ async function findDualAgreement() {
                             `has identified a ${flag.risk_level} risk over a ${flag.horizon_label || 'medium'} horizon. ` +
                             `This is a case where the long-term case and the short-term picture differ. Position sizing matters here.`,
           conviction:       'medium',
+          current_signal:   sigMap[inst.symbol] || 'WATCH',
+        });
+      } else if (strongAIPositive) {
+        found.push({
+          instrument_id:    inst.id,
+          symbol:           inst.symbol,
+          instrument_name:  inst.name,
+          opportunity_type: 'dual_agreement',
+          headline:         `${inst.name}: both our engines are aligned positively`,
+          detail:           `Our structural 9-lever analysis scores this ${inst.current_score}/100, and our AI event analysis ` +
+                            `independently identifies a positive positioning over a ${flag.horizon_label || 'medium'} horizon. ` +
+                            `When two independent methods agree, conviction is higher than either alone.`,
+          conviction:       'high',
           current_signal:   sigMap[inst.symbol] || 'WATCH',
         });
       }
@@ -281,11 +313,44 @@ async function runOpportunityEngine() {
       findSectorRotation(),
     ]);
 
-    const all = [...breakouts, ...dualAgreements, ...rotations];
+    let all = [...breakouts, ...dualAgreements, ...rotations];
     console.log(`   Found: ${breakouts.length} breakouts, ${dualAgreements.length} dual agreements, ${rotations.length} rotations`);
 
-    // Cap at 8 per day, prioritising high conviction — avoids noise
-    all.sort((a, b) => (a.conviction === 'high' ? -1 : 1) - (b.conviction === 'high' ? -1 : 1));
+    // ── IDEMPOTENCE ───────────────────────────────────────────────────
+    // Without this, re-triggering the engine on the same day inserts
+    // every finding again, and a client sees the same card two or three
+    // times. Skip anything already live for that symbol and type.
+    try {
+      const { data: live } = await supabaseAdmin
+        .from('opportunities')
+        .select('symbol, opportunity_type')
+        .eq('is_active', true);
+      if (live?.length) {
+        const seen = new Set(live.map(o => `${o.symbol}|${o.opportunity_type}`));
+        const before = all.length;
+        all = all.filter(o => !seen.has(`${o.symbol}|${o.opportunity_type}`));
+        if (before !== all.length) {
+          console.log(`   Skipped ${before - all.length} already live`);
+        }
+      }
+    } catch (e) {
+      // Non-fatal: better to risk a duplicate than to store nothing.
+      console.warn(`   ⚠ Could not read live opportunities for dedup: ${e.message}`);
+    }
+
+    // Also dedup within this run, in case two detectors found the same thing
+    const runSeen = new Set();
+    all = all.filter(o => {
+      const k = `${o.symbol}|${o.opportunity_type}`;
+      if (runSeen.has(k)) return false;
+      runSeen.add(k);
+      return true;
+    });
+
+    // Cap at 8 per day, high conviction first — avoids noise.
+    // (Same ordering as before, written so it reads as what it does.)
+    const rank = o => (o.conviction === 'high' ? 0 : 1);
+    all.sort((a, b) => rank(a) - rank(b));
     const selected = all.slice(0, 8);
 
     for (const opp of selected) {

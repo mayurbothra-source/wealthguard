@@ -10,9 +10,14 @@ router.get('/:clientId', async (req, res) => {
   if (!supabaseAdmin) {
     // Return demo portfolio
     return res.json({
-      holdings: getDemoPortfolio(),
-      summary: getDemoSummary(),
-      demo: true,
+      // Invented holdings (₹18.43 lakh, with stop-loss distances and a
+      // GREEN risk status) used to be returned here. A client seeing those
+      // as their own portfolio is the worst possible failure mode.
+      holdings: [],
+      summary: { total_value: 0, total_cost: 0, total_pnl: 0, total_pnl_pct: 0,
+                 positions_count: 0, risk_status: 'UNKNOWN' },
+      unavailable: true,
+      message: 'Your portfolio is temporarily unavailable.',
     });
   }
 
@@ -103,7 +108,12 @@ router.post('/add', async (req, res) => {
   }
 
   if (!supabaseAdmin) {
-    return res.json({ success: true, demo: true, message: 'Holding added (demo mode)' });
+    // Returning success here told the client their holding was saved when
+    // nothing was written. A 503 is the honest answer.
+    return res.status(503).json({
+      success: false, unavailable: true,
+      error: 'Could not save right now — your holding was not recorded. Please try again shortly.',
+    });
   }
 
   try {
@@ -127,7 +137,11 @@ router.post('/add', async (req, res) => {
 router.put('/:holdingId', async (req, res) => {
   const { holdingId } = req.params;
   const updates = req.body;
-  if (!supabaseAdmin) return res.json({ success: true, demo: true });
+  // Never report success for a write that did not happen.
+  if (!supabaseAdmin) return res.status(503).json({
+    success: false, unavailable: true,
+    error: 'Could not save right now — no change was made. Please try again shortly.',
+  });
   const { data, error } = await supabaseAdmin.from('portfolios')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', holdingId).select().single();
@@ -138,7 +152,11 @@ router.put('/:holdingId', async (req, res) => {
 // DELETE /api/portfolio/:holdingId — soft delete (mark inactive)
 router.delete('/:holdingId', async (req, res) => {
   const { holdingId } = req.params;
-  if (!supabaseAdmin) return res.json({ success: true, demo: true });
+  // Never report success for a write that did not happen.
+  if (!supabaseAdmin) return res.status(503).json({
+    success: false, unavailable: true,
+    error: 'Could not save right now — no change was made. Please try again shortly.',
+  });
   const { error } = await supabaseAdmin.from('portfolios')
     .update({ is_active: false, updated_at: new Date().toISOString() })
     .eq('id', holdingId);
@@ -147,28 +165,8 @@ router.delete('/:holdingId', async (req, res) => {
 });
 
 // ── DEMO DATA ──────────────────────────────────────
-function getDemoPortfolio() {
-  const holdings = [
-    { id:'1', instrument_name:'Infosys Ltd', asset_class:'equity', sub_category:'large_cap', quantity:50, avg_buy_price_inr:1420, current_price_inr:1682, stop_loss_price:1320, target_price:1900, linked_goal:'Retirement at 55', allocation_pct:8.4 },
-    { id:'2', instrument_name:'Mirae Asset Large Cap', asset_class:'mutual_fund', sub_category:'large_cap', quantity:2800, avg_buy_price_inr:52.4, current_price_inr:61.8, stop_loss_price:48.0, target_price:74.0, linked_goal:'Home Down Payment', allocation_pct:9.4 },
-    { id:'3', instrument_name:'SBI Bluechip Fund', asset_class:'mutual_fund', sub_category:'large_cap', quantity:1500, avg_buy_price_inr:58.2, current_price_inr:64.1, stop_loss_price:54.0, linked_goal:"Priya's College", allocation_pct:5.2 },
-    { id:'4', instrument_name:'Tata Motors Ltd', asset_class:'equity', sub_category:'large_cap', quantity:120, avg_buy_price_inr:680, current_price_inr:712, stop_loss_price:682, linked_goal:'Retirement at 55', allocation_pct:4.6 },
-    { id:'5', instrument_name:'Gold ETF (Nippon)', asset_class:'gold', sub_category:'etf', quantity:30, avg_buy_price_inr:5200, current_price_inr:5840, stop_loss_price:4900, linked_goal:"Priya's College", allocation_pct:9.4 },
-    { id:'6', instrument_name:'HDFC Liquid Fund', asset_class:'mutual_fund', sub_category:'liquid', quantity:200, avg_buy_price_inr:1500, current_price_inr:1548, stop_loss_price:null, linked_goal:'Emergency Fund', allocation_pct:16.8 },
-    { id:'7', instrument_name:'G-Sec 7.26% 2032', asset_class:'bond', sub_category:'gsec', quantity:10, buy_price_inr:100, current_price_inr:102.4, stop_loss_price:null, linked_goal:'Retirement at 55', allocation_pct:0.6 },
-  ];
-  return holdings.map(h => ({
-    ...h,
-    current_value_inr: h.quantity * h.current_price_inr,
-    unrealised_pnl_inr: h.quantity * (h.current_price_inr - h.avg_buy_price_inr),
-    unrealised_pnl_pct: ((h.current_price_inr - h.avg_buy_price_inr) / h.avg_buy_price_inr * 100),
-    sl_distance_pct: h.stop_loss_price ? ((h.current_price_inr - h.stop_loss_price) / h.current_price_inr * 100) : null,
-    sl_status: h.stop_loss_price ? (((h.current_price_inr - h.stop_loss_price) / h.current_price_inr * 100) < 3 ? 'danger' : ((h.current_price_inr - h.stop_loss_price) / h.current_price_inr * 100) < 8 ? 'warn' : 'safe') : 'na',
-  }));
-}
 
-function getDemoSummary() {
-  return { total_value: 1843200, total_cost: 1600000, total_pnl: 243200, total_pnl_pct: 15.2, positions_count: 7, risk_status: 'GREEN' };
-}
+
+
 
 module.exports = router;

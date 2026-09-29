@@ -508,7 +508,12 @@ async function runAILeverScan() {
     let heldSymbols = new Set();
     try {
       const { data: holdings } = await supabaseAdmin
-        .from('portfolio_holdings')
+        // NOTE: reads `portfolios` — the table the frontend actually writes to via
+      // POST /api/portfolio/add, and the one schema.sql defines. This used to
+      // read `portfolio_holdings`, which no migration ever created, so this
+      // query silently returned nothing and this engine never saw a single
+      // client holding.
+        .from('portfolios')
         .select('instrument_name')
         .eq('is_active', true);
       heldSymbols = new Set((holdings || []).map(h => h.instrument_name));

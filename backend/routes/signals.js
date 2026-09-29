@@ -11,7 +11,16 @@ router.get('/:clientId', async (req, res) => {
   const { tier, action, limit = 20 } = req.query;
 
   if (!supabaseAdmin) {
-    return res.json({ signals: getDemoSignals(), demo: true });
+    // The service key is not configured, so there is no database to read.
+    // This used to return hardcoded "demo" data that the frontend had no way
+    // to distinguish from real output — including fabricated BUY calls with
+    // invented stop-losses. Returning real emptiness is the only honest
+    // answer, and the frontend's existing empty states handle it.
+    return res.status(503).json({
+      signals: [],
+      unavailable: true,
+      message: 'Signals are temporarily unavailable. Nothing is shown rather than anything uncertain.',
+    });
   }
 
   try {
@@ -117,14 +126,6 @@ router.post('/generate', async (req, res) => {
   }
 });
 
-function getDemoSignals() {
-  return [
-    { id:'s1', action:'BUY', signal_tier:'high_conviction', instrument_name:'SBI Bluechip Fund', asset_class:'mutual_fund', engines_agreed:7, confidence_score:0.82, entry_price_inr:64.1, stop_loss_inr:59.2, target_price_inr:74.0, risk_reward_ratio:2.1, rationale_text:'Strong convergence across 7 of 8 engines. RSI recovering from oversold at 38. FII net buyers in large-cap MFs for 3 consecutive weeks. PE at 24.2x — below sector average. High Conviction BUY — suitable for your Home Down Payment bucket.', rationale_short:'HC BUY — 7/8 engines agree. RSI oversold + FII buying. SL: ₹59.2.', engines_detail_json:{technical:'bullish',fundamental:'bullish',management:'bullish',sentiment:'bullish',institutional:'bullish',sector_rotation:'bullish',pestle:'bullish',porters:'neutral'} },
-    { id:'s2', action:'BUY', signal_tier:'standard', instrument_name:'Sovereign Gold Bond 2026', asset_class:'gold', engines_agreed:6, confidence_score:0.76, entry_price_inr:6240, stop_loss_inr:5800, target_price_inr:7200, risk_reward_ratio:2.3, rationale_text:'High Conviction BUY on SGB. Gold momentum strong as USD weakens. 2.5% interest p.a. + gold price appreciation + capital gains tax exempt at maturity. FII rotations to gold observed. Recommended for Retirement bucket at 5% allocation.', rationale_short:'BUY SGB — Gold momentum + tax benefits. SL: ₹5,800.', engines_detail_json:{technical:'bullish',fundamental:'bullish',management:'neutral',sentiment:'bullish',institutional:'bullish',sector_rotation:'bullish',pestle:'bullish',porters:'neutral'} },
-    { id:'s3', action:'REDUCE', signal_tier:'standard', instrument_name:'Tata Motors Ltd', asset_class:'equity', engines_agreed:4, confidence_score:0.64, entry_price_inr:712, stop_loss_inr:682, rationale_text:'REDUCE 40% of position. Stop-loss at ₹682 is 4.2% away. Promoter pledging increased from 12% to 18% — management quality flag. EV transition competitive pressure scoring high. Consider booking partial profits now.', rationale_short:'REDUCE Tata Motors — SL close (4.2%). Promoter pledge rising. Exit 40% now.', engines_detail_json:{technical:'bearish',fundamental:'neutral',management:'bearish',sentiment:'bearish',institutional:'neutral',sector_rotation:'neutral',pestle:'neutral',porters:'bearish'} },
-    { id:'s4', action:'WATCH', signal_tier:'watchlist', instrument_name:'Bajaj Finance Ltd', asset_class:'equity', engines_agreed:4, confidence_score:0.58, rationale_text:'Watchlist only. 4 engines positive but below High Conviction threshold. Rate environment uncertain — NBFCs rate-sensitive. Wait for RSI pullback below 45 before entering. PE 28x slightly above comfort zone.', rationale_short:'WATCH Bajaj Finance — await better entry. RSI pullback to 45 = entry signal.', engines_detail_json:{technical:'neutral',fundamental:'bullish',management:'bullish',sentiment:'neutral',institutional:'bullish',sector_rotation:'bullish',pestle:'bearish',porters:'neutral'} },
-    { id:'s5', action:'BUY', signal_tier:'standard', instrument_name:'Nifty BeES ETF', asset_class:'equity', engines_agreed:5, confidence_score:0.68, entry_price_inr:245.6, stop_loss_inr:228.0, target_price_inr:278.0, risk_reward_ratio:1.8, rationale_text:'Standard BUY. Market regime strongly bullish — Nifty above 200 DMA, VIX at 13.4. ETF provides broad large-cap exposure at low cost. Suitable for Retirement bucket. FII net buyers for 5 consecutive sessions.', rationale_short:'BUY Nifty BeES — bull regime confirmed. SL: ₹228. Retirement bucket.', engines_detail_json:{technical:'bullish',fundamental:'bullish',management:'neutral',sentiment:'bullish',institutional:'bullish',sector_rotation:'neutral',pestle:'bullish',porters:'neutral'} },
-  ];
-}
+
 
 module.exports = router;

@@ -7,6 +7,7 @@
  */
 
 const { supabaseAdmin } = require('../../config/supabase');
+const db = require('../lib/db');
 const { reportRun } = require('./healthEngine');
 const { getNSEQuote, getYahooQuote } = require('./marketData');
 
@@ -109,13 +110,53 @@ async function fetchCurrentPrice(rec) {
  * BUY/HOLD: correct if price went up (positive return)
  * SELL/REDUCE/WATCH: correct if price stayed flat or went down
  */
+/**
+ * Was a prediction directionally right?
+ *
+ * WATCH USED TO COUNT AS A BEARISH PREDICTION, and that inflated the published
+ * accuracy figure. Most instruments score 50-69 and therefore land on WATCH,
+ * so in any flat or mildly falling week a large slice of the track record was
+ * automatically marked correct — for predicting nothing.
+ *
+ * WATCH is not a directional call. It is the explicit absence of one: "we do
+ * not have a view strong enough to act on." Scoring it as a correct bearish
+ * call when a price merely fails to rise measures the market's tendency to
+ * drift, not our skill.
+ *
+ * It now returns null, which excludes the checkpoint from the accuracy
+ * numerator and denominator both. WATCH outcomes are still recorded and
+ * resolved — see classifyOutcome() — so nothing is lost, and the platform can
+ * report "of our WATCH calls, X% stayed inside a quiet band" separately and
+ * honestly, without folding it into a directional hit rate.
+ */
 function isDirectionCorrect(action, returnPct) {
   if (!action || returnPct === null || returnPct === undefined) return null;
-  const bullish = ['BUY', 'HOLD'].includes(action.toUpperCase());
-  const bearish = ['SELL', 'REDUCE', 'WATCH'].includes(action.toUpperCase());
+  const a = action.toUpperCase();
+  const bullish = ['BUY', 'HOLD'].includes(a);
+  const bearish = ['SELL', 'REDUCE'].includes(a);
   if (bullish) return returnPct >= 0;
   if (bearish) return returnPct <= 0;
-  return null;
+  return null;   // WATCH and anything unrecognised: no direction was claimed
+}
+
+/**
+ * Band a WATCH outcome without pretending it was a directional call.
+ * Reported separately from accuracy.
+ *
+ * "Held" means the price stayed inside ±WATCH_QUIET_BAND_PCT, which is what a
+ * WATCH implies — nothing worth acting on happened.
+ */
+const WATCH_QUIET_BAND_PCT = 3;
+
+function classifyWatchOutcome(returnPct) {
+  if (returnPct === null || returnPct === undefined) return null;
+  if (Math.abs(returnPct) <= WATCH_QUIET_BAND_PCT) return 'held';
+  return returnPct > 0 ? 'rose_beyond_band' : 'fell_beyond_band';
+}
+
+/** True when this action made a directional claim at all. */
+function isDirectionalAction(action) {
+  return ['BUY', 'HOLD', 'SELL', 'REDUCE'].includes(String(action || '').toUpperCase());
 }
 
 /**
@@ -217,6 +258,12 @@ async function runTrackRecordCheckpoints() {
       }
 
       const correct = isDirectionCorrect(pred.action, returnPct);
+      // WATCH returns null above, on purpose. Band it separately so the
+      // outcome is still recorded and can be reported honestly — just not
+      // folded into a directional hit rate.
+      const watchOutcome = correct === null && String(pred.action).toUpperCase() === 'WATCH'
+        ? classifyWatchOutcome(returnPct)
+        : null;
 
       // Fetch the passive baseline so we can compute honest alpha.
       // A BUY that returned +2% in a week the Nifty rose 3% actually
@@ -238,7 +285,8 @@ async function runTrackRecordCheckpoints() {
       const outcomeRow = {
         recommendation_id:       pred.id,
         client_id:               null,
-        direction_correct:       correct,
+        direction_correct:       correct,       // null for WATCH — no claim made
+        watch_outcome:           watchOutcome,  // 'held' | 'rose_beyond_band' | 'fell_beyond_band'
         actual_price_inr:        priceData.price,
         price_source:            priceData.source,
         checkpoint_label:        checkpoint.label,
@@ -248,16 +296,24 @@ async function runTrackRecordCheckpoints() {
         [checkpoint.field]:      parseFloat(effectiveReturn.toFixed(2)),
       };
 
-      const { error: insertErr } = await supabaseAdmin
-        .from('recommendation_outcomes')
-        .insert(outcomeRow);
+      // watch_outcome arrives with migration 005. Naming it in a plain insert
+      // before that migration runs would have PostgREST reject the whole row,
+      // silently stopping the track record — the one thing this engine exists
+      // to protect. Tolerant write: the checkpoint always lands.
+      const outcomeWrite = await db.writeTolerant(
+        'recommendation_outcomes', 'insert', outcomeRow, ['watch_outcome']);
 
-      if (insertErr) {
-        console.error(`   ❌ ${pred.instrument_name} ${checkpoint.label}: ${insertErr.message}`);
+      if (!outcomeWrite.ok) {
+        console.error(`   ❌ ${pred.instrument_name} ${checkpoint.label}: not stored — see the error above`);
       } else {
         logged++;
-        const icon = correct ? '✓' : '✗';
-        console.log(`   ${icon} ${pred.instrument_name} ${checkpoint.label}: ${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}% (${correct ? 'Correct' : 'Incorrect'}) [${priceData.source}]`);
+        // A WATCH has no direction, so it is neither correct nor incorrect.
+        // Printing '✗ Incorrect' for one was misleading in the logs.
+        const verdict = correct === null
+          ? `no directional claim${watchOutcome ? ` — ${watchOutcome.replace(/_/g, ' ')}` : ''}`
+          : (correct ? 'Correct' : 'Incorrect');
+        const icon = correct === null ? 'ⓘ' : (correct ? '✓' : '✗');
+        console.log(`   ${icon} ${pred.instrument_name} ${checkpoint.label}: ${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}% (${verdict}) [${priceData.source}]`);
       }
     }
   }
@@ -277,4 +333,5 @@ async function runTrackRecordCheckpoints() {
   });
 }
 
-module.exports = { runTrackRecordCheckpoints };
+module.exports = {
+  classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT, runTrackRecordCheckpoints };

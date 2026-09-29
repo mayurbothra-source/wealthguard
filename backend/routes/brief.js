@@ -1,71 +1,52 @@
 const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
-const { generateMorningBrief } = require('../engines/analysisEngine');
-const { refreshAllMarketData } = require('../services/marketData');
+const db = require('../lib/db');
 
-// GET /api/brief/:clientId — get today's morning brief
+// GET /api/brief/:clientId — return TODAY'S STORED BRIEF
+//
+// This used to generate a brief on the fly with engines/analysisEngine's
+// generateMorningBrief(), which is a different implementation from the
+// morningBriefEngine the 07:30 scheduler runs. The result was two briefs
+// per client per day, from two engines, with different content: the client
+// read one in the app and received the other by email.
+//
+// Now it reads what the scheduled engine stored. One brief, one source of
+// truth, and the in-app Daily Brief tab shows exactly what was emailed.
+// Requires migration 002_morning_briefs_align.sql — without it the engine
+// cannot persist and this returns empty.
 router.get('/:clientId', async (req, res) => {
   const { clientId } = req.params;
   const today = new Date().toISOString().split('T')[0];
 
   if (!supabaseAdmin) {
-    return res.json({ brief: getDemoBrief(), demo: true });
+    return res.status(503).json({
+      brief: null, unavailable: true,
+      message: 'Your brief is temporarily unavailable.',
+    });
   }
 
-  // Check if brief already generated today
-  const { data: existing } = await supabaseAdmin
-    .from('morning_briefs').select('*')
-    .eq('client_id', clientId).eq('brief_date', today).single();
-  if (existing) return res.json({ brief: existing });
+  // maybeSingle(), not single(): single() treats "no rows" as an error, and
+  // no brief yet is an ordinary state, not a failure.
+  const brief = await db.selectOne('morning_briefs', c =>
+    c.from('morning_briefs').select('*')
+      .eq('client_id', clientId).eq('brief_date', today).maybeSingle());
 
-  // Generate fresh brief
-  try {
-    const [clientRes, portfolioRes, signalsRes, macro] = await Promise.all([
-      supabaseAdmin.from('clients').select(`*, client_life_profiles(*), client_behavioural_profiles(*), client_goals(*)`).eq('id', clientId).single(),
-      supabaseAdmin.from('portfolios').select('*').eq('client_id', clientId).eq('is_active', true),
-      supabaseAdmin.from('recommendations').select('*').eq('client_id', clientId).eq('risk_gate_passed', true).eq('is_active', true).gte('confidence_score', 0.60).order('confidence_score', { ascending: false }).limit(5),
-      refreshAllMarketData(),
-    ]);
+  if (brief) return res.json({ brief });
 
-    const client = clientRes.data;
-    const portfolio = portfolioRes.data || [];
-    const signals = signalsRes.data || [];
+  // Nothing for today. Offer the most recent one so the tab is not blank,
+  // clearly labelled with its own date.
+  const last = await db.selectOne('morning_briefs', c =>
+    c.from('morning_briefs').select('*')
+      .eq('client_id', clientId)
+      .order('brief_date', { ascending: false }).limit(1));
 
-    const totalValue = portfolio.reduce((s,h) => s + (h.current_value_inr || 0), 0);
-    const totalCost = portfolio.reduce((s,h) => s + h.quantity * h.avg_buy_price_inr, 0);
+  if (last) return res.json({ brief: last, stale: true });
 
-    const portfolioSummary = {
-      total_value: totalValue,
-      total_pnl_pct: ((totalValue - totalCost) / totalCost * 100),
-      max_drawdown: -7.4, // simplified
-      risk_status: 'GREEN — All positions above stop-loss',
-    };
-
-    const briefText = await generateMorningBrief(
-      { ...client, ...client?.client_life_profiles?.[0], goals: client?.client_goals },
-      portfolioSummary, signals, macro
-    );
-
-    // Store brief
-    const { data: savedBrief } = await supabaseAdmin.from('morning_briefs').insert({
-      client_id: clientId,
-      brief_date: today,
-      nifty_prediction: macro?.nifty?.change_pct > 0.3 ? 'bullish' : macro?.nifty?.change_pct < -0.3 ? 'bearish' : 'neutral',
-      nifty_confidence: macro?.nifty?.change_pct > 0.3 ? 72 : 55,
-      nifty_range_low: (macro?.nifty?.price || 24650) * 0.994,
-      nifty_range_high: (macro?.nifty?.price || 24650) * 1.006,
-      vix_at_brief: macro?.vix,
-      market_regime: macro?.vixRegime?.regime,
-      whatsapp_message: briefText,
-      generated_at: new Date().toISOString(),
-    }).select().single();
-
-    res.json({ brief: savedBrief || { whatsapp_message: briefText, brief_date: today } });
-  } catch (err) {
-    console.error('Brief generation error:', err);
-    res.json({ brief: getDemoBrief(), error: err.message });
-  }
+  return res.json({
+    brief: null,
+    message: "No brief yet. Yours is generated at 7:30 AM IST on weekdays once your profile and portfolio are set up.",
+  });
 });
 
 // POST /api/brief/:clientId/send — send brief via WhatsApp
@@ -84,16 +65,6 @@ router.post('/:clientId/send', async (req, res) => {
   }
 });
 
-function getDemoBrief() {
-  const date = new Date().toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
-  return {
-    brief_date: new Date().toISOString().split('T')[0],
-    nifty_prediction: 'bullish',
-    nifty_confidence: 72,
-    vix_at_brief: 13.4,
-    market_regime: 'normal',
-    whatsapp_message: `🌅 *Good morning, Rahul!*\n_WealthGuard · ${date} · 7:30 AM_\n\n📊 *Your Portfolio*\nValue: ₹18,43,200 | Return: +15.2% from cost\n🟢 Risk Status: GREEN — All positions protected\n\n🌍 *Market Prediction Today*\nNifty 50: ▲ Mildly Bullish (72% confidence)\nExpected Range: 24,420 – 24,780\n_FII net buyers ₹28Cr. Asia positive. VIX calm at 13.4._\n\n⚡ *Your Actions Today*\n• HOLD all current positions — stop-losses safe\n• ⭐ HC BUY: SBI Bluechip Fund — ₹30,000 allocation (82% conf)\n• ⚠ REVIEW: Tata Motors — 4.2% from stop-loss, monitor today\n• SIP due: Check scheduled Mirae Large Cap investment\n\n🎯 *Goal Update*\n• Priya's College: 73% funded ✓ On track\n• Retirement at 55: 31% — step-up SIP by ₹3,000/mo recommended\n\n_Reply *DETAILS* for signals · *EXPLAIN* for plain English · *CALL* for advisor_\n\n_WealthGuard · Capital preservation first · Not SEBI registered advice_`
-  };
-}
+
 
 module.exports = router;

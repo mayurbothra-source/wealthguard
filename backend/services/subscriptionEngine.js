@@ -62,14 +62,18 @@ async function processTrialExpiries() {
     const now = new Date().toISOString();
     const { data: trials } = await supabaseAdmin
       .from('clients')
-      .select('id, full_name, email, created_at, subscription_expires_at, referral_months_earned')
+      .select('id, full_name, email, onboarded_at, subscription_expires_at, referral_months_earned')
       .eq('subscription_status', 'trial');
 
     for (const client of (trials || [])) {
       // Set expiry if not already set
       let expiry = client.subscription_expires_at;
       if (!expiry) {
-        expiry = calculateTrialExpiry(client.created_at);
+        // `created_at` does not exist on clients — selecting it made
+        // PostgREST reject this whole query, which is why no trial has
+        // ever expired. `onboarded_at` is the column that exists and
+        // carries the right meaning.
+        expiry = calculateTrialExpiry(client.onboarded_at);
         // Add any referral months earned
         if (client.referral_months_earned > 0) {
           expiry = new Date(new Date(expiry).getTime()

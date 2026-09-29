@@ -26,6 +26,7 @@
 'use strict';
 
 const { supabaseAdmin } = require('../../config/supabase');
+const db = require('../lib/db');
 const aiProvider        = require('./aiProvider');
 const emailEngine       = require('./emailEngine');
 const { reportRun }     = require('./healthEngine');
@@ -125,7 +126,12 @@ async function buildPortfolioNote(client) {
   if (!supabaseAdmin) return null;
   try {
     const { data: holdings } = await supabaseAdmin
-      .from('portfolio_holdings')
+      // NOTE: reads `portfolios` — the table the frontend actually writes to via
+      // POST /api/portfolio/add, and the one schema.sql defines. This used to
+      // read `portfolio_holdings`, which no migration ever created, so this
+      // query silently returned nothing and this engine never saw a single
+      // client holding.
+      .from('portfolios')
       .select('instrument_name, quantity, avg_buy_price_inr')
       .eq('client_id', client.id)
       .eq('is_active', true);
@@ -291,30 +297,57 @@ async function generateAndSendMorningBrief() {
           `\nLEARN SOMETHING TODAY\n${educationPoint}`,
         ].filter(Boolean).join('\n');
 
-        // Persist the brief (idempotent per client per day)
-        await supabaseAdmin.from('morning_briefs').upsert({
-          client_id:       client.id,
-          brief_date:      today,
-          market_snapshot: marketSnapshot,
-          portfolio_note:  portfolioNote,
-          top_signals:     topSignals,
-          goal_note:       goalNote,
-          education_point: educationPoint,
-          full_text:       brief.full_text,
-          ai_provider:     aiProvider.isConfigured() ? 'ai' : 'template',
-          created_at:      new Date().toISOString(),
-        }, { onConflict: 'client_id,brief_date' });
+        // Persist the brief (idempotent per client per day).
+        //
+        // This upsert used to be fire-and-forget. Ten of the columns it
+        // names did not exist on morning_briefs, PostgREST rejected the
+        // whole statement, and because the result was discarded no brief
+        // ever persisted and nothing was logged. Run the migration in
+        // scripts/migrations/002_morning_briefs_align.sql before relying
+        // on this.
+        //
+        // `whatsapp_message` is written alongside `full_text` on purpose:
+        // it is the column routes/brief.js and the frontend's Daily Brief
+        // tab already read, so the in-app brief shows the same text that
+        // was emailed.
+        const persisted = await db.tryWrite('morning_briefs', 'upsert', c =>
+          c.from('morning_briefs').upsert({
+            client_id:        client.id,
+            brief_date:       today,
+            market_snapshot:  marketSnapshot,
+            portfolio_note:   portfolioNote,
+            top_signals:      topSignals,
+            goal_note:        goalNote,
+            education_point:  educationPoint,
+            full_text:        brief.full_text,
+            whatsapp_message: brief.full_text,
+            ai_provider:      aiProvider.isConfigured() ? 'ai' : 'template',
+          }, { onConflict: 'client_id,brief_date' }));
+
+        if (!persisted) {
+          // The email below is still worth sending — the client gets their
+          // brief even if we could not store a copy — but this must not
+          // pass unremarked the way it did before.
+          console.warn(`   ⚠ Brief for ${client.full_name || client.id} could not be stored. ` +
+                       `It will still be emailed, but the in-app Daily Brief tab will be empty. ` +
+                       `Run scripts/migrations/002_morning_briefs_align.sql.`);
+        }
 
         // Email it
         const emailed = await emailEngine.sendMorningBrief(client, brief);
         if (emailed) {
           sent++;
-          await supabaseAdmin.from('morning_briefs')
-            .update({ email_sent: true, email_sent_at: new Date().toISOString() })
-            .eq('client_id', client.id).eq('brief_date', today);
-          await supabaseAdmin.from('clients')
-            .update({ last_brief_sent_at: new Date().toISOString() })
-            .eq('id', client.id);
+          // Both of these name columns added by migration 002/003. Routed
+          // through tryWrite so a missing column is reported rather than
+          // swallowed, and so a failure here cannot abort the client loop.
+          await db.tryWrite('morning_briefs', 'update', c =>
+            c.from('morning_briefs')
+              .update({ email_sent: true, email_sent_at: new Date().toISOString() })
+              .eq('client_id', client.id).eq('brief_date', today));
+          await db.tryWrite('clients', 'update', c =>
+            c.from('clients')
+              .update({ last_brief_sent_at: new Date().toISOString() })
+              .eq('id', client.id));
         } else {
           skipped++;
         }

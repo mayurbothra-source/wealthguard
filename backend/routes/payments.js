@@ -113,7 +113,14 @@ router.post('/verify', async (req, res) => {
 // GET /api/payments/status/:clientId — check subscription status
 router.get('/status/:clientId', async (req, res) => {
   if (!supabaseAdmin) {
-    return res.json({ status: 'active', plan: 'builder', demo: true });
+    // This granted every caller an ACTIVE BUILDER subscription whenever the
+    // database was unreachable. Same class of problem as the Razorpay demo
+    // fallback letting anyone through checkout: a failure must never
+    // silently upgrade someone.
+    return res.status(503).json({
+      status: 'unknown', plan: null, unavailable: true,
+      message: 'Subscription status is temporarily unavailable.',
+    });
   }
   const { data } = await supabaseAdmin
     .from('subscriptions')

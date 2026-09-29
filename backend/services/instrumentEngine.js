@@ -32,6 +32,9 @@
 const { supabaseAdmin } = require('../../config/supabase');
 const { getYahooQuote, getNSEQuote, getMacroIndicators, getMFNav } = require('./marketData');
 const { runRiskGate, createGateSession } = require('./riskGateEngine');
+const leverEngine          = require('./leverEngine');
+const fundamentalsProvider = require('./fundamentalsProvider');
+const db                   = require('../lib/db');
 const { reportRun } = require('./healthEngine');
 const emailEngine = require('./emailEngine');
 
@@ -270,7 +273,17 @@ async function fetchInstrumentPrice(instrument) {
  * Each lever is an independent injection point — upgrade individual levers
  * with richer data feeds without touching signal generation downstream.
  */
-async function scoreInstrument(instrument, macroData, priceData) {
+/**
+ * DEPRECATED — the original scoring, retained ONLY so scripts/dry_run_scoring.js
+ * can print old-vs-new side by side before the new one goes live.
+ *
+ * Five of its nine levers were category constants, which meant asset category
+ * decided the signal: G-Secs were a permanent BUY at 70-81, and mid/small caps
+ * could never reach 70 at all. Do not call this from production code.
+ *
+ * Replaced by leverEngine.scoreInstrument().
+ */
+async function scoreInstrumentLegacy(instrument, macroData, priceData) {
   const cat = instrument.category;
   const chg = priceData?.change_pct ?? 0;
 
@@ -535,7 +548,12 @@ async function notifyClientsOfCategoryChange(instrument, oldCat, newCat) {
   if (!supabaseAdmin) return 0;
   try {
     const { data: holdings } = await supabaseAdmin
-      .from('portfolio_holdings')
+      // NOTE: reads `portfolios` — the table the frontend actually writes to via
+      // POST /api/portfolio/add, and the one schema.sql defines. This used to
+      // read `portfolio_holdings`, which no migration ever created, so this
+      // query silently returned nothing and this engine never saw a single
+      // client holding.
+      .from('portfolios')
       .select('client_id')
       .eq('instrument_name', instrument.symbol)
       .eq('is_active', true);
@@ -632,6 +650,26 @@ async function logCategoryChange(instrument, newCategory, triggerScore, reason) 
 // MAIN ENGINE
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A plain-English note on how much of a score was measured. Stored on every
+ * instrument_scores row so the provenance of any historical score is legible
+ * later — a composite built mostly from baselines is a weaker claim than one
+ * built from data, even when the number is identical.
+ */
+function buildScoreNotes(audit) {
+  if (!audit) return null;
+  const notes = [];
+  if (audit.insufficient_data) {
+    notes.push(`No directional call: ${audit.insufficient_reason}`);
+  }
+  notes.push(`${audit.measured_levers}/9 levers measured from live data`);
+  if (audit.data_points) notes.push(`${audit.data_points} days of price history`);
+  const assumed = Object.entries(audit.sources || {})
+    .filter(([, v]) => v === 'baseline').map(([k]) => k);
+  if (assumed.length) notes.push(`baseline used for: ${assumed.join(', ')}`);
+  return notes.join('. ');
+}
+
 async function runInstrumentScoringEngine() {
   if (!supabaseAdmin) {
     console.log('🎯 Instrument engine: Supabase not configured, skipping.');
@@ -675,7 +713,28 @@ async function runInstrumentScoringEngine() {
     return;
   }
 
-  console.log(`   Loaded ${instruments.length} instruments\n`);
+  console.log(`   Loaded ${instruments.length} instruments`);
+
+  // ── Per-instrument metrics ───────────────────────────────────────────
+  // One year of price history per instrument, plus company fundamentals where
+  // they exist. This is what makes six of the nine levers actually vary by
+  // instrument instead of being category constants.
+  //
+  // Fetched once for the whole run and cached in instrument_fundamentals, so
+  // a re-run within 30 hours costs no network calls. A total failure here does
+  // not stop the run — every lever falls back to its documented baseline and
+  // logSummary() reports how much of the run was measured versus assumed.
+  let metricsMap = {};
+  try {
+    const built = await fundamentalsProvider.buildMetrics(instruments);
+    metricsMap = built.metrics;
+    fundamentalsProvider.logSummary(built.summary);
+  } catch (e) {
+    console.error(`   ‼ Fundamentals unavailable for this entire run: ${e.message}`);
+    console.error(`     Every lever will use its category baseline. Scores will be ` +
+                  `weaker than usual and score_notes will say so on each row.`);
+  }
+  console.log('');
 
   // Risk gate session — scoped to this run so concentration limits
   // apply per scoring cycle, not cumulatively across cycles
@@ -698,13 +757,21 @@ async function runInstrumentScoringEngine() {
                    : 'no_price';
       bySource[srcKey]++;
 
-      // 2. Score across 9 levers
-      const scores    = await scoreInstrument(instrument, macroData, priceData);
+      // 2. Score across 9 levers — six of them now per-instrument
+      const metrics   = metricsMap[instrument.symbol] || null;
+      const scores    = leverEngine.scoreInstrument(instrument, macroData, metrics);
       const composite = scores.composite;
+      const audit     = scores._audit;
       scored++;
 
       // 3. Persist score (append-only audit trail — never update, always insert)
-      const { error: scoreErr } = await supabaseAdmin.from('instrument_scores').insert({
+      // writeTolerant, not insert: levers_measured / price_data_points /
+      // lever_sources arrive with migration 005. Without it a plain insert
+      // naming them would be rejected WHOLE and no score would be saved at
+      // all — so deploy order would be load-bearing. This way the score
+      // always lands and only the provenance fields are dropped, with one
+      // warning naming the migration.
+      const scoreRow = {
         instrument_id:       instrument.id,
         technical:           scores.technical,
         fundamental:         scores.fundamental,
@@ -717,11 +784,21 @@ async function runInstrumentScoringEngine() {
         risk_adjusted:       scores.risk_adjusted,
         composite_score:     composite,
         category_at_scoring: instrument.category,
-        data_complete:       priceData !== null,
-        score_notes:         priceData ? null : 'Price unavailable — levers 1 & 4 used neutral defaults',
+        // data_complete now means "measured from this instrument's own
+        // behaviour", not merely "a price was available". A statically-priced
+        // bond has a price and no behaviour.
+        data_complete:       !audit.insufficient_data,
+        score_notes:         buildScoreNotes(audit),
+        levers_measured:     audit.measured_levers,
+        price_data_points:   audit.data_points,
+        lever_sources:       audit.sources,
         scored_at:           now,
-      });
-      if (scoreErr) console.warn(`   ⚠ Score persist failed for ${instrument.symbol}: ${scoreErr.message}`);
+      };
+      const scoreWrite = await db.writeTolerant('instrument_scores', 'insert', scoreRow,
+        ['levers_measured', 'price_data_points', 'lever_sources']);
+      if (!scoreWrite.ok) {
+        console.warn(`   ⚠ Score persist failed for ${instrument.symbol} — see the error above`);
+      }
 
       // 4. Update summary score on instrument record
       await supabaseAdmin
@@ -805,7 +882,25 @@ async function runInstrumentScoringEngine() {
 
       // 7. Risk gate, then generate live signal for active instruments
       if (instrument.status === 'active') {
-        const proposedAction = composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL';
+        // THE NO-DATA RULE.
+        //
+        // Thresholds are unchanged (BUY >= 70, WATCH 50-69, SELL < 50). What
+        // is new: an instrument with no measurable history of its own cannot
+        // receive a DIRECTIONAL call, whatever its composite says.
+        //
+        // This is what stops the permanent-BUY behaviour at source. A
+        // statically-priced G-Sec used to score 74 on category constants alone
+        // — nothing about that particular bond was ever measured — and was
+        // published as a BUY in every market condition. Publishing a direction
+        // on something never measured is the claim this platform's track
+        // record exists to rule out.
+        const proposedAction = audit.insufficient_data
+          ? 'WATCH'
+          : (composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL');
+
+        if (audit.insufficient_data) {
+          console.log(`   ⓘ ${instrument.symbol}: no directional call — ${audit.insufficient_reason}`);
+        }
 
         // The gate can veto or downgrade any signal regardless of score.
         // Capital preservation first — this is the safety layer.
@@ -867,5 +962,6 @@ module.exports = {
   runInstrumentScoringEngine,
   convertScoreToRecommendation,
   fetchInstrumentPrice,     // exported for use by trackRecordEngine
-  scoreInstrument,          // exported for unit testing
+  scoreInstrumentLegacy,    // the old scorer — dry-run comparison only
+  buildScoreNotes,
 };
