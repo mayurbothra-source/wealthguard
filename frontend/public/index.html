@@ -294,6 +294,37 @@ table.data-table{width:100%;border-collapse:collapse;}
 .stamp-hold{background:var(--bg);color:var(--muted);}
 
 
+/* ── TIER GATE ───────────────────────────────────────────────── */
+.itab.locked{opacity:.55;}
+.itab.locked::after{content:'\1F512';margin-left:5px;font-size:10px;}
+.tier-gate{text-align:center;padding:34px 22px;background:var(--gold-tint);
+           border:1px solid var(--line);border-radius:var(--radius-lg);}
+.tier-gate h4{font-family:var(--serif);font-size:15px;margin-bottom:7px;color:var(--ink);}
+.tier-gate p{font-size:12.5px;color:var(--ink-soft);line-height:1.65;max-width:400px;margin:0 auto 16px;}
+
+/* ── ACCESSIBILITY ───────────────────────────────────────────── */
+/* A visible focus ring on every interactive element. Keyboard users
+   currently have no way to see where they are. :focus-visible keeps it
+   off for mouse clicks. */
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px;}
+.modal-box:focus{outline:none;}
+
+/* Anything driven by onclick that is not a <button> still needs to be
+   reachable and operable from the keyboard. */
+[role="button"]{cursor:pointer;}
+[role="button"]:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+/* Respect the OS setting. Vestibular disorders make the transitions
+   below genuinely unpleasant, and this costs nothing. */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;
+                       transition-duration:.01ms !important;scroll-behavior:auto !important;}
+}
+
+/* Screen-reader-only text, for labels that must not be visible. */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+         clip:rect(0,0,0,0);white-space:nowrap;border:0;}
+
 /* ── OPPORTUNITIES ───────────────────────────────────────────── */
 .opp-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));margin-bottom:8px;}
 .opp-card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius-lg);
@@ -1341,6 +1372,23 @@ if (SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase) {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
 
+
+/* ============================================================
+   HTML ESCAPING
+   Everything interpolated into innerHTML from outside this file goes
+   through esc(): Supabase rows, and in particular AI-generated text
+   (the morning brief, signal rationales, AI event titles). Model
+   output is not trusted input.
+
+   Numbers and values this file computes itself do not need it.
+============================================================ */
+function esc(s){
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 /* ============================================================
    API CLIENT — talks to the existing Render backend (unchanged)
 ============================================================ */
@@ -1432,6 +1480,9 @@ function showAdminNavIfAdmin(clientData){
 function goToPricing(){ goTo('pricing'); loadRazorpaySdk(); }
 
 function switchView(view, btn){
+  // Re-run after render: switched views inject fresh markup that has not
+  // been through the pass yet.
+  setTimeout(() => makeClickablesAccessible(), 0);
   document.querySelectorAll('.app-view').forEach(v=>v.classList.remove('active'));
   document.querySelectorAll('.tnav-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('view-'+view).classList.add('active');
@@ -1448,6 +1499,14 @@ function switchIntel(tab, btn){
   document.querySelectorAll('.itab').forEach(b=>b.classList.remove('active'));
   document.getElementById('isec-'+tab).classList.add('active');
   btn.classList.add('active');
+  // The gate is enforced here, not only on the tab's appearance — a
+  // styled-but-clickable tab is not a gate.
+  if (!intelTabAllowed(tab)){
+    const label = tab==='market' ? 'Market Analysis' : tab==='pestle' ? 'PESTLE Watch' : 'This section';
+    document.getElementById('intel-'+tab+'-content').innerHTML = tierGateHTML(label);
+    makeClickablesAccessible(document.getElementById('isec-'+tab));
+    return;
+  }
   if (tab==='tips' && !window._tipsLoaded){ renderTips(); window._tipsLoaded=true; }
   if (tab==='market' && !window._marketLoaded){ renderMarket(); window._marketLoaded=true; }
   if (tab==='pestle' && !window._pestleLoaded){ renderPestle(); window._pestleLoaded=true; }
@@ -1611,8 +1670,21 @@ function hydrateFromProfile(profile, status){
     if (bp){ state.obData.money = bp.money_relationship; state.obData.sleep = bp.sleep_test_threshold_pct; }
     if (profile.client_goals) state.goals = profile.client_goals;
   }
-  if (status && status.plan) state.planTier = status.plan;
-  else state.planTier = 'builder'; // sensible fallback
+  if (status && status.plan){
+    state.planTier = status.plan;
+    // Remember it so a transient backend failure does not downgrade a
+    // paying client on the next load.
+    try { localStorage.setItem('wg_last_tier', status.plan); } catch(_){}
+  } else {
+    // Defaulting to 'builder' here handed out the paid tier whenever
+    // /payments/status was unavailable — which, since that route used to
+    // return {status:'active', plan:'builder'} on a database failure,
+    // meant an outage upgraded everyone. Fall back to what this client
+    // last genuinely had, and otherwise to the least-privileged tier.
+    let remembered = null;
+    try { remembered = localStorage.getItem('wg_last_tier'); } catch(_){}
+    state.planTier = remembered || 'starter';
+  }
 }
 function logOut(){
   if (!confirm('Log out of WealthGuard?')) return;
@@ -1938,6 +2010,25 @@ async function loadTrackRecord(){
       gold:'Gold', bond_gsec:'Bonds & G-Secs', debt_fund:'Debt Funds',
     };
 
+    /* avg_alpha is our return minus Nifty's over the same period, in
+       percentage points — computed by trackRecordEngine and stored on
+       recommendation_outcomes. Showing it answers the question a
+       sceptical client actually has: did following this beat simply
+       buying the index? Shown only once there are at least 3 resolved
+       checkpoints, for the same reason the accuracy percentage is. */
+    const alphaLine = (c) => {
+      if (c.avg_alpha == null || !c.weekly_total || c.weekly_total < 3) return '';
+      const a = Number(c.avg_alpha);
+      if (!isFinite(a)) return '';
+      const beat = a >= 0;
+      const col = beat ? 'var(--safe)' : 'var(--danger)';
+      return `<div style="font-size:11px;color:${col};margin-top:8px;text-align:center;
+                          border-top:1px solid var(--line-soft);padding-top:7px;">
+        ${beat ? '↑' : '↓'} ${beat ? '+' : ''}${a.toFixed(1)}pp vs Nifty
+        <span style="color:var(--muted);">over the same period</span>
+      </div>`;
+    };
+
     const pctStr = (correct, total) => {
       if (!total || total < 3) return null; // need min 3 to show a percentage
       return Math.round((correct/total)*100)+'%';
@@ -1970,12 +2061,13 @@ async function loadTrackRecord(){
               <div style="font-size:10px;color:var(--muted);">our target</div>
             </div>
           </div>
+          ${alphaLine(c)}
           ${beating?`<div style="font-size:11px;color:var(--safe);margin-top:8px;text-align:center;">↑ Above our benchmark</div>`:''}
         </div>`;
       }).join('');
       catGrid.innerHTML = `
         <p style="font-size:12px;color:var(--muted);margin-bottom:14px;">
-          Benchmark is our own published accuracy target for each category, auto-set monthly from trailing results. Signal clock started 9 September 2026. Monthly and quarterly checkpoints accrue over time.
+          Benchmark is our own published accuracy target for each category, auto-set monthly from trailing results. Signal clock started 9 September 2026. Monthly and quarterly checkpoints accrue over time. Where shown, <strong>pp vs Nifty</strong> is our average return minus the Nifty's over the same period — the honest test of whether following us beat simply buying the index.
         </p>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;">${rows}</div>`;
     } else {
@@ -2040,7 +2132,7 @@ async function loadTrackRecord(){
       const date = rec.generated_at ? new Date(rec.generated_at).toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'}) : '—';
       return `<div class="tc-card">
         <div class="tc-top">
-          <div><div class="tc-date">📅 ${date}</div><div class="tc-title">${rec.instrument_name||'Instrument'} — We called ${rec.action||'—'}</div></div>
+          <div><div class="tc-date">📅 ${date}</div><div class="tc-title">${esc(rec.instrument_name||'Instrument')} — We called ${rec.action||'—'}</div></div>
         </div>
         <div class="checkpoint-row">
           ${cpBox(g.checkpoints.weekly, 'Weekly')}
@@ -2164,7 +2256,7 @@ function renderPortfolioViews(summary){
         const slPct = h.stop_loss_price ? ((h.current_price_inr-h.stop_loss_price)/h.current_price_inr*100) : null;
         const slCls = slPct==null?'':slPct<3?'sl-bad':slPct<8?'sl-warn':'sl-ok';
         const weight = totalVal ? (val/totalVal*100) : 0;
-        return `<tr><td><div class="inst-name">${h.instrument_name}</div><div class="inst-type">${h.asset_class||''}</div></td>
+        return `<tr><td><div class="inst-name">${esc(h.instrument_name)}</div><div class="inst-type">${h.asset_class||''}</div></td>
           <td style="font-weight:700;">₹${(val/100000).toFixed(2)}L</td>
           <td class="${retPos?'pos':'neg'}" style="font-weight:700;">${retPos?'+':''}${ret.toFixed(1)}%</td>
           <td>${slPct!=null?`<span class="sl-dot ${slCls}"></span>₹${h.stop_loss_price} (${slPct.toFixed(1)}%)`:'<span style="color:var(--muted);">—</span>'}</td>
@@ -2188,6 +2280,38 @@ function renderPortfolioViews(summary){
   window._pfSummary = { totalVal, totalCost, pnl, pnlPct };
   renderDashboard(); // refresh dashboard numbers too
 }
+/* ── MODAL FOCUS MANAGEMENT ──────────────────────────────────────
+   A modal that does not trap focus lets a keyboard user tab into the
+   page behind it, where they cannot see what is selected. One that
+   ignores Escape cannot be dismissed without a mouse. Both were true
+   of every modal here. */
+let _modalReturnFocus = null;
+
+function _modalFocusable(box){
+  return Array.from(box.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  )).filter(el => !el.disabled && el.offsetParent !== null);
+}
+
+function _trapTab(e){
+  const open = document.querySelector('.modal-overlay.open');
+  if (!open || e.key !== 'Tab') return;
+  const box = open.querySelector('.modal-box');
+  const items = _modalFocusable(box);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first){ e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last){ e.preventDefault(); first.focus(); }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape'){
+    const open = document.querySelector('.modal-overlay.open');
+    if (open) closeModal(open.id);
+  }
+  _trapTab(e);
+});
+
 function openModal(id){
   if (id==='modal-email'){
     // Prefill with whatever is on file so "change" is an edit, not a
@@ -2202,11 +2326,41 @@ function openModal(id){
   }
   if (id==='modal-holding'){
     const sel = document.getElementById('mh-goal');
-    sel.innerHTML = state.goals.length ? state.goals.map(g=>`<option value="${g.goal_name}">${g.goal_name}</option>`).join('') : '<option value="">No goals yet — add one in Profile</option>';
+    sel.innerHTML = state.goals.length ? state.goals.map(g=>`<option value="${esc(g.goal_name)}">${esc(g.goal_name)}</option>`).join('') : '<option value="">No goals yet — add one in Profile</option>';
   }
-  document.getElementById(id).classList.add('open');
+  const overlay = document.getElementById(id);
+  const box = overlay.querySelector('.modal-box');
+
+  // Announce it as a dialog and name it by its own heading, so a screen
+  // reader says what opened instead of nothing.
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  const h = box && box.querySelector('h3');
+  if (h){
+    if (!h.id) h.id = id + '-title';
+    overlay.setAttribute('aria-labelledby', h.id);
+  }
+
+  // Remember where focus was so it can be restored on close.
+  _modalReturnFocus = document.activeElement;
+  overlay.classList.add('open');
+  if (box){
+    box.setAttribute('tabindex', '-1');
+    const items = _modalFocusable(box);
+    (items[0] || box).focus();
+  }
 }
-function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+
+function closeModal(id){
+  const overlay = document.getElementById(id);
+  if (!overlay) return;
+  overlay.classList.remove('open');
+  // Send focus back where it came from, not to the top of the document.
+  if (_modalReturnFocus && document.contains(_modalReturnFocus)){
+    try { _modalReturnFocus.focus(); } catch(_){}
+  }
+  _modalReturnFocus = null;
+}
 async function addHolding(){
   const name=val('mh-name'), qty=Number(val('mh-qty')), buy=Number(val('mh-buy'));
   if (!name||!qty||!buy){ toast('⚠','Please fill in name, quantity, and buy price.'); return; }
@@ -2261,7 +2415,7 @@ function renderSignalsView(){
     return `<div class="sfc" id="sfc-${i}" onclick="toggleSfc(${i})">
       <div class="sfc-top">
         <span class="stamp ${s.action==='BUY'?'stamp-buy':s.action==='WATCH'?'stamp-watch':'stamp-hold'}">${s.signal_tier==='high_conviction'?'★ HC':s.action}</span>
-        <div><div class="sig-name" style="font-size:14.5px;">${s.instrument_name}</div><div class="sig-meta">${s.asset_class||''} · ${s.engines_agreed||'—'}/8 engines</div></div>
+        <div><div class="sig-name" style="font-size:14.5px;">${esc(s.instrument_name)}</div><div class="sig-meta">${s.asset_class||''} · ${s.engines_agreed||'—'}/8 engines</div></div>
         <div class="sig-conf" style="font-size:22px;">${conf}%</div>
       </div>
       <div class="sfc-body" id="sfc-body-${i}">
@@ -2271,7 +2425,7 @@ function renderSignalsView(){
           <div class="sfc-detail-item"><div class="l">Target</div><div class="v" style="color:var(--safe);">${s.target_price_inr?'₹'+s.target_price_inr:'—'}</div></div>
           <div class="sfc-detail-item"><div class="l">R:R Ratio</div><div class="v">${s.risk_reward_ratio?s.risk_reward_ratio+'×':'—'}</div></div>
         </div>
-        <div class="rationale">${s.rationale_text||'Rationale is generated once market data and your profile are fully synced. This is analysis, not an instruction — you decide how and whether to act through your own broker.'}</div>
+        <div class="rationale">${esc(s.rationale_text||'Rationale is generated once market data and your profile are fully synced. This is analysis, not an instruction — you decide how and whether to act through your own broker.')}</div>
         <div class="engine-grid">${engines}</div>
       </div>
     </div>`;
@@ -2336,7 +2490,7 @@ function goalsHTML(limit){
   if (limit && goals.length > limit){ goals = goals.slice(0,limit); capped = true; }
   let html = goals.map(g=>{
     const pct = g.funding_pct||0; const color = bucketColor[g.goal_type]||'var(--accent)';
-    return `<div class="card goal-card"><div class="type" style="color:${color};">${bucketLabel[g.goal_type]||'Goal'}</div><div class="name">${g.goal_name}</div>
+    return `<div class="card goal-card"><div class="type" style="color:${color};">${bucketLabel[g.goal_type]||'Goal'}</div><div class="name">${esc(g.goal_name)}</div>
       <div class="pbar"><div class="pfill" style="width:${pct}%;background:${color};"></div></div>
       <span class="pct">${pct.toFixed(0)}</span><span class="pct-lbl">%</span>
       <div class="amt">₹${(g.current_corpus_inr||0).toLocaleString('en-IN')} of ₹${(g.target_amount_inr||0).toLocaleString('en-IN')}</div></div>`;
@@ -2366,6 +2520,12 @@ function flashAlertsHTML(){
 }
 
 // ---- STARTER DASHBOARD ----
+/** The goals header + grid, identical in all three dashboards.
+ *  Extracted so a change to it lands once instead of three times. */
+function goalsSectionHTML(){
+  return `<div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals \u2192</span></div>
+  <div class="goals-grid">${goalsHTML()}</div>`;
+}
 function dashboardStarterHTML(){
   const sigs = visibleSignals();
   return `
@@ -2381,11 +2541,10 @@ function dashboardStarterHTML(){
   <div style="font-size:12.5px;color:var(--muted);margin:-10px 0 14px;line-height:1.6;max-width:640px;">Surfaced by the engine between the weekly calls &mdash; breakouts, converging signals, sector rotation. Each shows our entry, target and reconsider level, and expires after three days.</div>
   <div id="opportunities-body"><div class="empty-state" style="padding:24px;"><p>Loading&hellip;</p></div></div>
   <div class="stats-grid" style="grid-template-columns:repeat(2,1fr);">${statCards()}</div>
-  <div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals →</span></div>
-  <div class="goals-grid">${goalsHTML()}</div>
+  ${goalsSectionHTML()}
   <div class="card" style="margin-bottom:16px;">
     <div class="card-head"><h3>Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 7 used)</span></h3></div>
-    <div>${sigs.length? sigs.map(s=>`<div class="signal-row"><span class="stamp ${s.action==='BUY'?'stamp-buy':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${s.instrument_name}</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><h4>No signals yet</h4><p>Signals appear once analysis begins.</p></div>'}</div>
+    <div>${sigs.length? sigs.map(s=>`<div class="signal-row"><span class="stamp ${s.action==='BUY'?'stamp-buy':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${esc(s.instrument_name)}</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><h4>No signals yet</h4><p>Signals appear once analysis begins.</p></div>'}</div>
   </div>
   <div class="empty-state" style="background:var(--bg);border-radius:var(--radius);">
     <div class="ic" style="opacity:.4;">🔒</div>
@@ -2409,11 +2568,10 @@ function dashboardBuilderHTML(){
   <div style="font-size:12.5px;color:var(--muted);margin:-10px 0 14px;line-height:1.6;max-width:640px;">Surfaced by the engine between the weekly calls &mdash; breakouts, converging signals, sector rotation. Each shows our entry, target and reconsider level, and expires after three days.</div>
   <div id="opportunities-body"><div class="empty-state" style="padding:24px;"><p>Loading&hellip;</p></div></div>
   <div class="stats-grid">${statCards()}<div class="card stat-card"><div class="lbl">Sharpe Ratio</div><div class="val">—</div><div class="chg">30 days of data needed</div></div><div class="card stat-card"><div class="lbl">Max Drawdown</div><div class="val">—</div><div class="chg">Calculated after first month</div></div></div>
-  <div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals →</span></div>
-  <div class="goals-grid">${goalsHTML()}</div>
+  ${goalsSectionHTML()}
   <div class="two-col">
     <div class="card"><div class="card-head"><h3>Live Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 15 used)</span></h3><button class="btn btn-primary btn-sm" onclick="switchView('signals', document.querySelectorAll('.tnav-btn')[2])">View all</button></div>
-      <div>${sigs.length? sigs.slice(0,5).map(s=>`<div class="signal-row" onclick="switchView('signals', document.querySelectorAll('.tnav-btn')[2])"><span class="stamp ${s.action==='BUY'?'stamp-buy':s.action==='WATCH'?'stamp-watch':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${s.instrument_name}</div><div class="sig-meta">${s.engines_agreed||'—'}/8 engines</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><h4>No signals yet</h4><p>Signals appear once analysis begins.</p></div>'}</div></div>
+      <div>${sigs.length? sigs.slice(0,5).map(s=>`<div class="signal-row" onclick="switchView('signals', document.querySelectorAll('.tnav-btn')[2])"><span class="stamp ${s.action==='BUY'?'stamp-buy':s.action==='WATCH'?'stamp-watch':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${esc(s.instrument_name)}</div><div class="sig-meta">${s.engines_agreed||'—'}/8 engines</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><h4>No signals yet</h4><p>Signals appear once analysis begins.</p></div>'}</div></div>
     <div class="card"><div class="card-head"><h3>PESTLE Snapshot</h3></div>
       <div style="padding:13px 16px;"><div class="mac-item"><span>Political</span><b>—</b></div><div class="mac-item"><span>Economic</span><b>—</b></div><div class="mac-item"><span>Social</span><b>—</b></div><div class="mac-item"><span>Technological</span><b>—</b></div><div class="mac-item"><span>Legal</span><b>—</b></div><div class="mac-item"><span>Environmental</span><b>—</b></div></div>
       <div class="mac-note">PESTLE scores populate once the macro engine has enough data — typically within your first week.</div></div>
@@ -2435,22 +2593,51 @@ function dashboardWealthHTML(){
   <div style="font-size:12.5px;color:var(--muted);margin:-10px 0 14px;line-height:1.6;max-width:640px;">Surfaced by the engine between the weekly calls &mdash; breakouts, converging signals, sector rotation. Each shows our entry, target and reconsider level, and expires after three days.</div>
   <div id="opportunities-body"><div class="empty-state" style="padding:24px;"><p>Loading&hellip;</p></div></div>
   <div class="stats-grid">${statCards()}<div class="card stat-card"><div class="lbl">Sharpe Ratio</div><div class="val">—</div></div><div class="card stat-card"><div class="lbl">Rebalance Due</div><div class="val">—</div></div></div>
-  <div class="dash-head"><h2>Your Goals</h2><span class="section-link" onclick="switchView('profile', document.querySelectorAll('.tnav-btn')[4])">Manage goals →</span></div>
-  <div class="goals-grid">${goalsHTML()}</div>
+  ${goalsSectionHTML()}
   <div class="three-col">
     <div class="card"><div class="card-head"><h3>Your Track Record — All Checkpoints</h3></div><div class="empty-state"><div class="ic">📋</div><p>Your personal track record builds as signals resolve at Weekly, Monthly, and Quarterly checkpoints.</p></div></div>
-    <div class="card"><div class="card-head"><h3>Priority Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 25 used)</span></h3></div><div>${sigs.length? sigs.slice(0,4).map(s=>`<div class="signal-row"><span class="stamp ${s.action==='BUY'?'stamp-buy':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${s.instrument_name}</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><p>Priority signals appear here first, before other tiers.</p></div>'}</div></div>
+    <div class="card"><div class="card-head"><h3>Priority Signals <span style="font-weight:400;color:var(--muted);font-size:11px;">(${sigs.length} of 25 used)</span></h3></div><div>${sigs.length? sigs.slice(0,4).map(s=>`<div class="signal-row"><span class="stamp ${s.action==='BUY'?'stamp-buy':'stamp-hold'}">${s.action}</span><div><div class="sig-name">${esc(s.instrument_name)}</div></div><div class="sig-conf">${Math.round((s.confidence_score||0)*100)}%</div></div>`).join('') : '<div class="empty-state"><div class="ic">⚡</div><p>Priority signals appear here first, before other tiers.</p></div>'}</div></div>
     <div class="card"><div class="card-head"><h3>Tax Optimisation</h3></div><div style="padding:14px 16px;" class="empty-state"><div class="ic">💰</div><p>LTCG/STCG alerts appear once you have holdings past their purchase anniversary.</p></div></div>
   </div>`;
 }
 
+/* Which Intelligence Centre tabs each tier gets. Market Analysis and
+   PESTLE Watch were frozen as Builder+; the rest are open to everyone.
+   This was an empty if-block, so Starter saw the whole tab. */
+const INTEL_TIER_GATE = { market: ['builder','wealth_builder'],
+                          pestle: ['builder','wealth_builder'] };
+
+function intelTabAllowed(tab){
+  const allowed = INTEL_TIER_GATE[tab];
+  if (!allowed) return true;                       // ungated
+  return allowed.includes(state.planTier || 'builder');
+}
+
 function setupIntelTabsForTier(){
   const row = document.getElementById('intel-tabs-row');
-  const tier = state.planTier;
-  row.querySelectorAll('.itab').forEach(t=>t.classList.remove('locked'));
-  if (tier==='starter'){
-    // Lock market/pestle for starter visually, still clickable but shows upgrade note
-  }
+  if (!row) return;
+  row.querySelectorAll('.itab').forEach(btn => {
+    // Derive the tab key from the button's own onclick, so this keeps
+    // working if the tab order changes.
+    const m = /switchIntel\('(\w+)'/.exec(btn.getAttribute('onclick') || '');
+    const tab = m && m[1];
+    const locked = tab && !intelTabAllowed(tab);
+    btn.classList.toggle('locked', !!locked);
+    // Say it out loud rather than relying on the padlock glyph alone.
+    if (locked) btn.setAttribute('aria-label', btn.textContent.trim() + ' — requires Builder plan');
+    else btn.removeAttribute('aria-label');
+  });
+}
+
+/** Shown in place of a gated tab's content. */
+function tierGateHTML(what){
+  return `<div class="tier-gate">
+    <h4>${esc(what)} is part of Builder</h4>
+    <p>Your Starter plan covers the daily brief, tips and the education centre.
+       Builder adds live market analysis, PESTLE tracking, opportunities and
+       unlimited portfolio holdings.</p>
+    <button class="btn btn-primary btn-sm" onclick="goToPricing()">See plans</button>
+  </div>`;
 }
 
 /* ============================================================
@@ -2460,7 +2647,7 @@ function renderIntelBrief(){
   const c = document.getElementById('intel-brief-content');
   const b = window._brief;
   if (b && b.whatsapp_message){
-    c.innerHTML = `<div class="card"><div class="card-head"><h3>Today's Full Brief</h3></div><div style="padding:16px 18px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;">${b.whatsapp_message.replace(/\*/g,'')}</div></div>`;
+    c.innerHTML = `<div class="card"><div class="card-head"><h3>Today's Full Brief</h3></div><div style="padding:16px 18px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;">${esc(b.whatsapp_message.replace(/\*/g,''))}</div></div>`;
   } else {
     c.innerHTML = `<div class="empty-state"><div class="ic">📋</div><h4>Your briefs will appear here</h4><p>Once your first morning brief is generated, you'll see the full history here.</p></div>`;
   }
@@ -2491,8 +2678,129 @@ async function renderMarket(){
       <div class="mac-item"><span>FII</span><span style="font-weight:700;">₹${m.flows?.fii_net_cr?.toFixed(0)||'—'} Cr</span></div>
       <div class="mac-item"><span>DII</span><span style="font-weight:700;">₹${m.flows?.dii_net_cr?.toFixed(0)||'—'} Cr</span></div></div></div>`;
 }
-function renderPestle(){
-  document.getElementById('intel-pestle-content').innerHTML = `<div class="empty-state"><div class="ic">⚡</div><h4>PESTLE analysis builds over your first week</h4><p>Political, Economic, Social, Technological, Legal, and Environmental factors are tracked continuously and will populate here.</p></div>`;
+/* ── PESTLE WATCH ─────────────────────────────────────────────────
+   Built from the ai_events rows the AI lever already writes each
+   evening at 6 PM. Its event_type maps onto three PESTLE dimensions:
+
+     geopolitical -> Political     regulatory -> Legal
+     macro        -> Economic      sector/company -> shown under Economic
+
+   Social, Technological and Environmental have no source in the current
+   schema. They are labelled as not yet tracked rather than given an
+   invented score — a fabricated number here would undermine the same
+   honesty the published track record is built on.                    */
+
+const PESTLE_MAP = {
+  geopolitical: 'Political',
+  regulatory:   'Legal',
+  macro:        'Economic',
+  sector:       'Economic',
+  company:      'Economic',
+};
+const PESTLE_DIMENSIONS = ['Political','Economic','Social','Technological','Legal','Environmental'];
+const PESTLE_UNTRACKED  = { Social: true, Technological: true, Environmental: true };
+
+async function renderPestle(){
+  const el = document.getElementById('intel-pestle-content');
+  if (!el) return;
+  el.innerHTML = '<div class="empty-state"><p>Loading macro factors…</p></div>';
+
+  if (!sb){
+    el.innerHTML = '<div class="empty-state"><div class="ic">⚡</div><h4>PESTLE Watch</h4>' +
+      '<p>Supabase keys are not configured on this page, so live events cannot be read.</p></div>';
+    return;
+  }
+
+  let events = [];
+  try {
+    const { data, error } = await sb.from('ai_events')
+      .select('title,event_type,description,severity,horizon_label,probability_30d,source_urls,detected_at,status')
+      .eq('status','active')
+      .order('detected_at',{ascending:false})
+      .limit(40);
+    if (error) throw new Error(error.message);
+    events = data || [];
+  } catch(e){
+    el.innerHTML = `<div class="empty-state"><div class="ic">⚡</div><h4>PESTLE Watch</h4>
+      <p>Could not read macro events: ${esc(e.message)}</p></div>`;
+    return;
+  }
+
+  // Bucket by dimension
+  const byDim = {};
+  events.forEach(ev => {
+    const dim = PESTLE_MAP[ev.event_type] || 'Economic';
+    (byDim[dim] = byDim[dim] || []).push(ev);
+  });
+
+  const sevWeight = { CRITICAL: 3, HIGH: 2, LOW: 1 };
+  const sevColour = { CRITICAL: 'var(--danger)', HIGH: 'var(--warn)', LOW: 'var(--muted)' };
+
+  const cards = PESTLE_DIMENSIONS.map(dim => {
+    if (PESTLE_UNTRACKED[dim] && !(byDim[dim] || []).length){
+      return `<div class="mac">
+        <div class="mac-h"><span class="t">${dim}</span><span class="u">Not tracked</span></div>
+        <div class="mac-b"><div class="mac-item">
+          <span style="color:var(--muted);font-size:12px;">No data source for this factor yet</span>
+        </div></div>
+        <div class="mac-note">We would rather say this than show you a number we made up.</div>
+      </div>`;
+    }
+
+    const evs = (byDim[dim] || [])
+      .sort((a,b) => (sevWeight[b.severity]||0) - (sevWeight[a.severity]||0))
+      .slice(0, 3);
+
+    if (!evs.length){
+      return `<div class="mac">
+        <div class="mac-h"><span class="t">${dim}</span><span class="u">Quiet</span></div>
+        <div class="mac-b"><div class="mac-item">
+          <span style="color:var(--muted);font-size:12px;">No active events detected</span>
+        </div></div>
+      </div>`;
+    }
+
+    const worst = evs[0].severity || 'LOW';
+    const items = evs.map(ev => {
+      const prob = ev.probability_30d != null
+        ? `<span style="color:var(--muted);font-size:11px;">
+             ${Math.round(Number(ev.probability_30d) * (Number(ev.probability_30d) <= 1 ? 100 : 1))}% over 30d
+           </span>` : '';
+      // A flagged event with no citation is not evidence. The engine is
+      // built to always store one, so its absence is worth showing.
+      const src = Array.isArray(ev.source_urls) && ev.source_urls.length
+        ? `<a href="${esc(ev.source_urls[0])}" target="_blank" rel="noopener noreferrer"
+              style="font-size:11px;color:var(--accent);">source</a>`
+        : `<span style="font-size:11px;color:var(--muted);">no source cited</span>`;
+      return `<div style="padding:9px 0;border-bottom:1px solid var(--line-soft);">
+        <div style="font-size:12.5px;font-weight:600;line-height:1.45;">${esc(ev.title)}</div>
+        <div style="font-size:11.5px;color:var(--muted);line-height:1.55;margin-top:3px;">
+          ${esc((ev.description || '').slice(0, 180))}${(ev.description||'').length > 180 ? '…' : ''}
+        </div>
+        <div style="display:flex;gap:9px;align-items:center;margin-top:5px;flex-wrap:wrap;">
+          <span style="font-size:10px;font-family:var(--mono);font-weight:700;
+                       color:${sevColour[ev.severity]||'var(--muted)'};">${esc(ev.severity||'LOW')}</span>
+          ${ev.horizon_label ? `<span style="font-size:11px;color:var(--muted);">${esc(ev.horizon_label)}</span>` : ''}
+          ${prob}${src}
+        </div>
+      </div>`;
+    }).join('');
+
+    return `<div class="mac">
+      <div class="mac-h"><span class="t">${dim}</span>
+        <span class="u" style="color:${sevColour[worst]||'var(--muted)'};">${esc(worst)}</span></div>
+      <div class="mac-b" style="padding:4px 14px 10px;">${items}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.6;">
+      Macro factors, built from the events our AI lever detects each evening at 6 PM IST.
+      Every event carries its severity, its estimated horizon and a link to the source it
+      came from. Three of the six PESTLE factors have no data source yet and say so.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;">${cards}</div>`;
+  makeClickablesAccessible(el);
 }
 const LEARN = [
   { icon:'📐', title:'What is a Stop-Loss?', body:'A stop-loss is a pre-set price at which you\'d sell to limit your loss. WealthGuard flags this on every equity analysis so you can decide your own exit discipline through your broker.' },
@@ -2507,6 +2815,123 @@ function toggleLearn(i){ const b=document.getElementById('learn-body-'+i); const
 /* ============================================================
    PROFILE
 ============================================================ */
+/* ── REFERRAL ─────────────────────────────────────────────────────
+   Derived from the client id so no new column is needed to show it.
+   Deterministic: the same account always produces the same code. */
+function referralCode(){
+  const id = String(API.clientId || '');
+  if (!id || id.startsWith('local-')) return null;
+  const compact = id.replace(/-/g, '').toUpperCase();
+  return 'WG' + compact.slice(0, 6);
+}
+
+async function copyReferral(){
+  const code = referralCode();
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code);
+    toast('\u{1F4CB}', 'Referral code copied.');
+  } catch(_){
+    // Clipboard is blocked without HTTPS or a user gesture in some
+    // browsers. Select the text instead so it can be copied manually.
+    const el = document.getElementById('ref-code');
+    if (el && window.getSelection){
+      const r = document.createRange(); r.selectNodeContents(el);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      toast('\u2139\uFE0F', 'Select and copy the code above.');
+    }
+  }
+}
+
+/* ── DATA EXPORT ──────────────────────────────────────────────────
+   Everything the platform holds about this client, as one JSON file.
+   Entirely client-side: assembled from state plus the client's own
+   Supabase rows, so it needs no backend route. */
+async function exportMyData(){
+  const btn = document.getElementById('export-btn');
+  if (btn){ btn.textContent = 'Preparing…'; btn.disabled = true; }
+
+  const bundle = {
+    exported_at: new Date().toISOString(),
+    platform: 'WealthGuard',
+    note: 'Everything WealthGuard holds about this account. Signals and analysis are informational, not investment advice.',
+    account: {
+      client_id: API.clientId || null,
+      plan: state.planTier || null,
+      on_trial: !!state.isTrial,
+      email: state.obData.email || null,
+    },
+    profile: state.obData || {},
+    goals: state.goals || [],
+    portfolio: state.portfolio || [],
+    signals_visible_to_you: state.signals || [],
+  };
+
+  // Pull the rows only the database has
+  if (sb && API.clientId && !String(API.clientId).startsWith('local-')){
+    const pull = async (table, sel, col) => {
+      try {
+        const { data } = await sb.from(table).select(sel).eq(col, API.clientId);
+        return data || [];
+      } catch(_){ return []; }
+    };
+    bundle.database = {
+      client_record:  await pull('clients', '*', 'id'),
+      holdings:       await pull('portfolios', '*', 'client_id'),
+      goals:          await pull('client_goals', '*', 'client_id'),
+      recommendations: await pull('recommendations', '*', 'client_id'),
+    };
+  }
+
+  try {
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {type:'application/json'});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `wealthguard-my-data-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    // Revoke on the next tick so the download has started.
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast('\u2713', 'Your data has downloaded.');
+  } catch(e){
+    toast('\u26A0\uFE0F', 'Could not prepare the download: ' + e.message);
+  }
+
+  if (btn){ btn.textContent = 'Download my data'; btn.disabled = false; }
+}
+
+/** The two cards appended to the profile grid. */
+function referralAndExportHTML(){
+  const code = referralCode();
+  return `
+    <div class="card"><div class="card-head"><h3>\u{1F381} Refer a friend</h3></div>
+      <div style="padding:14px 18px;">
+        ${code ? `
+          <p style="font-size:12.5px;color:var(--ink-soft);line-height:1.6;margin-bottom:12px;">
+            Share this code. When someone joins with it and completes onboarding,
+            you both get a free month added to your subscription.
+          </p>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <code id="ref-code" style="font-family:var(--mono);font-size:15px;font-weight:700;
+                  background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);
+                  padding:9px 14px;letter-spacing:.06em;flex:1;text-align:center;">${esc(code)}</code>
+            <button class="btn btn-outline btn-sm" onclick="copyReferral()">Copy</button>
+          </div>` : `
+          <p style="font-size:12.5px;color:var(--muted);line-height:1.6;">
+            Your referral code appears here once your account finishes registering.
+          </p>`}
+      </div></div>
+
+    <div class="card"><div class="card-head"><h3>\u{1F4E6} Your data</h3></div>
+      <div style="padding:14px 18px;">
+        <p style="font-size:12.5px;color:var(--ink-soft);line-height:1.6;margin-bottom:12px;">
+          Download everything WealthGuard holds about you — your profile, goals,
+          portfolio and the signals you have been shown — as a single file. Yours to keep.
+        </p>
+        <button class="btn btn-outline btn-sm" id="export-btn" onclick="exportMyData()">Download my data</button>
+      </div></div>`;
+}
+
 function renderProfile(){
   // Surface the delivery address. An empty value here is the signal that
   // this account receives nothing.
@@ -2524,12 +2949,16 @@ function renderProfile(){
     el.style.color = email ? 'var(--muted)' : 'var(--danger)';
   })();
 
+  // The referral and export cards below add new controls each render.
+  setTimeout(() => makeClickablesAccessible(document.getElementById('profile-grid')), 0);
+
   const d = state.obData;
   const tier = state.planTier || 'builder';
   document.getElementById('profile-tier').textContent = (PLAN_NAME[tier]||'Builder') + ' Tier';
   document.getElementById('profile-meta').textContent = `Age ${d.age||'—'} · ${d.incomeType||'—'} · ${d.marital||'—'}`;
   const surplus = (d.income||0)-(d.expenses||0);
   const grid = document.getElementById('profile-grid');
+  // Rendered after the grid below, so the markup lands in one write.
   grid.innerHTML = `
     <div class="card"><div class="card-head"><h3>💰 Financial Situation</h3></div><div style="padding:14px 18px;">
       <div class="prow"><span class="k">Monthly Income</span><span class="v">₹${(d.income||0).toLocaleString('en-IN')}</span></div>
@@ -2548,20 +2977,45 @@ function renderProfile(){
     <div class="card"><div class="card-head"><h3>💳 Plan & Billing</h3></div><div style="padding:14px 18px;">
       <div class="prow"><span class="k">Current Plan</span><span class="v">${PLAN_NAME[tier]||'—'}</span></div>
       <div class="prow"><span class="k">Status</span><span class="v pos">${state.isTrial?'Free Trial':'Active'}</span></div>
-      <div class="prow"><span class="k">Manage</span><span class="v"><button class="btn btn-outline btn-sm" onclick="goToPricing()">Change Plan</button></span></div></div></div>`;
+      <div class="prow"><span class="k">Manage</span><span class="v"><button class="btn btn-outline btn-sm" onclick="goToPricing()">Change Plan</button></span></div></div></div>
+    ${referralAndExportHTML()}`;
   renderProfileGoals();
 }
 function renderProfileGoals(){
   const el = document.getElementById('profile-goals-list');
   if (!el) return;
   if (!state.goals.length){ el.innerHTML = '<div style="font-size:12px;color:var(--muted);">No goals added yet.</div>'; return; }
-  el.innerHTML = state.goals.map(g=>`<div class="prow"><span class="k">${g.goal_name}</span><span class="v">${(g.funding_pct||0).toFixed(0)}%</span></div>`).join('');
+  el.innerHTML = state.goals.map(g=>`<div class="prow"><span class="k">${esc(g.goal_name)}</span><span class="v">${(g.funding_pct||0).toFixed(0)}%</span></div>`).join('');
 }
 
 /* ============================================================
    UTIL
 ============================================================ */
-function toast(icon, msg){ const t=document.getElementById('toast'); document.getElementById('toast-icon').textContent=icon; document.getElementById('toast-msg').textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3800); }
+/* Twenty-two onclick handlers sit on div/span/a elements. Those are
+   invisible to keyboard and screen-reader users. Rather than rewrite
+   every one as a <button> (which would disturb the layout this file
+   already has), give them the role and the key handling a button has.
+   Runs once after the DOM is ready and again after any re-render. */
+function makeClickablesAccessible(root){
+  (root || document).querySelectorAll('[onclick]').forEach(el => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'button' || tag === 'input') return;
+    if (el.dataset.a11yReady) return;
+    el.dataset.a11yReady = '1';
+    if (!el.hasAttribute('role'))     el.setAttribute('role', 'button');
+    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' '){
+        e.preventDefault();
+        el.click();
+      }
+    });
+  });
+}
+
+function toast(icon, msg){ const t=document.getElementById('toast');
+  // Without a live region a screen reader never hears the confirmation.
+  t.setAttribute('role','status'); t.setAttribute('aria-live','polite'); document.getElementById('toast-icon').textContent=icon; document.getElementById('toast-msg').textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3800); }
 
 /* ============================================================
    INIT
@@ -2575,6 +3029,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   loadHomepageTicker();
   loadTrackRecord();
+  makeClickablesAccessible();
   // Auto-login if a client id is already saved
   if (API.clientId) {
     (async () => {
@@ -3109,7 +3564,7 @@ function renderSIPContent() {
       const onTrack = monthly_surplus >= needed;
       const yearsLabel = yearsToGoal < 1 ? '<1 year' : Math.round(yearsToGoal) + ' years';
       return `<div class="sip-goal-card">
-        <div class="sip-goal-name">${g.goal_name}</div>
+        <div class="sip-goal-name">${esc(g.goal_name)}</div>
         <div class="sip-goal-meta">Target: ${fmtINR(targetAmt)} · ${yearsLabel} away <span class="sip-rate-note">Assumes 12% avg. return</span></div>
         <div class="sip-amounts">
           <div class="sip-amount-box needed">
@@ -3245,21 +3700,21 @@ async function loadAdminEvents(){
   }
   el.innerHTML = data.map(e => `
     <div class="admin-event-card">
-      <div class="admin-event-title">${e.title}</div>
+      <div class="admin-event-title">${esc(e.title)}</div>
       <div class="admin-event-meta">
         <span class="admin-badge badge-${(e.severity||'low').toLowerCase()}">${e.severity}</span>
         <span class="admin-badge badge-${(e.horizon_label||'Mid-Term').split('-')[0].toLowerCase()}">${e.horizon_label}</span>
         <span class="admin-badge badge-low">${e.event_type}</span>
       </div>
       <div class="admin-prob">
-        ${e.description || ''}
+        ${esc(e.description || '')}
         <br>
         <b>P(30d):</b> ${e.probability_30d!=null?Math.round(e.probability_30d*100)+'%':'—'} &nbsp;
         <b>P(90d):</b> ${e.probability_90d!=null?Math.round(e.probability_90d*100)+'%':'—'} &nbsp;
         <b>P(180d):</b> ${e.probability_180d!=null?Math.round(e.probability_180d*100)+'%':'—'} &nbsp;
         <b>Confidence:</b> ${e.confidence_pct||'—'}%
       </div>
-      ${e.historical_analogue?`<div class="admin-analogue">Historical analogue: ${e.historical_analogue}</div>`:''}
+      ${e.historical_analogue?`<div class="admin-analogue">Historical analogue: ${esc(e.historical_analogue)}</div>`:''}
       <div class="admin-sources">
         ${(e.source_urls||[]).slice(0,3).map((url,i)=>`<a class="admin-source-link" href="${url}" target="_blank">[Source ${i+1}]</a>`).join('')}
       </div>
@@ -3380,7 +3835,6 @@ async function renderInstrumentSections(){
     { data: recs },
     { data: accuracyRows },
     { data: benchmarks },
-    { data: corpActions },
   ] = await Promise.all([
     sb.from('instrument_universe')
       .select('id,symbol,name,category,risk_level,current_score,corporate_action_flag,corporate_action_note')
@@ -3396,9 +3850,6 @@ async function renderInstrumentSections(){
       .select('instrument_name,weekly_total,weekly_correct,monthly_total,monthly_correct'),
     sb.from('category_benchmarks')
       .select('category,benchmark_1w_pct').order('period_month',{ascending:false}).limit(9),
-    sb.from('instrument_universe')
-      .select('symbol,corporate_action_flag,corporate_action_note')
-      .eq('corporate_action_flag',true),
   ]);
 
   if (!instruments) return;
@@ -3408,27 +3859,41 @@ async function renderInstrumentSections(){
   const recMap  = {}; (recs||[]).forEach(r=>{ if(!recMap[r.instrument_name]) recMap[r.instrument_name]=r; });
   const accMap  = {}; (accuracyRows||[]).forEach(a=>{ accMap[a.instrument_name]=a; });
   const benchMap= {}; (benchmarks||[]).forEach(b=>{ if(!benchMap[b.category]) benchMap[b.category]=b; });
-  const corpMap = {}; (corpActions||[]).forEach(c=>{ corpMap[c.symbol]=c; });
+  // Derived from the instruments array above rather than re-queried: the
+  // first select already carries both corporate-action columns.
+  const corpMap = {};
+  (instruments||[]).forEach(i => { if (i.corporate_action_flag) corpMap[i.symbol] = i; });
 
   // ── Helpers ─────────────────────────────────────────────────────────────
   const fmtINR = n => n != null ? '₹'+Number(n).toLocaleString('en-IN',{maximumFractionDigits:2}) : '—';
   const accPct = (correct,total) => (total>=3) ? Math.round(correct/total*100)+'%' : null;
 
-  // Live price movement since our call (from market data cache)
-  // Computed as % change from entry_price to current cached price
-  async function getLiveMovement(symbol, rec) {
+  // ── Prices: ONE query for all instruments ──────────────────────────
+  // This used to be a query per instrument, awaited inside the card loop.
+  // With 100 instruments that is 100 HTTP round trips for data a single
+  // .in() returns, and the browser's ~6-connection cap turned it into
+  // roughly 17 sequential waves. Same output, one request.
+  const priceMap = {};
+  try {
+    const symbols = instruments.map(i => i.symbol).filter(Boolean);
+    if (symbols.length) {
+      const { data: prices } = await sb.from('market_data_cache')
+        .select('symbol,price').in('symbol', symbols);
+      (prices || []).forEach(p => { if (p.price != null) priceMap[p.symbol] = p.price; });
+    }
+  } catch (e) {
+    console.warn('Price cache unavailable:', e.message);  // cards still render
+  }
+
+  /** Movement since our call. Pure function now — no I/O. */
+  function getLiveMovement(symbol, rec) {
     if (!rec || !rec.entry_price_inr) return null;
-    try {
-      const { data } = await sb.from('market_data_cache')
-        .select('price').eq('symbol',symbol).limit(1);
-      const cur = data?.[0]?.price;
-      if (!cur) return null;
-      const pct = ((cur - rec.entry_price_inr) / rec.entry_price_inr) * 100;
-      const action = rec.action;
-      // Is this moving in the predicted direction?
-      const correct = action==='BUY' ? pct>0 : action==='SELL' ? pct<0 : Math.abs(pct)<1;
-      return { pct, correct, current: cur };
-    } catch { return null; }
+    const cur = priceMap[symbol];
+    if (cur == null) return null;
+    const pct = ((cur - rec.entry_price_inr) / rec.entry_price_inr) * 100;
+    const action = rec.action;
+    const correct = action==='BUY' ? pct>0 : action==='SELL' ? pct<0 : Math.abs(pct)<1;
+    return { pct, correct, current: cur };
   }
 
   // ── Build grouped structure ─────────────────────────────────────────────
@@ -3449,7 +3914,7 @@ async function renderInstrumentSections(){
       const flag = flagMap[inst.id];
       const acc  = accMap[inst.symbol];
       const corp = corpMap[inst.symbol];
-      const mv   = await getLiveMovement(inst.symbol, rec);
+      const mv   = getLiveMovement(inst.symbol, rec);
 
       const stampCls = !rec ? 'stamp-watch'
         : rec.action==='BUY' ? 'stamp-buy'
@@ -3464,13 +3929,13 @@ async function renderInstrumentSections(){
       // Corporate action warning
       const corpHTML = corp
         ? `<div style="background:#FBF0DA;border-radius:6px;padding:6px 10px;margin-top:8px;font-size:11px;color:#9A6B12;">
-             ⚠ Corporate action: ${corp.corporate_action_note||'Verify before acting on this signal'}
+             ⚠ Corporate action: ${esc(corp.corporate_action_note||'Verify before acting on this signal')}
            </div>`
         : '';
 
       // Signal change note
       const changeHTML = rec?.signal_change_note
-        ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;font-style:italic;">${rec.signal_change_note}</div>`
+        ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;font-style:italic;">${esc(rec.signal_change_note)}</div>`
         : '';
 
       // Live movement since our call
@@ -3513,7 +3978,7 @@ async function renderInstrumentSections(){
           ${rec
             ? `<span class="view-stamp ${stampCls}">${rec.action}</span>
                <span class="view-conf">${rec.confidence_score!=null?Math.round(rec.confidence_score*100)+'%':''}</span>
-               <div class="view-reason" style="font-size:12px;line-height:1.55;">${rec.rationale_text||rec.rationale_short||''}</div>`
+               <div class="view-reason" style="font-size:12px;line-height:1.55;">${esc(rec.rationale_text||rec.rationale_short||'')}</div>`
             : `<span class="view-stamp stamp-watch">NO CALL</span>
                <div class="view-reason" style="color:var(--muted);font-size:10.5px;">Scoring pending — next run Sunday 8 PM IST.</div>`
           }
@@ -3622,7 +4087,7 @@ async function renderMacroGrid(){
     if (call){
       const MACRO_VIEW = { BUY:'Bullish', SELL:'Bearish', WATCH:'Neutral', HOLD:'Neutral', REDUCE:'Bearish' };
       const MACRO_CLS  = { BUY:'stamp-bullish', SELL:'stamp-bearish', WATCH:'stamp-neutral', HOLD:'stamp-neutral', REDUCE:'stamp-bearish' };
-      viewBox = `<div class="view-box"><span class="view-stamp ${MACRO_CLS[call.rec.action]||'stamp-neutral'}">${MACRO_VIEW[call.rec.action]||call.rec.action}</span><span class="view-conf">${call.rec.confidence_score!=null?Math.round(call.rec.confidence_score*100)+'%':''}</span><div class="view-reason">${call.rec.rationale_text||''}</div></div>`;
+      viewBox = `<div class="view-box"><span class="view-stamp ${MACRO_CLS[call.rec.action]||'stamp-neutral'}">${MACRO_VIEW[call.rec.action]||call.rec.action}</span><span class="view-conf">${call.rec.confidence_score!=null?Math.round(call.rec.confidence_score*100)+'%':''}</span><div class="view-reason">${esc(call.rec.rationale_text||'')}</div></div>`;
     }
 
     return `<div class="macro-card">
