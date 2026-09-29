@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node backend/server.js",
     "dev": "nodemon backend/server.js",
-    "test": "echo No tests yet"
+    "test": "node tests/levers.maths.test.js && node tests/levers.scoring.test.js && node tests/db.test.js && node tests/opportunityEngine.test.js && node tests/pipeline.test.js",
+    "dry-run": "node scripts/dry_run_scoring.js"
   },
   "keywords": [],
   "author": "WealthGuard",
