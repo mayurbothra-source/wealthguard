@@ -2516,13 +2516,13 @@ async function openHoldingModal(){
     const list = (res && res.instruments) || [];
     // Map instrument_universe category strings to the dropdown's asset_class values
     const CAT_MAP = {
-      'large cap': 'equity', 'mid cap': 'equity', 'small cap': 'equity',
-      'index': 'equity', 'equity': 'equity',
-      'mutual fund': 'mutual_fund', 'fund': 'mutual_fund',
-      'gold': 'gold', 'silver': 'gold',
-      'bond': 'bond', 'debt': 'bond', 'g-sec': 'bond', 'gsec': 'bond',
-      'fd': 'fd', 'fixed deposit': 'fd',
-      'reit': 'reit', 'invit': 'reit',
+      'large_cap_equity': 'equity', 'mid_cap_equity': 'equity',
+      'index_etf':        'equity',
+      'watchlist':        'equity',
+      'large_cap_fund':   'mutual_fund', 'flexi_mid_fund': 'mutual_fund',
+      'debt_fund':        'mutual_fund',
+      'gold':             'gold',
+      'bond_gsec':        'bond',
     };
     list.forEach(inst => {
       const cat = (inst.category || '').toLowerCase().trim();
