@@ -1193,7 +1193,7 @@ table.data-table{width:100%;border-collapse:collapse;}
 
   <!-- PORTFOLIO -->
   <div class="app-view" id="view-portfolio">
-    <div class="dash-head"><h2>Portfolio</h2><button class="btn btn-primary btn-sm" onclick="openModal('modal-holding')">+ Add Holding</button></div>
+    <div class="dash-head"><h2>Portfolio</h2><button class="btn btn-primary btn-sm" onclick="openHoldingModal()">+ Add Holding</button></div>
     <div class="stats-grid" id="pf-stats"></div>
     <div class="card"><div class="card-head"><h3>All Holdings</h3></div><div id="portfolio-full-wrap"></div></div>
   </div>
@@ -1330,9 +1330,22 @@ table.data-table{width:100%;border-collapse:collapse;}
   <div class="modal-box">
     <h3>Add Holding</h3>
     <div class="sub">Log an investment you hold — WealthGuard tracks it, you manage the actual buy/sell with your broker.</div>
-    <div class="row"><label>Instrument name / symbol</label><input id="mh-name" placeholder="e.g. Infosys, Mirae Large Cap Fund"></div>
     <div class="row"><label>Asset class</label>
-      <select id="mh-type"><option value="equity">Equity — NSE/BSE Stock</option><option value="mutual_fund">Mutual Fund</option><option value="gold">Gold ETF / SGB</option><option value="bond">Debt / Bond / G-Sec</option><option value="fd">Fixed Deposit</option><option value="reit">REIT / InvIT</option></select>
+      <select id="mh-type" onchange="filterHoldingInstruments()">
+        <option value="">— select asset class first —</option>
+        <option value="equity">Equity — NSE/BSE Stock</option>
+        <option value="mutual_fund">Mutual Fund</option>
+        <option value="gold">Gold ETF / SGB</option>
+        <option value="bond">Debt / Bond / G-Sec</option>
+        <option value="fd">Fixed Deposit</option>
+        <option value="reit">REIT / InvIT</option>
+      </select>
+    </div>
+    <div class="row" id="mh-instrument-row">
+      <label>Instrument</label>
+      <select id="mh-name" disabled>
+        <option value="">— choose asset class above —</option>
+      </select>
     </div>
     <div class="grid2">
       <div class="row"><label>Quantity / units</label><input id="mh-qty" type="number" placeholder="100"></div>
@@ -2487,9 +2500,60 @@ function closeModal(id){
   }
   _modalReturnFocus = null;
 }
+// Populated once on first open, keyed by asset_class value
+const _holdingInstruments = {};
+
+async function openHoldingModal(){
+  // Reset dropdowns
+  const typeSel = document.getElementById('mh-type');
+  const nameSel = document.getElementById('mh-name');
+  if (typeSel) typeSel.value = '';
+  if (nameSel){ nameSel.innerHTML = '<option value="">— choose asset class above —</option>'; nameSel.disabled = true; }
+
+  // Pre-load instrument universe if not already cached
+  if (!_holdingInstruments._loaded){
+    const res = await API.get('/market/instruments');
+    const list = (res && res.instruments) || [];
+    // Map instrument_universe category strings to the dropdown's asset_class values
+    const CAT_MAP = {
+      'large cap': 'equity', 'mid cap': 'equity', 'small cap': 'equity',
+      'index': 'equity', 'equity': 'equity',
+      'mutual fund': 'mutual_fund', 'fund': 'mutual_fund',
+      'gold': 'gold', 'silver': 'gold',
+      'bond': 'bond', 'debt': 'bond', 'g-sec': 'bond', 'gsec': 'bond',
+      'fd': 'fd', 'fixed deposit': 'fd',
+      'reit': 'reit', 'invit': 'reit',
+    };
+    list.forEach(inst => {
+      const cat = (inst.category || '').toLowerCase().trim();
+      const ac = CAT_MAP[cat] || 'equity';
+      if (!_holdingInstruments[ac]) _holdingInstruments[ac] = [];
+      _holdingInstruments[ac].push(inst.symbol || inst.name);
+    });
+    _holdingInstruments._loaded = true;
+  }
+  openModal('modal-holding');
+}
+
+function filterHoldingInstruments(){
+  const assetClass = document.getElementById('mh-type').value;
+  const nameSel = document.getElementById('mh-name');
+  if (!assetClass){ nameSel.innerHTML = '<option value="">— choose asset class above —</option>'; nameSel.disabled = true; return; }
+
+  const instruments = _holdingInstruments[assetClass] || [];
+  if (instruments.length === 0){
+    nameSel.innerHTML = '<option value="">No tracked instruments in this class</option>';
+    nameSel.disabled = true;
+    return;
+  }
+  nameSel.innerHTML = '<option value="">— select instrument —</option>' +
+    instruments.sort().map(n => `<option value="${n}">${n}</option>`).join('');
+  nameSel.disabled = false;
+}
+
 async function addHolding(){
   const name=val('mh-name'), qty=Number(val('mh-qty')), buy=Number(val('mh-buy'));
-  if (!name||!qty||!buy){ toast('⚠','Please fill in name, quantity, and buy price.'); return; }
+  if (!name||!qty||!buy){ toast('⚠','Please select an instrument, quantity, and buy price.'); return; }
   const curr = Number(val('mh-curr'))||buy; const sl = Number(val('mh-sl'))||null;
   const clientId = API.clientId || await ensureClientRegistered();
   await API.post('/portfolio/add', { client_id:clientId, instrument_name:name, asset_class:val('mh-type'), quantity:qty, avg_buy_price_inr:buy, current_price_inr:curr, stop_loss_price:sl, linked_goal_id:null });
@@ -3215,14 +3279,15 @@ async function saveClientEmail(clientId, email){
 }
 
 async function checkEmailOnEntry(){
-  if (!sb || !API.clientId) return;
+  if (!API.clientId) return;
   if (String(API.clientId).startsWith('local-')) return;   // never registered
   try {
-    const { data, error } = await sb.from('clients')
-      .select('email').eq('id', API.clientId).limit(1);
-    if (error) return;                      // column missing or RLS — stay quiet
-    const email = data && data[0] && data[0].email;
-    if (!email) openModal('modal-email');   // ask once
+    // Use backend profile endpoint — Supabase direct query is blocked by RLS
+    // for the anon key, which always returns null and triggers the prompt every
+    // login even when an email is already saved.
+    const res = await API.get('/clients/' + API.clientId + '/profile');
+    const email = res && res.profile && res.profile.email;
+    if (!email) openModal('modal-email');   // ask once, only when truly missing
   } catch(_){}
 }
 
