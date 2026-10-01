@@ -16,12 +16,12 @@
  *
  * This module supplies the real per-instrument inputs those levers need.
  *
- * TWO DATA SOURCES, DELIBERATELY RANKED BY RELIABILITY
- * ----------------------------------------------------
- * 1. Yahoo's chart endpoint (v8/finance/chart with range=1y). This is the
- *    SAME endpoint marketData.js already uses successfully in production, so
- *    its response shape is known-good. One year of daily closes yields, for
- *    every instrument that has a price feed:
+ * THREE DATA SOURCES, DELIBERATELY RANKED BY RELIABILITY
+ * -------------------------------------------------------
+ * 1. Yahoo's chart endpoint (v8/finance/chart with range=1y), for equities,
+ *    ETFs and anything else priced via Yahoo. This is the SAME endpoint
+ *    marketData.js already uses successfully in production, so its response
+ *    shape is known-good. One year of daily closes yields:
  *
  *      realized volatility · Sharpe-like ratio · max drawdown
  *      RSI(14) · 50/200 DMA position · 1m/3m/6m/1y returns
@@ -29,13 +29,22 @@
  *
  *    Four levers become genuinely per-instrument from this alone.
  *
- * 2. Yahoo's quoteSummary endpoint, for PE, price-to-book, ROE,
+ * 2. MFAPI's full (non-/latest) NAV history endpoint, for mutual funds
+ *    (price_source = 'mfapi'). Until this was added, mutual funds only ever
+ *    had a single current NAV point (via marketData.getMFNav) and NO history
+ *    at all — which meant every mutual fund permanently failed the no-data
+ *    rule below and was capped at WATCH regardless of its real score. MFAPI's
+ *    full history is the same computation as #1 above, just fed NAV values
+ *    instead of stock closes — same four levers, same maths, same reliability.
+ *
+ * 3. Yahoo's quoteSummary endpoint, for PE, price-to-book, ROE,
  *    debt-to-equity, profit margin and earnings growth. This one is LESS
  *    reliable — Yahoo has progressively restricted it and it may require a
  *    cookie/crumb handshake. It is therefore treated as optional: when it
  *    fails, the two levers that depend on it fall back to the old category
  *    baseline and say so in the log. The four price-derived levers are
- *    unaffected.
+ *    unaffected. This only applies to individual companies — funds, ETFs,
+ *    bonds and gold have no PE or ROE and are never asked for it.
  *
  * NOTHING HERE FAILS SILENTLY. A missing feed produces `null` for the
  * affected metrics and an explicit reason string, which the scoring engine
@@ -46,6 +55,7 @@
 
 const axios = require('axios');
 const db = require('../lib/db');
+const { getMFNavHistory } = require('./marketData');
 
 const YAHOO_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
@@ -365,10 +375,23 @@ async function buildMetrics(instruments, opts = {}) {
     // A statically-priced instrument has no history to fetch, and that is a
     // fact about the instrument, not a failure.
     const staticPriced = inst.price_source === 'static' || inst.price_source === 'static_reference';
+    // Mutual funds route through MFAPI for price, not Yahoo. Until now nothing
+    // ever fetched their NAV *history* — only the single current NAV via
+    // getMFNav — so every mutual fund failed the no-data rule and was capped
+    // at WATCH forever regardless of its real score. getMFNavHistory pulls
+    // MFAPI's full historical series (same shape/role as Yahoo's chart data
+    // for equities), so funds now get real technical/sentiment/risk-adjusted
+    // levers instead of a permanent "no yahoo_ticker" excuse.
+    const isMutualFund = inst.price_source === 'mfapi';
 
     let priceStats = null, priceReason = null;
     if (staticPriced) {
       priceReason = 'statically priced — no market history exists';
+    } else if (isMutualFund) {
+      const { closes, reason } = await getMFNavHistory(inst.amfi_code);
+      priceReason = reason;
+      if (closes) priceStats = computePriceStats(closes);
+      await sleep(FETCH_GAP_MS);
     } else {
       const { closes, reason } = await fetchPriceHistory(inst.yahoo_ticker);
       priceReason = reason;
