@@ -30,13 +30,36 @@ function checkKey(req, res) {
   return true;
 }
 
+// Tracks which engines are currently mid-run. Without this, hitting a
+// trigger URL twice (a double-click, a browser/proxy retry on a slow
+// response, an impatient repeat request) fires two full concurrent runs of
+// the same engine — which is exactly what happened on 2026-09-30: two
+// overlapping instrumentEngine runs doubled every request to Yahoo's chart
+// API inside the same window and tripped its rate limit for every single
+// equity and ETF, forcing every instrument to WATCH regardless of its real
+// score. A run that is genuinely stuck is rare and self-corrects on the next
+// deploy/restart; a same-second double-trigger is common and preventable.
+const _runningEngines = new Set();
+
 /**
  * Fires an engine in the background and responds immediately.
  * Long-running engines would otherwise time out the HTTP request.
+ * Refuses to start a second run of the same engine while one is in flight.
  */
 function makeTrigger(name, emoji, loader) {
   return async (req, res) => {
     if (!checkKey(req, res)) return;
+
+    if (_runningEngines.has(name)) {
+      return res.status(409).json({
+        success: false,
+        engine:  name,
+        error:   `${name} is already running from an earlier trigger — refusing to start a second ` +
+                 `overlapping run. Wait for it to finish (check Render logs for "${emoji}") and try again.`,
+      });
+    }
+
+    _runningEngines.add(name);
     res.json({
       success: true,
       engine:  name,
@@ -48,6 +71,8 @@ function makeTrigger(name, emoji, loader) {
       console.log(`✅ Manual trigger: ${name} completed successfully.`);
     } catch (e) {
       console.error(`❌ Manual trigger: ${name} failed:`, e.message);
+    } finally {
+      _runningEngines.delete(name);
     }
   };
 }
