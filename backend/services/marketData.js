@@ -182,6 +182,45 @@ async function getMFNav(amfiCode) {
   }
 }
 
+// ── MUTUAL FUND NAV HISTORY ─────────────────────────────
+// Same MFAPI scheme, without /latest — this returns the FULL historical NAV
+// series (typically years of daily values), newest first. Mutual funds route
+// through MFAPI for price (equities/ETFs use Yahoo), but until now nothing
+// ever fetched their history — only ever the single current NAV. That meant
+// every mutual fund permanently failed the scoring engine's no-data rule
+// (which requires a price *history*, not just a current price) and was
+// capped at WATCH forever, regardless of its actual score. This is what
+// fundamentalsProvider.js needs to give mutual funds the same technical/
+// sentiment/risk-adjusted levers equities already get from Yahoo's history.
+async function getMFNavHistory(amfiCode) {
+  if (!amfiCode) return { closes: null, reason: 'no amfi_code on this instrument' };
+  try {
+    const { data } = await axios.get(
+      `https://api.mfapi.in/mf/${amfiCode}`,
+      { timeout: 10000 }
+    );
+    const rows = data?.data;
+    if (!Array.isArray(rows) || !rows.length) {
+      return { closes: null, reason: 'MFAPI returned no NAV history for this code' };
+    }
+    // MFAPI returns newest-first; the scoring maths (returns, moving averages,
+    // drawdown) all expect oldest-first, same order Yahoo's chart data comes in.
+    const closes = rows
+      .map(r => parseFloat(r.nav))
+      .filter(n => !isNaN(n) && n > 0)
+      .reverse();
+    if (!closes.length) {
+      return { closes: null, reason: 'MFAPI history had no valid NAV values' };
+    }
+    return { closes, reason: null };
+  } catch (err) {
+    const detail = err.response
+      ? `HTTP ${err.response.status}`
+      : err.code === 'ECONNABORTED' ? 'timed out' : err.message;
+    return { closes: null, reason: `MFAPI history fetch failed (${detail})` };
+  }
+}
+
 // ── FII / DII FLOWS ────────────────────────────────────
 async function getFIIDIIFlows() {
   try {
@@ -393,6 +432,7 @@ module.exports = {
   getNSEIndex,
   getIndiaVIX,
   getMFNav,
+  getMFNavHistory,
   getFIIDIIFlows,
   getMacroIndicators,
   classifyVIXRegime,

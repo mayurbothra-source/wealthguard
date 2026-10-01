@@ -670,12 +670,34 @@ function buildScoreNotes(audit) {
   return notes.join('. ');
 }
 
+// Guards against two overlapping runs regardless of caller — the weekly cron
+// (scheduler.js) and the manual admin trigger both call this function
+// directly, so the lock has to live here rather than only in the route.
+// A same-window double-run doubles every request this makes to Yahoo's chart
+// API and tripped its rate limit on 2026-09-30, forcing every instrument to
+// WATCH that run regardless of its real score.
+let _isRunning = false;
+
 async function runInstrumentScoringEngine() {
+  if (_isRunning) {
+    console.warn('🎯 Instrument engine: a run is already in progress — skipping this trigger ' +
+                  'to avoid doubling every external price request.');
+    return;
+  }
   if (!supabaseAdmin) {
     console.log('🎯 Instrument engine: Supabase not configured, skipping.');
     return;
   }
 
+  _isRunning = true;
+  try {
+    await _runInstrumentScoringEngineInner();
+  } finally {
+    _isRunning = false;
+  }
+}
+
+async function _runInstrumentScoringEngineInner() {
   const runStart = Date.now();
   console.log('🎯 Running instrument scoring engine...');
 
