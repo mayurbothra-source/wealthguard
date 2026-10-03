@@ -1418,6 +1418,38 @@ const API = {
     return 'https://wealthguard-backend.onrender.com/api';
   })(),
   clientId: localStorage.getItem('wg_client_id') || null,
+  // Session token issued by the server at login/registration. Every call to a
+  // private route carries it; the server takes the client's identity from it,
+  // not from the id in the URL.
+  token: (function(){ try { return localStorage.getItem('wg_token'); } catch(_){ return null; } })(),
+  setupToken: null,   // short-lived "set your PIN" token (code flow only)
+  setSession(clientId, token){
+    this.clientId = clientId || this.clientId;
+    if (token) this.token = token;
+    try {
+      if (this.clientId) localStorage.setItem('wg_client_id', this.clientId);
+      if (this.token) localStorage.setItem('wg_token', this.token);
+    } catch(_){}
+  },
+  clearSession(){
+    this.clientId = null; this.token = null; this.setupToken = null;
+    try { localStorage.removeItem('wg_client_id'); localStorage.removeItem('wg_token'); } catch(_){}
+  },
+  _headers(extra, bearer){
+    const h = Object.assign({}, extra || {});
+    const t = bearer || this.token;
+    if (t) h['Authorization'] = 'Bearer ' + t;
+    return h;
+  },
+  // A 401 on a private route means the session has ended (expired, or the
+  // server was told to stop trusting it). Say so once and return to login.
+  _sessionLost(r, body, usedBearer){
+    if (r.status === 401 && body && body.auth_required && !usedBearer && this.token){
+      this.clearSession();
+      try { toast('🔒', 'Your session has ended. Please log in again.'); } catch(_){}
+      try { resetLoginScreen(); goTo('login'); } catch(_){}
+    }
+  },
   // Wraps fetch with an explicit timeout so no call ever hangs indefinitely.
   // Render's free tier can take 50+ seconds to wake from sleep — we give it
   // 60s and show a progress message at the 8s mark so users know what's happening.
@@ -1442,17 +1474,27 @@ const API = {
   },
   async get(path){
     try {
-      const r = await this._fetch(this.base+path);
-      if (!r.ok) return null;
+      const r = await this._fetch(this.base+path, { headers: this._headers() });
+      if (!r.ok){
+        const e = await r.json().catch(()=>null);
+        this._sessionLost(r, e, false);
+        return null;
+      }
       return await r.json();
     } catch(e){ console.warn('GET failed', path, e.message); return null; }
   },
-  async post(path, body, progressMsgEl){
+  async post(path, body, progressMsgEl, bearer){
     try {
       const r = await this._fetch(this.base+path, {
-        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+        method:'POST', headers:this._headers({'Content-Type':'application/json'}, bearer), body:JSON.stringify(body)
       }, progressMsgEl);
-      if (!r.ok){ const e=await r.json().catch(()=>({})); return {error:e.error||'Request failed'}; }
+      if (!r.ok){
+        const e = await r.json().catch(()=>({}));
+        this._sessionLost(r, e, !!bearer);
+        // Keep the server's flags (locked, pin_setup_required, payments_unavailable…)
+        // so callers can react to them, not just show the message.
+        return Object.assign({}, e, { error: e.error || 'Request failed', status: r.status });
+      }
       return await r.json();
     } catch(e){
       console.warn('POST failed', path, e.message);
@@ -1536,10 +1578,22 @@ function switchIntel(tab, btn){
    LOGIN
 ============================================================ */
 // ── Two-step login: first check phone exists, then ask for PIN ──
-let _loginClientId = null; // holds client_id between step 1 and step 2
+let _loginPhone = null;    // phone carried from step 1 to the PIN / code step
+let _codeMode = false;     // true while the box is asking for an emailed code instead of a PIN
+
+/** Reads the client id out of a token we were just handed (display/routing only —
+ *  the server never trusts this; it verifies the signature itself). */
+function tokenSub(tok){
+  try {
+    const b = tok.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+    return JSON.parse(atob(b + '==='.slice((b.length + 3) % 4))).sub || null;
+  } catch(_){ return null; }
+}
 
 async function resetLoginScreen(){
-  _loginClientId = null;
+  _loginPhone = null; _codeMode = false;
+  const lab = document.querySelector('#login-pin-wrap label'); if (lab) lab.textContent = '6-digit PIN';
+  const lpi = document.getElementById('login-pin'); if (lpi){ lpi.type = 'password'; lpi.value = ''; }
   document.getElementById('login-phone').value = '';
   document.getElementById('login-pin-wrap').style.display = 'none';
   document.getElementById('login-btn').textContent = 'Continue →';
@@ -1583,8 +1637,7 @@ async function checkPhone(){
       msg.className='login-msg bad'; return;
     }
 
-    // Store client id for the next step
-    _loginClientId = result.client_id;
+    _loginPhone = phone;
 
     if (result.pin_set){
       // Account has a PIN — show PIN field, backend does the verification
@@ -1595,10 +1648,10 @@ async function checkPhone(){
       document.getElementById('login-pin').focus();
       msg.textContent = ''; msg.className = 'login-msg';
     } else {
-      // Account exists but no PIN set yet — go to set-pin screen
-      API.clientId = client.id;
-      localStorage.setItem('wg_client_id', API.clientId);
-      goTo('set-pin');
+      // Account exists but has no PIN. We no longer log anyone in on a phone
+      // number alone: a one-time code is emailed to the address on the account
+      // (or issued to the client by us if there is no email on file).
+      startCodeStep(phone);
     }
   } catch(e){
     document.getElementById('login-btn').disabled = false;
@@ -1607,7 +1660,36 @@ async function checkPhone(){
   }
 }
 
+/** Ask for an emailed one-time code, then (on success) let the client set a PIN. */
+function startCodeStep(phone){
+  _codeMode = true;
+  API.post('/auth/request-code', { phone_wa: phone });   // generic answer by design
+  const msg = document.getElementById('login-msg');
+  document.getElementById('login-pin-wrap').style.display = 'block';
+  const lab = document.querySelector('#login-pin-wrap label'); if (lab) lab.textContent = '6-digit code';
+  const inp = document.getElementById('login-pin'); inp.type = 'text'; inp.value = '';
+  document.getElementById('login-btn').textContent = 'Verify code →';
+  document.getElementById('login-btn').onclick = doVerifyCode;
+  document.getElementById('login-sub').textContent = 'Your account has no PIN yet. We have emailed a 6-digit code to the address on file.';
+  msg.textContent = 'No email on your account? Message us and we will give you a setup code.'; msg.className = 'login-msg warn';
+  inp.focus();
+}
+async function doVerifyCode(){
+  const msg = document.getElementById('login-msg');
+  const code = document.getElementById('login-pin').value.trim();
+  if (!/^\d{6}$/.test(code)){ msg.textContent='The code is 6 digits.'; msg.className='login-msg bad'; return; }
+  msg.textContent='Checking...'; msg.className='login-msg ok';
+  const r = await API.post('/auth/verify-code', { phone_wa: _loginPhone, code });
+  if (r && r.success && r.setup_token){
+    API.setupToken = r.setup_token;
+    document.getElementById('login-pin').type = 'password';
+    goTo('set-pin'); return;
+  }
+  msg.textContent = (r && r.error) || 'That code is not valid or has expired.'; msg.className='login-msg bad';
+}
+
 async function doLogin(){
+  if (_codeMode) return doVerifyCode();
   // normalisePhone, not the raw input — phone_wa is an exact-match lookup, so
   // login must send the identical format registration stored.
   const phone = normalisePhone(document.getElementById('login-phone').value);
@@ -1617,13 +1699,9 @@ async function doLogin(){
   if (!/^\d{6}$/.test(pin)){ msg.textContent='PIN must be exactly 6 digits.'; msg.className='login-msg bad'; return; }
   msg.textContent='Verifying...'; msg.className='login-msg ok';
   const result = await API.post('/auth/login', { phone_wa: phone, pin });
-  if (result && result.success && result.client){
-    API.clientId = result.client.id;
-    localStorage.setItem('wg_client_id', API.clientId);
-    if (result.pin_setup_required){
-      _loginClientId = API.clientId;
-      goTo('set-pin'); return;
-    }
+  if (result && result.pin_setup_required){ startCodeStep(phone); return; }
+  if (result && result.success && result.client && result.token){
+    API.setSession(result.client.id, result.token);
     msg.textContent='Welcome back! Loading your dashboard...'; msg.className='login-msg ok';
     showAdminNavIfAdmin(result.client);
     const profileRes = await API.get('/clients/'+API.clientId+'/profile');
@@ -1643,13 +1721,16 @@ async function doSetPin(){
   const msg = document.getElementById('sp-msg');
   if (!/^\d{6}$/.test(pin)){ msg.textContent='PIN must be exactly 6 digits.'; msg.className='login-msg bad'; return; }
   if (pin !== confirm){ msg.textContent='PINs do not match. Try again.'; msg.className='login-msg bad'; return; }
-  const clientId = _loginClientId || API.clientId;
-  if (!clientId){ msg.textContent='Session expired. Please log in again.'; msg.className='login-msg bad'; return; }
+  const bearer = API.setupToken || API.token;
+  if (!bearer){ msg.textContent='Session expired. Please log in again.'; msg.className='login-msg bad'; return; }
   msg.textContent='Setting PIN...'; msg.className='login-msg ok';
-  const result = await API.post('/auth/set-pin', { client_id: clientId, pin, confirm_pin: confirm });
-  if (result && result.success){
+  // The server identifies the account from the token — no client id is sent.
+  const result = await API.post('/auth/set-pin', { pin, confirm_pin: confirm }, null, bearer);
+  if (result && result.success && result.token){
     msg.textContent='PIN set! Loading your dashboard...'; msg.className='login-msg ok';
-    API.clientId = clientId;
+    API.setupToken = null;
+    API.setSession(tokenSub(result.token), result.token);
+    const clientId = API.clientId;
     const profileRes = await API.get('/clients/'+clientId+'/profile');
     const statusRes = await API.get('/payments/status/'+clientId);
     hydrateFromProfile(profileRes && profileRes.profile, statusRes);
@@ -1668,8 +1749,9 @@ async function obSetPin(){
   if (pin !== confirm){ msg.textContent='PINs do not match. Try again.'; msg.className='login-msg bad'; return; }
   if (!API.clientId){ msg.textContent='Session error. Please restart onboarding.'; msg.className='login-msg bad'; return; }
   msg.textContent='Saving PIN...'; msg.className='login-msg ok';
-  const result = await API.post('/auth/set-pin', { client_id: API.clientId, pin, confirm_pin: confirm });
+  const result = await API.post('/auth/set-pin', { pin, confirm_pin: confirm });
   if (result && result.success){
+    if (result.token) API.setSession(tokenSub(result.token), result.token);
     msg.textContent='PIN set! Entering your dashboard...'; msg.className='login-msg ok';
     setTimeout(enterApp, 600);
   } else {
@@ -1711,8 +1793,7 @@ function hydrateFromProfile(profile, status){
 }
 function logOut(){
   if (!confirm('Log out of WealthGuard?')) return;
-  localStorage.removeItem('wg_client_id');
-  API.clientId = null;
+  API.clearSession();
   goTo('landing');
 }
 
@@ -1884,7 +1965,10 @@ function prepStep5(){
 async function startFreeTrial(){
   if (new Date() >= TRIAL_CUTOFF){ toast('⚠','Free trial is no longer available. Please choose a paid plan.'); goToPricing(); return; }
   const clientId = await ensureClientRegistered();
-  await API.post('/payments/subscribe', { client_id: clientId, plan_key: 'builder', discount_code: 'WGDEMO' });
+  const trialRes = await API.post('/payments/subscribe', { client_id: clientId, plan_key: 'builder', discount_code: 'WGDEMO' });
+  // 409 "already used" means this account has had its trial: carry on with what
+  // the server says they have, rather than pretending to start a new one.
+  if (trialRes && trialRes.error && trialRes.status !== 409){ toast('⚠', trialRes.error); return; }
   const now = Date.now();
   localStorage.setItem('wg_trial_start', String(now));
   state.isTrial = true; state.trialStart = now; state.planTier = 'builder';
@@ -1905,7 +1989,8 @@ function checkTrialStatus(){
 ============================================================ */
 const PLAN_PRICE = { starter:299, builder:799, wealth_builder:1999 };
 const PLAN_NAME  = { starter:'Starter', builder:'Builder', wealth_builder:'Wealth Builder' };
-const DEMO_CODES = { WGFOUND01:{d:100,m:12},WGFOUND02:{d:100,m:12},WGFOUND03:{d:100,m:12},WGFOUND04:{d:100,m:12},WGFOUND05:{d:100,m:12}, WGDEMO:{d:100,m:1}, LAUNCH9SEP:{d:50,m:3}, WGEARLY:{d:30,m:6} };
+// Discount codes are validated by the server only. A copy of the code list used to
+// sit here as an offline fallback, which meant anyone could read every code in the page.
 
 function selectPlan(key, el){
   state.selectedPlan = key;
@@ -1945,22 +2030,19 @@ async function applyDiscount(){
     state.discount = { d: result.discount, m: result.duration_months };
     msg.textContent = result.message; msg.className='disc-msg ok'; updateCheckout(); return;
   }
-  if (DEMO_CODES[code] && (!result || result.error)){
-    const c = DEMO_CODES[code];
-    state.discount = { d:c.d, m:c.m };
-    msg.textContent = c.d===100 ? `🎉 Code applied — ${c.m} month${c.m>1?'s':''} free.` : `✅ ${c.d}% off for ${c.m} months.`;
-    msg.className='disc-msg ok'; updateCheckout();
-  } else {
-    state.discount = null;
-    msg.textContent = (result && result.message) || 'Invalid code.';
-    msg.className='disc-msg bad'; updateCheckout();
-  }
+  state.discount = null;
+  msg.textContent = (result && (result.message || result.error)) || 'Could not check that code right now. Please try again.';
+  msg.className='disc-msg bad'; updateCheckout();
 }
 async function activateFree(){
   const btn = document.getElementById('free-btn'); btn.textContent='Activating...'; btn.disabled=true;
   const code = document.getElementById('disc-input').value.trim().toUpperCase();
   const clientId = await ensureClientRegistered();
-  await API.post('/payments/subscribe', { client_id: clientId, plan_key: state.selectedPlan, discount_code: code });
+  const res = await API.post('/payments/subscribe', { client_id: clientId, plan_key: state.selectedPlan, discount_code: code });
+  if (!res || res.error){
+    toast('⚠', (res && res.error) || 'Could not activate that code.');
+    btn.textContent = 'Activate'; btn.disabled = false; return;
+  }
   state.planTier = state.selectedPlan;
   toast('🎉', `${PLAN_NAME[state.selectedPlan]} plan activated. Welcome to WealthGuard.`);
   setTimeout(enterApp, 1200);
@@ -1971,10 +2053,13 @@ async function initiatePayment(){
   const discount = state.discount ? state.discount.d : 0;
   const finalPaise = Math.round(price * (1-discount/100)) * 100;
   const order = await API.post('/payments/subscribe', { client_id: clientId, plan_key: state.selectedPlan, discount_code: document.getElementById('disc-input').value.trim().toUpperCase() || null });
-  if (!order || order.error || !order.subscription || order.subscription.type === 'demo'){
-    toast('ℹ️','Payment gateway not yet live — proceeding to demo access.');
-    state.planTier = state.selectedPlan;
-    setTimeout(enterApp, 1500); return;
+  // No more "demo access": a failed or unavailable payment never grants a plan.
+  if (!order || order.error || !order.subscription){
+    toast('ℹ️', (order && order.error) || 'Paid plans open shortly. If you have a launch code, enter it above.');
+    return;
+  }
+  if (order.subscription.type === 'free'){
+    state.planTier = state.selectedPlan; setTimeout(enterApp, 800); return;
   }
   if (typeof Razorpay === 'undefined'){ toast('⏳','Loading payment gateway...'); loadRazorpaySdk(); return; }
   const rzp = new Razorpay({
@@ -2021,7 +2106,7 @@ async function ensureClientRegistered(){
     const why = (result && result.error) || 'The server did not return an account id.';
     throw new Error(why);
   }
-  API.clientId = id; localStorage.setItem('wg_client_id', id);
+  API.setSession(id, result.token || result.setup_token);
   // The /auth/register route may not persist `email` yet — if the backend
   // ignores unknown fields it would be dropped silently, which is exactly
   // the failure that left every brief undeliverable. Write it directly as
@@ -2074,10 +2159,13 @@ async function enterApp(){
   await loadPortfolio();
   await loadGoals();
   await loadSignals();
-  await loadBrief();
+  window._briefLoading = true;
   renderDashboard();
   setupIntelTabsForTier();
   checkEmailOnEntry();
+  // The brief can take a few seconds when it has to be built on demand, so it
+  // loads in the background and the screen fills in when it arrives.
+  loadBrief().then(()=>{ window._briefLoading = false; renderDashboard(); if (typeof renderIntelBrief==='function') renderIntelBrief(); });
 }
 
 /* ============================================================
@@ -2556,7 +2644,9 @@ async function addHolding(){
   if (!name||!qty||!buy){ toast('⚠','Please select an instrument, quantity, and buy price.'); return; }
   const curr = Number(val('mh-curr'))||buy; const sl = Number(val('mh-sl'))||null;
   const clientId = API.clientId || await ensureClientRegistered();
-  await API.post('/portfolio/add', { client_id:clientId, instrument_name:name, asset_class:val('mh-type'), quantity:qty, avg_buy_price_inr:buy, current_price_inr:curr, stop_loss_price:sl, linked_goal_id:null });
+  const addRes = await API.post('/portfolio/add', { client_id:clientId, instrument_name:name, asset_class:val('mh-type'), quantity:qty, avg_buy_price_inr:buy, current_price_inr:curr, stop_loss_price:sl, linked_goal_id:null });
+  // Only show the holding if the server actually saved it.
+  if (!addRes || addRes.error){ toast('⚠', (addRes && addRes.error) || 'Could not save your holding. Please try again.'); return; }
   state.portfolio.push({ instrument_name:name, asset_class:val('mh-type'), quantity:qty, avg_buy_price_inr:buy, current_price_inr:curr, current_value_inr:qty*curr, stop_loss_price:sl, unrealised_pnl_pct:((curr-buy)/buy*100) });
   closeModal('modal-holding'); renderPortfolioViews(); toast('✓', name+' added to your portfolio');
 }
@@ -2574,7 +2664,8 @@ async function addGoal(){
   const maxGoals = state.planTier==='starter' ? 1 : Infinity;
   if (state.goals.length >= maxGoals){ toast('🔒', 'Starter plan allows 1 goal. Upgrade to Builder for unlimited goals.'); closeModal('modal-goal'); return; }
   const clientId = API.clientId || await ensureClientRegistered();
-  await API.post('/goals/add', { client_id:clientId, goal_name:name, goal_type:type, target_amount_inr:amount, target_date:date });
+  const goalRes = await API.post('/goals/add', { client_id:clientId, goal_name:name, goal_type:type, target_amount_inr:amount, target_date:date });
+  if (!goalRes || goalRes.error){ toast('⚠', (goalRes && goalRes.error) || 'Could not save your goal. Please try again.'); return; }
   state.goals.push({ goal_name:name, goal_type:type, target_amount_inr:amount, current_corpus_inr:0, funding_pct:0 });
   closeModal('modal-goal'); renderDashboard(); toast('✓', name+' goal added');
 }
@@ -2650,6 +2741,7 @@ async function loadBrief(){
   const clientId = API.clientId;
   const res = clientId ? await API.get('/brief/'+clientId) : null;
   window._brief = res && res.brief;
+  window._briefStale = !!(res && res.stale);
 }
 
 /* ============================================================
@@ -2665,10 +2757,42 @@ function renderDashboard(){
   // Container only exists once the dashboard HTML is in the DOM
   loadOpportunities();
 }
+/* ── Morning brief rendering ─────────────────────────────────────
+   The server stores a structured brief (brief_json). When it is there we show
+   Today / In the news / Ideas / Your holdings. If it is not (older rows, or the
+   database has not been migrated yet) we fall back to the plain text. */
+function briefData(){ const b = window._brief; return b && b.brief_json ? b.brief_json : null; }
+function briefWaiting(){
+  return `<div class="brief-item">${window._briefLoading ? 'Preparing your brief…' : 'Your brief could not be prepared just now. Please try again in a few minutes.'}</div>`;
+}
 function briefLine(){
+  const j = briefData();
+  if (j){
+    const mkt = j.market_snapshot ? `<div class="brief-item" style="opacity:.8;">${esc(j.market_snapshot)}</div>` : '';
+    return `<div class="brief-item"><b>${esc(j.today_action || '')}</b></div>${mkt}`;
+  }
   const b = window._brief;
-  if (b && b.whatsapp_message) return b.whatsapp_message.replace(/\*/g,'').split('\n').slice(0,6).map(l=>`<div class="brief-item">${l}</div>`).join('');
-  return `<div class="brief-item">Your first brief arrives at 7:30 AM once your profile and portfolio are complete.</div>`;
+  if (b && b.whatsapp_message) return b.whatsapp_message.replace(/\*/g,'').split('\n').slice(0,6).map(l=>`<div class="brief-item">${esc(l)}</div>`).join('');
+  return briefWaiting();
+}
+function briefNewsHTML(){
+  const j = briefData();
+  if (!j) return `<div class="brief-item">${window._briefLoading ? 'Loading…' : 'No news items yet.'}</div>`;
+  if (!j.news || !j.news.length) return `<div class="brief-item">Nothing notable flagged by our scan in the last three days.</div>`;
+  return j.news.slice(0,4).map(n=>`<div class="brief-item">• <b>${esc(n.title)}</b>${n.severity?` <span style="opacity:.6;">(${esc(n.severity)})</span>`:''}${n.summary?`<div style="opacity:.7;font-size:11px;">${esc(n.summary)}</div>`:''}</div>`).join('');
+}
+function briefIdeasHTML(){
+  const j = briefData();
+  if (!j) return `<div class="brief-item">${window._briefLoading ? 'Loading…' : 'Ideas appear once your first brief is ready.'}</div>`;
+  const rows = (j.ideas||[]).map(i=>`<div class="brief-item">• <b>${esc(i.symbol)}</b> <span style="color:${i.action==='BUY'?'#7BD3A0':'#E8C46A'};">${esc(i.action)}</span>${i.high_conviction?' ★':''}${i.entry?`<div style="opacity:.7;font-size:11px;">Entry ~₹${esc(i.entry)}${i.target?` · Target ₹${esc(i.target)}`:''}${i.stop?` · Stop-loss ₹${esc(i.stop)}`:''}</div>`:''}</div>`).join('');
+  return (j.ideas_note?`<div class="brief-item">${esc(j.ideas_note)}</div>`:'') + rows || `<div class="brief-item">No ideas today.</div>`;
+}
+function briefHoldingsHTML(){
+  const j = briefData();
+  if (!j || !(j.holding_actions||[]).length) return '';
+  return `<div class="card" style="margin-bottom:16px;"><div class="card-head"><h3>What our signals say about your holdings</h3></div><div style="padding:6px 18px 14px;font-size:12.5px;line-height:1.7;">${
+    j.holding_actions.map(h=>`<div style="padding:5px 0;border-bottom:1px solid var(--line,#E1E4DD);"><b>${esc(h.symbol)}</b> — ${esc(h.action||'no signal')}<div style="color:var(--muted);font-size:12px;">${esc(h.advice)}</div></div>`).join('')
+  }</div></div>`;
 }
 function pfNum(key){ const s = window._pfSummary || {totalVal:0,totalCost:0,pnl:0,pnlPct:0}; return s[key]; }
 
@@ -2720,11 +2844,11 @@ function dashboardStarterHTML(){
   const sigs = visibleSignals();
   return `
   <div class="upgrade-strip"><span>You're on the <b>Starter</b> plan — unlimited goals, up to 7 active signals.</span><b style="cursor:pointer;" onclick="goToPricing()">Upgrade to Builder →</b></div>
-  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief — Short + Mid + Long-Term Outlook</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App</div></div>
+  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App</div></div>
     <div class="brief-grid" style="grid-template-columns:repeat(3,1fr);">
-      <div class="brief-box"><div class="h">Short-Term</div>${briefLine()}</div>
-      <div class="brief-box"><div class="h">Mid-Term</div><div class="brief-item">Builds over your first month of data.</div></div>
-      <div class="brief-box"><div class="h">Long-Term</div><div class="brief-item">Builds as your track record matures.</div></div>
+      <div class="brief-box"><div class="h">Today</div>${briefLine()}</div>
+      <div class="brief-box"><div class="h">In the news</div>${briefNewsHTML()}</div>
+      <div class="brief-box"><div class="h">Ideas worth a look</div>${briefIdeasHTML()}</div>
     </div></div>
   ${flashAlertsHTML()}
   <div class="dash-head" style="margin-top:26px;"><h2>Opportunities</h2></div>
@@ -2747,11 +2871,11 @@ function dashboardStarterHTML(){
 function dashboardBuilderHTML(){
   const sigs = visibleSignals();
   return `
-  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief — Short + Mid + Long-Term Outlook</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App</div></div>
+  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App</div></div>
     <div class="brief-grid" style="grid-template-columns:repeat(3,1fr);">
-      <div class="brief-box"><div class="h">Short-Term</div>${briefLine()}</div>
-      <div class="brief-box"><div class="h">Mid-Term</div><div class="brief-item">Builds over your first month of data.</div></div>
-      <div class="brief-box"><div class="h">Long-Term</div><div class="brief-item">Builds as your track record matures.</div></div>
+      <div class="brief-box"><div class="h">Today</div>${briefLine()}</div>
+      <div class="brief-box"><div class="h">In the news</div>${briefNewsHTML()}</div>
+      <div class="brief-box"><div class="h">Ideas worth a look</div>${briefIdeasHTML()}</div>
     </div></div>
   ${flashAlertsHTML()}
   <div class="dash-head" style="margin-top:26px;"><h2>Opportunities</h2></div>
@@ -2772,11 +2896,11 @@ function dashboardBuilderHTML(){
 function dashboardWealthHTML(){
   const sigs = visibleSignals();
   return `
-  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief — Full Horizon Outlook</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App · Priority Delivery</div></div>
+  <div class="brief-hero"><div class="brief-top"><div class="t">🌅 Today's Brief</div><div class="d">${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})} · WhatsApp + In-App · Priority Delivery</div></div>
     <div class="brief-grid" style="grid-template-columns:repeat(3,1fr);">
-      <div class="brief-box"><div class="h">Short-Term</div>${briefLine()}</div>
-      <div class="brief-box"><div class="h">Mid-Term</div><div class="brief-item">Sector rotation data builds over your first month.</div></div>
-      <div class="brief-box"><div class="h">Long-Term</div><div class="brief-item">Long-horizon view builds as your track record matures.</div></div>
+      <div class="brief-box"><div class="h">Today</div>${briefLine()}</div>
+      <div class="brief-box"><div class="h">In the news</div>${briefNewsHTML()}</div>
+      <div class="brief-box"><div class="h">Ideas worth a look</div>${briefIdeasHTML()}</div>
     </div></div>
   ${flashAlertsHTML()}
   <div class="dash-head" style="margin-top:26px;"><h2>Opportunities</h2></div>
@@ -2837,9 +2961,10 @@ function renderIntelBrief(){
   const c = document.getElementById('intel-brief-content');
   const b = window._brief;
   if (b && b.whatsapp_message){
-    c.innerHTML = `<div class="card"><div class="card-head"><h3>Today's Full Brief</h3></div><div style="padding:16px 18px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;">${esc(b.whatsapp_message.replace(/\*/g,''))}</div></div>`;
+    const stale = window._briefStale ? `<div style="padding:10px 18px;background:var(--gold-tint);font-size:12px;">This is your most recent brief (${esc(b.brief_date||'')}); today's could not be prepared.</div>` : '';
+    c.innerHTML = briefHoldingsHTML() + `<div class="card"><div class="card-head"><h3>Today's Full Brief</h3></div>${stale}<div style="padding:16px 18px;font-size:12.5px;line-height:1.8;white-space:pre-wrap;">${esc(b.whatsapp_message.replace(/\*/g,''))}</div></div>`;
   } else {
-    c.innerHTML = `<div class="empty-state"><div class="ic">📋</div><h4>Your briefs will appear here</h4><p>Once your first morning brief is generated, you'll see the full history here.</p></div>`;
+    c.innerHTML = `<div class="empty-state"><div class="ic">📋</div><h4>${window._briefLoading?'Preparing your brief…':'Your brief is not ready'}</h4><p>${window._briefLoading?'This takes a few seconds the first time each morning.':'Please try again in a few minutes.'}</p></div>`;
   }
 }
 const TIPS = [
@@ -3058,18 +3183,18 @@ async function exportMyData(){
   };
 
   // Pull the rows only the database has
-  if (sb && API.clientId && !String(API.clientId).startsWith('local-')){
-    const pull = async (table, sel, col) => {
-      try {
-        const { data } = await sb.from(table).select(sel).eq(col, API.clientId);
-        return data || [];
-      } catch(_){ return []; }
-    };
+  // Private rows come from the backend (signed-in, own data only); the browser's
+  // public key can no longer read these tables.
+  if (API.clientId && API.token && !String(API.clientId).startsWith('local-')){
+    const [prof, pf, gl] = await Promise.all([
+      API.get('/clients/'+API.clientId+'/profile'),
+      API.get('/portfolio/'+API.clientId),
+      API.get('/goals/'+API.clientId),
+    ]);
     bundle.database = {
-      client_record:  await pull('clients', '*', 'id'),
-      holdings:       await pull('portfolios', '*', 'client_id'),
-      goals:          await pull('client_goals', '*', 'client_id'),
-      recommendations: await pull('recommendations', '*', 'client_id'),
+      client_record: prof && prof.profile ? [prof.profile] : [],
+      holdings:      (pf && pf.holdings) || [],
+      goals:         (gl && gl.goals) || [],
     };
   }
 
@@ -3129,11 +3254,10 @@ function renderProfile(){
     const el = document.getElementById('profile-email');
     if (!el) return;
     let email = state.obData.email;
-    if (!email && sb && API.clientId && !String(API.clientId).startsWith('local-')){
-      try {
-        const { data } = await sb.from('clients').select('email').eq('id', API.clientId).limit(1);
-        email = data && data[0] && data[0].email;
-      } catch(_){}
+    if (!email && API.clientId && API.token && !String(API.clientId).startsWith('local-')){
+      const res = await API.get('/clients/'+API.clientId+'/profile');
+      email = res && res.profile && res.profile.email;
+      if (email) state.obData.email = email;
     }
     el.textContent = email || 'No email on file — briefs cannot be sent';
     el.style.color = email ? 'var(--muted)' : 'var(--danger)';
@@ -3220,8 +3344,9 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHomepageTicker();
   loadTrackRecord();
   makeClickablesAccessible();
-  // Auto-login if a client id is already saved
-  if (API.clientId) {
+  // Resume a session only if we hold a token the server still accepts.
+  // A bare client id (the old behaviour) is no longer a login.
+  if (API.clientId && API.token) {
     (async () => {
       const profileRes = await API.get('/clients/'+API.clientId+'/profile');
       const statusRes = await API.get('/payments/status/'+API.clientId);
@@ -3230,6 +3355,8 @@ document.addEventListener('DOMContentLoaded', () => {
         enterApp();
       }
     })();
+  } else if (API.clientId && !API.token) {
+    API.clearSession();   // left over from before sign-in tokens existed
   }
 });
 
@@ -3258,23 +3385,9 @@ async function saveClientEmail(clientId, email){
     if (res && !res.error) savedVia = 'backend';
   } catch(_){}
 
-  // Fallback: write straight to Supabase. Needed until the backend route
-  // exists; will fail quietly if RLS forbids client-side updates.
-  if (!savedVia && sb){
-    try {
-      const { error } = await sb.from('clients')
-        .update({ email: email, email_verified: true })
-        .eq('id', clientId);
-      if (!error) savedVia = 'supabase';
-      else console.warn('Email save blocked by Supabase:', error.message);
-    } catch(e){ console.warn('Email save failed:', e.message); }
-  }
-
-  if (!savedVia){
-    console.warn('Email could not be saved for client ' + clientId +
-                 '. Add a POST /clients/:id/email route to the backend, ' +
-                 'or allow clients.email updates for the anon role.');
-  }
+  // (There is deliberately no direct-to-database fallback any more: the
+  // browser's public key cannot write to the clients table, and should not.)
+  if (!savedVia) console.warn('Email could not be saved for client ' + clientId + ' (backend route refused or unreachable).');
   return savedVia;
 }
 

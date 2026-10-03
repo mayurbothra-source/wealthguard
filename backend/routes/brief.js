@@ -2,22 +2,22 @@ const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
 const db = require('../lib/db');
+const { requireSession, ownsParam } = require('../lib/session');
+const { limit } = require('../lib/rateLimit');
+const { generateBriefForClient, istDate } = require('../services/morningBriefEngine');
 
-// GET /api/brief/:clientId — return TODAY'S STORED BRIEF
+// Building a brief touches several tables; cap how often one client can ask.
+const buildLimiter = limit({ windowMs: 10 * 60e3, max: 12, key: req => req.auth && req.auth.clientId || req.ip });
+
+// GET /api/brief/:clientId — today's brief for the signed-in client.
 //
-// This used to generate a brief on the fly with engines/analysisEngine's
-// generateMorningBrief(), which is a different implementation from the
-// morningBriefEngine the 07:30 scheduler runs. The result was two briefs
-// per client per day, from two engines, with different content: the client
-// read one in the app and received the other by email.
-//
-// Now it reads what the scheduled engine stored. One brief, one source of
-// truth, and the in-app Daily Brief tab shows exactly what was emailed.
-// Requires migration 002_morning_briefs_align.sql — without it the engine
-// cannot persist and this returns empty.
-router.get('/:clientId', async (req, res) => {
+// 1. Return the stored brief for today if the 07:30 run made one.
+// 2. Otherwise build it NOW (a client who joined after 07:30, or a morning the
+//    scheduler missed, used to see "arrives tomorrow" and nothing else).
+// 3. If even that fails, fall back to the most recent brief, clearly marked stale.
+router.get('/:clientId', requireSession, ownsParam('clientId'), buildLimiter, async (req, res) => {
   const { clientId } = req.params;
-  const today = new Date().toISOString().split('T')[0];
+  const today = istDate();
 
   if (!supabaseAdmin) {
     return res.status(503).json({
@@ -26,45 +26,28 @@ router.get('/:clientId', async (req, res) => {
     });
   }
 
-  // maybeSingle(), not single(): single() treats "no rows" as an error, and
-  // no brief yet is an ordinary state, not a failure.
-  const brief = await db.selectOne('morning_briefs', c =>
+  const stored = await db.selectOne('morning_briefs', c =>
     c.from('morning_briefs').select('*')
       .eq('client_id', clientId).eq('brief_date', today).maybeSingle());
+  if (stored) return res.json({ brief: stored });
 
-  if (brief) return res.json({ brief });
+  try {
+    const built = await generateBriefForClient(clientId);
+    if (built) return res.json({ brief: built, generated_on_demand: true });
+  } catch (e) {
+    console.warn(`   ⚠ On-demand brief failed for ${clientId}: ${e.message}`);
+  }
 
-  // Nothing for today. Offer the most recent one so the tab is not blank,
-  // clearly labelled with its own date.
   const last = await db.selectOne('morning_briefs', c =>
     c.from('morning_briefs').select('*')
       .eq('client_id', clientId)
-      .order('brief_date', { ascending: false }).limit(1));
-
+      .order('brief_date', { ascending: false }).limit(1).maybeSingle());
   if (last) return res.json({ brief: last, stale: true });
 
   return res.json({
     brief: null,
-    message: "No brief yet. Yours is generated at 7:30 AM IST on weekdays once your profile and portfolio are set up.",
+    message: "We couldn't prepare your brief just now. Please try again in a few minutes.",
   });
 });
-
-// POST /api/brief/:clientId/send — send brief via WhatsApp
-router.post('/:clientId/send', async (req, res) => {
-  const { clientId } = req.params;
-  const { whatsappService } = require('../services/whatsapp');
-  if (!supabaseAdmin) return res.json({ sent: false, demo: true });
-  try {
-    const { data: client } = await supabaseAdmin.from('clients').select('phone_wa, full_name').eq('id', clientId).single();
-    const { data: brief } = await supabaseAdmin.from('morning_briefs').select('whatsapp_message').eq('client_id', clientId).eq('brief_date', new Date().toISOString().split('T')[0]).single();
-    if (!client || !brief) return res.status(404).json({ error: 'Client or brief not found' });
-    const result = await whatsappService.sendMessage(client.phone_wa, brief.whatsapp_message);
-    res.json({ sent: true, result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
 
 module.exports = router;

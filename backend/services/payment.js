@@ -116,7 +116,9 @@ async function validateDiscountCode(code, supabaseAdmin) {
 // ── CREATE RAZORPAY ORDER (for one-time payment) ───────────
 async function createOrder(amount, currency = 'INR', receipt) {
   if (!razorpay) {
-    return { id: 'demo_order_' + Date.now(), amount, currency, status: 'demo' };
+    // Used to hand back a fake "demo" order that the frontend treated as a
+    // successful checkout. No gateway means no payment — say so.
+    throw Object.assign(new Error('Payments are not available yet.'), { status: 503, code: 'PAYMENTS_UNAVAILABLE' });
   }
   return razorpay.orders.create({ amount, currency, receipt: receipt || 'wg_' + Date.now() });
 }
@@ -143,14 +145,11 @@ async function createSubscription(planKey, clientId, discountCode) {
   }
 
   if (!razorpay || !plan.razorpay_plan_id) {
-    return {
-      type: 'demo',
-      plan: planKey,
-      plan_name: plan.name,
-      amount: plan.amount,
-      demo_subscription_id: 'demo_sub_' + Date.now(),
-      message: 'Demo subscription created. Add Razorpay credentials to go live.',
-    };
+    // This branch used to return a 'demo' subscription that the frontend
+    // accepted as a paid upgrade. Paid plans cannot be bought until Razorpay
+    // is configured; free-code activation (above) is unaffected.
+    throw Object.assign(new Error('Paid plans are not open yet. Please use a launch code or check back soon.'),
+      { status: 503, code: 'PAYMENTS_UNAVAILABLE' });
   }
 
   const subscription = await razorpay.subscriptions.create({
@@ -166,13 +165,16 @@ async function createSubscription(planKey, clientId, discountCode) {
 
 // ── VERIFY RAZORPAY PAYMENT SIGNATURE ──────────────────────
 function verifyPaymentSignature(orderId, paymentId, signature) {
-  if (!process.env.RAZORPAY_KEY_SECRET) return true; // demo mode
-  const body = orderId + '|' + paymentId;
-  const expectedSignature = crypto
+  // FAIL CLOSED. With no secret configured this used to return true, i.e. every
+  // "payment" verified. Without the secret nothing can be verified.
+  if (!process.env.RAZORPAY_KEY_SECRET) return false;
+  if (!orderId || !paymentId || typeof signature !== 'string') return false;
+  const expected = crypto
     .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(body.toString())
+    .update(`${orderId}|${paymentId}`)
     .digest('hex');
-  return expectedSignature === signature;
+  const a = Buffer.from(expected), b = Buffer.from(signature);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 module.exports = {

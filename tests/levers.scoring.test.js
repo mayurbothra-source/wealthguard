@@ -1,6 +1,6 @@
 const le=require('../backend/services/leverEngine.js');
 const fp=require('../backend/services/fundamentalsProvider.js');
-const ck=(n,c)=>console.log(`  ${c?'PASS':'FAIL'}  ${n}`);
+const ck=require('./_check');
 const MACRO={gdp_latest:7,cpi_latest:5,fii_net_cr:1500,dii_net_cr:800};
 
 // Realistic series builders

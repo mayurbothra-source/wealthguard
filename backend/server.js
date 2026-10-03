@@ -6,6 +6,10 @@ const path = require('path');
 
 const app = express();
 
+// Render sits behind a proxy; without this every visitor looks like the same
+// IP, which would make per-IP rate limiting punish everyone for one person.
+app.set('trust proxy', 1);
+
 // ── MIDDLEWARE ─────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
@@ -24,8 +28,10 @@ app.use(cors({
 // The explicit wildcard version was not only redundant, it's what crashed
 // the whole server: newer path-to-regexp (pulled in by Node 24) dropped
 // support for the bare '*' pattern and throws instead of matching it.
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// 100 KB is far more than any request here needs (the old 10 MB limit applied
+// to unauthenticated routes too).
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
 // ── STATIC FRONTEND ───────────────────────────────
 app.use(express.static(path.join(__dirname, '../frontend/public')));
@@ -65,9 +71,13 @@ app.use((req, res) => {
 // ── ERROR HANDLER ─────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(err.status || 500).json({
-    error: err.message || 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  const status = err.status || 500;
+  const dev = process.env.NODE_ENV === 'development';
+  res.status(status).json({
+    // Raw error text can name tables, columns and constraints. Only 4xx messages
+    // (which are about the request itself) go out; 5xx are generic.
+    error: dev || (status < 500 && err.expose !== false) ? (err.message || 'Request error') : 'Something went wrong. Please try again.',
+    ...(dev && { stack: err.stack })
   });
 });
 

@@ -33,7 +33,7 @@ Module._load = function(req, parent, isMain){
 };
 const { runOpportunityEngine } = require('../backend/services/opportunityEngine.js');
 
-const ck=(n,c)=>console.log(`  ${c?'PASS':'FAIL'}  ${n}`);
+const ck=require('./_check');
 const reset=()=>{ TABLES={opportunities:[],instrument_price_hourly:[],instrument_universe:[],
   recommendations:[],ai_instrument_flags:[],instrument_scores:[]}; INSERTED=[]; };
 const dual = () => INSERTED.filter(i=>i.row.opportunity_type==='dual_agreement').map(i=>i.row);

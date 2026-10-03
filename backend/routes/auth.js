@@ -1,20 +1,39 @@
 /**
  * WealthGuard Auth Routes
- * POST /api/auth/login     — phone_wa + pin → returns client data
- * POST /api/auth/set-pin   — client_id + pin → hashes and stores
- * POST /api/auth/register  — creates new client record (no PIN yet)
- * POST /api/auth/check     — checks if phone_wa exists (for login screen UX)
+ * POST /api/auth/check         — does this phone exist / has it a PIN (no id returned)
+ * POST /api/auth/login         — phone_wa + pin → client data + session token
+ * POST /api/auth/request-code  — emails a one-time code (accounts with no PIN yet)
+ * POST /api/auth/verify-code   — code → short-lived set-PIN token
+ * POST /api/auth/set-pin       — set-PIN token + pin → stores hash, returns session
+ * POST /api/auth/change-pin    — session + current pin → new pin
+ * POST /api/auth/register      — creates client; returns a set-PIN token
  */
 
 const express = require('express');
 const bcrypt = require('bcrypt');
 const router = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
+const session = require('../lib/session');
+const { limit } = require('../lib/rateLimit');
+const { issueCode, consumeCode } = require('../lib/authCodes');
+const emailEngine = require('../services/emailEngine');
+const {
+  CLIENT_FIELDS, LIFE_FIELDS, BEHAVIOURAL_FIELDS, pick,
+} = require('../lib/clientFields');
+
+// Per-IP throttles. The per-account lockout below stops guessing one account;
+// these stop one machine trying many accounts, or flooding registration.
+const authLimiter     = limit({ windowMs: 10 * 60e3, max: 30 });
+const registerLimiter = limit({ windowMs: 60 * 60e3, max: 10, message: 'Too many sign-ups from this connection. Please try again later.' });
+const codeLimiter     = limit({ windowMs: 60 * 60e3, max: 8 });
 
 const BCRYPT_ROUNDS = 10;
 const MAX_PIN_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 const PIN_LENGTH = 6;
+// A real hash to compare against when the phone number is unknown, so a
+// wrong-number login takes as long as a wrong-PIN login (no timing oracle).
+const DUMMY_HASH = bcrypt.hashSync('000000', BCRYPT_ROUNDS);
 
 // ── HELPERS ─────────────────────────────────────────────────
 
@@ -44,27 +63,29 @@ function sanitiseClient(client) {
 // Lets the login screen check if a phone number exists before asking
 // for a PIN — avoids exposing which numbers are registered by keeping
 // the response vague when the number doesn't exist.
-router.post('/check', async (req, res) => {
-  const { phone_wa } = req.body;
+router.post('/check', authLimiter, async (req, res) => {
+  const { phone_wa } = req.body || {};
   if (!phone_wa) return res.status(400).json({ error: 'phone_wa required' });
-  const client = await getClientByPhone(phone_wa);
-  if (!client) {
-    // Deliberate vague response — don't confirm whether the number exists
-    return res.json({ exists: false, pin_set: false });
-  }
-  res.json({ exists: true, pin_set: !!client.pin_set, client_id: client.id });
+  const client = await getClientByPhone(String(phone_wa));
+  // client_id is deliberately NOT returned. It used to be, which let anyone turn
+  // a phone number into an id and then read that client's data.
+  if (!client) return res.json({ exists: false, pin_set: false });
+  res.json({ exists: true, pin_set: !!(client.pin_set && client.pin_hash) });
 });
 
 // ── POST /api/auth/login ─────────────────────────────────────
-router.post('/login', async (req, res) => {
-  const { phone_wa, pin } = req.body;
+router.post('/login', authLimiter, async (req, res) => {
+  const { phone_wa, pin } = req.body || {};
   if (!phone_wa) {
     return res.status(400).json({ error: 'phone_wa is required' });
   }
+  if (!session.issueSession('probe')) {
+    return res.status(503).json({ error: 'Sign-in is temporarily unavailable.' });
+  }
 
-  const client = await getClientByPhone(phone_wa);
+  const client = await getClientByPhone(String(phone_wa));
   if (!client) {
-    // Same response shape as a wrong PIN — don't leak whether the account exists
+    await bcrypt.compare(String(pin || ''), DUMMY_HASH);   // equalise timing
     return res.status(401).json({ error: 'Incorrect phone number or PIN. Please try again.' });
   }
 
@@ -78,15 +99,18 @@ router.post('/login', async (req, res) => {
     });
   }
 
-  // If no PIN set yet, allow login but flag that PIN setup is required
+  // No PIN yet. This branch used to log the caller straight in on the phone
+  // number alone and return the whole client record. It now returns nothing
+  // but an instruction: prove you own the account (emailed code), then set a PIN.
   if (!client.pin_set || !client.pin_hash) {
-    return res.json({
-      success: true,
+    return res.status(403).json({
+      error: 'This account has no PIN yet. We will send a verification code to set one.',
       pin_setup_required: true,
-      client: sanitiseClient(client),
-      message: 'Please set a 6-digit PIN to secure your account.',
+      needs_code: true,
     });
   }
+
+  if (!pin) return res.status(400).json({ error: 'PIN is required.' });
 
   // Verify PIN against stored bcrypt hash
   const pinValid = await bcrypt.compare(String(pin), client.pin_hash);
@@ -114,27 +138,67 @@ router.post('/login', async (req, res) => {
     });
   }
 
-  // Success — reset attempt counter and return client data
+  // Success — reset attempt counter and return client data plus a session token
   await supabaseAdmin.from('clients').update({
     pin_attempts: 0,
     pin_locked_until: null,
     last_login_at: new Date().toISOString(),
   }).eq('id', client.id);
 
-  res.json({ success: true, client: sanitiseClient(client) });
+  res.json({ success: true, client: sanitiseClient(client), token: session.issueSession(client.id) });
+});
+
+// ── POST /api/auth/request-code ──────────────────────────────
+// Emails a one-time code to the address on file. The answer is always the
+// same, so this cannot be used to find out which numbers are registered or
+// which have an email.
+router.post('/request-code', codeLimiter, async (req, res) => {
+  const generic = { success: true, message: 'If this number has an email address on file, a code has been sent to it.' };
+  const { phone_wa } = req.body || {};
+  if (!phone_wa) return res.status(400).json({ error: 'phone_wa required' });
+  try {
+    const client = await getClientByPhone(String(phone_wa));
+    if (client && client.email) {
+      const issued = await issueCode(client.id, 'email');
+      if (issued.code) await emailEngine.sendAuthCode(client, issued.code);
+      else console.warn(`   ⚠ request-code: ${issued.error}`);
+    }
+  } catch (e) { console.warn(`   ⚠ request-code: ${e.message}`); }
+  res.json(generic);
+});
+
+// ── POST /api/auth/verify-code ───────────────────────────────
+// Exchanges a correct code for a short-lived "set a PIN" token.
+router.post('/verify-code', codeLimiter, async (req, res) => {
+  const { phone_wa, code } = req.body || {};
+  if (!phone_wa || !code) return res.status(400).json({ error: 'phone_wa and code are required' });
+  const client = await getClientByPhone(String(phone_wa));
+  const ok = client ? await consumeCode(client.id, String(code).trim()) : false;
+  if (!ok) return res.status(401).json({ error: 'That code is not valid or has expired.' });
+  res.json({ success: true, setup_token: session.issueSetupToken(client.id) });
 });
 
 // ── POST /api/auth/set-pin ───────────────────────────────────
-router.post('/set-pin', async (req, res) => {
-  const { client_id, pin, confirm_pin } = req.body;
-  if (!client_id || !pin) {
-    return res.status(400).json({ error: 'client_id and pin are required' });
-  }
+// Needs the short-lived setup token (from registration or a verified code).
+// It used to accept just {client_id, pin} from anyone — i.e. anyone could
+// overwrite anyone's PIN. The id now comes from the token, not the body.
+router.post('/set-pin', authLimiter, session.requireSetupOrSession, async (req, res) => {
+  const { pin, confirm_pin } = req.body || {};
+  const client_id = req.auth.clientId;
+  if (!pin) return res.status(400).json({ error: 'pin is required' });
   if (!isValidPin(String(pin))) {
     return res.status(400).json({ error: 'PIN must be exactly 6 digits.' });
   }
   if (confirm_pin && String(pin) !== String(confirm_pin)) {
     return res.status(400).json({ error: 'PINs do not match. Please try again.' });
+  }
+
+  // A plain session may set a PIN only on an account that has none yet. Changing
+  // an existing PIN needs /change-pin (current PIN) or a verified emailed code.
+  if (req.auth.scope === 'session') {
+    const { data: cur } = await supabaseAdmin.from('clients').select('pin_set, pin_hash').eq('id', client_id).maybeSingle();
+    if (!cur) return res.status(404).json({ error: 'Account not found.' });
+    if (cur.pin_set && cur.pin_hash) return res.status(403).json({ error: 'This account already has a PIN. Use "change PIN".' });
   }
 
   const hash = await bcrypt.hash(String(pin), BCRYPT_ROUNDS);
@@ -145,16 +209,17 @@ router.post('/set-pin', async (req, res) => {
     pin_locked_until: null,
   }).eq('id', client_id);
 
-  if (error) return res.status(500).json({ error: 'Could not save PIN: ' + error.message });
-  res.json({ success: true, message: 'PIN set successfully.' });
+  if (error) return res.status(500).json({ error: 'Could not save PIN.' });
+  res.json({ success: true, message: 'PIN set successfully.', token: session.issueSession(client_id) });
 });
 
 // ── POST /api/auth/change-pin ─────────────────────────────────
-// Requires the current PIN before allowing a change.
-router.post('/change-pin', async (req, res) => {
-  const { client_id, current_pin, new_pin } = req.body;
-  if (!client_id || !current_pin || !new_pin) {
-    return res.status(400).json({ error: 'client_id, current_pin, and new_pin are required' });
+// Requires a signed-in session AND the current PIN.
+router.post('/change-pin', authLimiter, session.requireSession, async (req, res) => {
+  const { current_pin, new_pin } = req.body || {};
+  const client_id = req.auth.clientId;
+  if (!current_pin || !new_pin) {
+    return res.status(400).json({ error: 'current_pin and new_pin are required' });
   }
   if (!isValidPin(String(new_pin))) {
     return res.status(400).json({ error: 'New PIN must be exactly 6 digits.' });
@@ -179,35 +244,9 @@ router.post('/change-pin', async (req, res) => {
 // ── POST /api/auth/register ──────────────────────────────────
 // Creates the initial client record (no PIN yet — PIN is set after
 // onboarding in a dedicated /set-pin step).
-// Which onboarding field belongs to which table. The schema splits a client
-// across four tables on purpose; this used to spread the whole payload into
-// `clients`, which included `goals` (an array) and therefore failed every time.
-const CLIENT_FIELDS = [
-  'phone_wa', 'full_name', 'email', 'tax_bracket', 'pan_hash', 'kyc_status',
-];
-const LIFE_FIELDS = [
-  'age', 'retirement_age', 'income_type', 'monthly_income_inr', 'income_stability',
-  'monthly_committed_expenses', 'client_tier', 'marital_status', 'num_children',
-  'dual_income', 'health_status', 'health_insurance_cover_inr', 'term_cover_inr',
-  'has_critical_illness_cover', 'has_disability_cover',
-];
-const BEHAVIOURAL_FIELDS = [
-  'stated_risk_score', 'effective_risk_score', 'risk_category', 'panic_history',
-  'portfolio_check_frequency', 'money_relationship', 'decision_style',
-  'prior_loss_experience', 'communication_preference', 'trust_disposition',
-  'sleep_test_threshold_pct', 'max_single_position_pct', 'max_drawdown_tolerance_pct',
-];
+// Field allow-lists live in lib/clientFields.js (shared with the profile route).
 
-/** Keeps only the named fields that are actually present. */
-function pick(src, fields) {
-  const out = {};
-  for (const f of fields) {
-    if (src[f] !== undefined && src[f] !== null && src[f] !== '') out[f] = src[f];
-  }
-  return out;
-}
-
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
   if (!supabaseAdmin) {
     return res.status(503).json({ error: 'Database not configured.' });
   }
@@ -248,7 +287,12 @@ router.post('/register', async (req, res) => {
     phone_wa: String(phone_wa).trim(),
     full_name: String(full_name).trim(),
     pin_set: false,
-    onboarding_complete: false,
+    // The onboarding questionnaire IS the registration payload, so a client who
+    // arrives with profile answers has completed it. Nothing else in the code
+    // ever set this to true, which is why the morning-brief engine (which only
+    // briefs onboarding_complete clients) skipped every account.
+    onboarding_complete: Object.keys(pick(body, LIFE_FIELDS)).length > 0
+                      || Object.keys(pick(body, BEHAVIOURAL_FIELDS)).length > 0,
   };
   if (clientRow.email) clientRow.email = String(clientRow.email).trim().toLowerCase();
 
@@ -311,6 +355,10 @@ router.post('/register', async (req, res) => {
   res.json({
     success: true,
     client_id: clientId,
+    // The registrant is signed in straight away (so plan activation and the PIN
+    // step work), and also gets a short-lived set-PIN token.
+    token: session.issueSession(clientId),
+    setup_token: session.issueSetupToken(clientId),
     ...(warnings.length ? { warnings } : {}),
   });
 });

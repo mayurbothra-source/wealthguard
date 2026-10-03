@@ -1,5 +1,5 @@
 const Module=require('module'), orig=Module._load, path=require('path');
-const ROOT='/home/claude/repo/wealthguard-main';
+const ROOT=require('path').resolve(__dirname,'..');
 
 // ── Fake database ──────────────────────────────────────────────────
 let TABLES={}, WRITES=[];
@@ -50,7 +50,7 @@ Module._load=function(r,p,i){
 
 const fp=require(ROOT+'/backend/services/fundamentalsProvider');
 const le=require(ROOT+'/backend/services/leverEngine');
-const ck=(n,c)=>console.log(`  ${c?'PASS':'FAIL'}  ${n}`);
+const ck=require('./_check');
 
 const UNIVERSE=[
   {id:'1',symbol:'STRONGCO',name:'Strong Co',category:'large_cap_equity',yahoo_ticker:'STRONG.NS',price_source:'yahoo',status:'active'},
@@ -71,8 +71,12 @@ console.log('\n── FULL PIPELINE: Yahoo healthy ──');
 YAHOO_MODE='ok'; WRITES=[]; TABLES={instrument_fundamentals:[]};
 let {metrics,summary}=await fp.buildMetrics(UNIVERSE,{noWrite:true});
 ck('every instrument got a metrics entry', Object.keys(metrics).length===9);
-ck('price history for the 8 with a feed', summary.with_price_history===8);
-ck('static bond correctly has none', summary.no_price_feed===1);
+// Mutual funds take their history from MFAPI via inst.amfi_code. The LCFUND fixture has no
+// amfi_code (the real-world "missing AMFI code" case), so like the static G-Sec it has no
+// feed: 7 with history, 2 without. These two expectations were 8 and 1 — stale since the
+// MF path was added — and went unnoticed because failing assertions did not fail the run.
+ck('price history for the 7 with a feed', summary.with_price_history===7);
+ck('G-Sec and the code-less fund correctly have none', summary.no_price_feed===2);
 ck('company fundamentals for all 6 equity-category instruments', summary.with_fundamentals===6);
 ck('funds/ETFs/bonds correctly marked not-applicable', summary.fundamentals_unavailable===3);
 ck('peer medians computed per category', Object.keys(summary.category_medians).length>=4);
@@ -93,7 +97,7 @@ ck('6+ levers measured for a full-data equity', scored.STRONGCO._audit.measured_
 console.log('\n── Yahoo quoteSummary fails, chart still works ──');
 YAHOO_MODE='no_fund';
 ({metrics,summary}=await fp.buildMetrics(UNIVERSE,{noWrite:true,force:true}));
-ck('price history still obtained', summary.with_price_history===8);
+ck('price history still obtained', summary.with_price_history===7);
 ck('fundamentals absent', summary.with_fundamentals===0);
 const degraded=le.scoreInstrument(UNIVERSE[0],MACRO,metrics.STRONGCO);
 ck('still scores', degraded.composite>0);

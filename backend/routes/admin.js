@@ -13,22 +13,69 @@
 'use strict';
 
 const express = require('express');
+const crypto  = require('crypto');
 const router  = express.Router();
+const { limit } = require('../lib/rateLimit');
+
+// The key is a secret; ten wrong guesses in ten minutes from one address is
+// not a typo, it is an attack.
+router.use(limit({ windowMs: 10 * 60e3, max: 60, message: 'Too many admin requests.' }));
+const _bad = new Map();   // ip -> { n, resetAt }  — wrong-key attempts only
+function tooManyBadKeys(ip) {
+  const h = _bad.get(ip);
+  return !!(h && h.resetAt > Date.now() && h.n >= 10);
+}
+function noteBadKey(ip) {
+  const now = Date.now();
+  const h = _bad.get(ip);
+  if (!h || h.resetAt <= now) _bad.set(ip, { n: 1, resetAt: now + 10 * 60e3 });
+  else h.n++;
+}
+
+/** Constant-time string compare (a plain !== leaks how many leading chars match). */
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
 
 function checkKey(req, res) {
-  const key = req.query.key || req.body?.key;
+  // Header is preferred (it stays out of URLs, logs and browser history);
+  // ?key= still works so existing bookmarks and the trigger workflow do too.
+  const key = req.get('x-admin-key') || req.query.key || req.body?.key;
+  if (tooManyBadKeys(req.ip)) {
+    res.status(429).json({ error: 'Too many wrong keys. Try again in ten minutes.' });
+    return false;
+  }
   if (!process.env.ADMIN_TRIGGER_KEY) {
     res.status(503).json({
       error: 'ADMIN_TRIGGER_KEY not set on server — add it in Render environment variables first.',
     });
     return false;
   }
-  if (key !== process.env.ADMIN_TRIGGER_KEY) {
+  if (!key || !safeEqual(key, process.env.ADMIN_TRIGGER_KEY)) {
+    noteBadKey(req.ip);
     res.status(401).json({ error: 'Invalid or missing key.' });
     return false;
   }
   return true;
 }
+
+// ── GET /api/admin/issue-setup-code?phone=+91...&key=... ──────────────
+// For an account with no PIN and no email on file (so the emailed code cannot
+// reach it). Returns a one-time 6-digit code you pass to the client over
+// WhatsApp or a call; they enter it on the login screen. 15 minutes, single use.
+router.get('/issue-setup-code', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  const { supabaseAdmin } = require('../../config/supabase');
+  const { issueCode } = require('../lib/authCodes');
+  const phone = String(req.query.phone || '').trim();
+  if (!phone || !supabaseAdmin) return res.status(400).json({ error: 'phone is required (and the database must be configured).' });
+  const { data: client } = await supabaseAdmin.from('clients').select('id, full_name').eq('phone_wa', phone).maybeSingle();
+  if (!client) return res.status(404).json({ error: 'No client with that phone number (use the exact stored format).' });
+  const issued = await issueCode(client.id, 'admin');
+  if (!issued.code) return res.status(429).json({ error: issued.error });
+  res.json({ success: true, client: client.full_name, code: issued.code, expires_in_minutes: 15 });
+});
 
 // Tracks which engines are currently mid-run. Without this, hitting a
 // trigger URL twice (a double-click, a browser/proxy retry on a slow

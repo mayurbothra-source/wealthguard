@@ -1,10 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
+const { requireSession, ownsParam, ownsBody } = require('../lib/session');
+const { limit } = require('../lib/rateLimit');
 const {
-  PLANS, validateDiscountCode, createOrder,
+  PLANS, DISCOUNT_CODES, validateDiscountCode,
   createSubscription, verifyPaymentSignature, isConfigured
 } = require('../services/payment');
+
+const codeLimiter = limit({ windowMs: 10 * 60e3, max: 30 });
 
 // GET /api/payments/plans — list all plans
 router.get('/plans', (req, res) => {
@@ -21,18 +25,49 @@ router.get('/plans', (req, res) => {
 });
 
 // POST /api/payments/validate-code — check discount code
-router.post('/validate-code', async (req, res) => {
-  const { code } = req.body;
+router.post('/validate-code', codeLimiter, async (req, res) => {
+  const { code } = req.body || {};
   if (!code) return res.status(400).json({ error: 'Code required' });
-  const result = await validateDiscountCode(code, supabaseAdmin);
+  const result = await validateDiscountCode(String(code), supabaseAdmin);
   res.json(result);
 });
 
-// POST /api/payments/subscribe — create subscription
-router.post('/subscribe', async (req, res) => {
-  const { client_id, plan_key, discount_code } = req.body;
-  if (!client_id || !plan_key) {
-    return res.status(400).json({ error: 'client_id and plan_key required' });
+/**
+ * Records that this client redeemed this code, atomically enough for a free
+ * database: insert first (a unique (code, client_id) index stops the same client
+ * redeeming twice), then re-count; if the code is now over its limit, take the
+ * row back out. The old order — check the count, then insert — let two
+ * simultaneous requests both pass the check.
+ */
+async function redeemCode(code, clientId) {
+  const upper = String(code).toUpperCase().trim();
+  const max = (DISCOUNT_CODES[upper] || {}).max_uses || 0;
+
+  const { error } = await supabaseAdmin.from('discount_code_usage').insert({
+    code: upper, client_id: clientId, used_at: new Date().toISOString(),
+  });
+  if (error) {
+    const dup = error.code === '23505' || /duplicate|unique/i.test(error.message || '');
+    return { ok: false, message: dup ? 'You have already used this code.' : 'Could not apply that code right now.' };
+  }
+  const { count } = await supabaseAdmin.from('discount_code_usage')
+    .select('id', { count: 'exact', head: true }).eq('code', upper);
+  if (count != null && count > max) {
+    await supabaseAdmin.from('discount_code_usage').delete().eq('code', upper).eq('client_id', clientId);
+    return { ok: false, message: 'This code has already been fully redeemed.' };
+  }
+  return { ok: true };
+}
+
+// POST /api/payments/subscribe — create subscription for the signed-in client
+router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res) => {
+  const { plan_key, discount_code } = req.body || {};
+  const client_id = req.auth.clientId;
+  if (!plan_key || !PLANS[plan_key]) {
+    return res.status(400).json({ error: 'A valid plan_key is required' });
+  }
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Subscriptions are temporarily unavailable.' });
   }
 
   try {
@@ -44,79 +79,88 @@ router.post('/subscribe', async (req, res) => {
       }
     }
 
-    const subscription = await createSubscription(plan_key, client_id, discount_code);
-
-    if (supabaseAdmin) {
-      const expiresAt = subscription.expires_at ||
-        new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-      await supabaseAdmin.from('subscriptions').insert({
-        client_id,
-        plan_key,
-        plan_name: PLANS[plan_key]?.name,
-        status: subscription.type === 'free' ? 'active' : 'pending',
-        subscription_type: subscription.type,
-        razorpay_subscription_id: subscription.subscription?.id || null,
-        discount_code: discount_code || null,
-        discount_pct: discountInfo?.discount || 0,
-        amount_paise: subscription.type === 'free' ? 0 : PLANS[plan_key]?.amount,
-        started_at: new Date().toISOString(),
-        expires_at: expiresAt,
-        free_months_remaining: discountInfo?.duration_months || 0,
-      });
-
-      if (discount_code && discountInfo?.valid) {
-        await supabaseAdmin.from('discount_code_usage').insert({
-          code: discount_code.toUpperCase(),
-          client_id,
-          used_at: new Date().toISOString(),
-        });
-      }
-
-      await supabaseAdmin.from('clients').update({
-        subscription_plan: plan_key,
-        subscription_status: subscription.type === 'free' ? 'active' : 'pending',
-        subscription_expires_at: expiresAt,
-      }).eq('id', client_id);
+    // Free activation (100% codes) first redeems the code, then activates.
+    const isFree = !!(discountInfo && discountInfo.valid && discountInfo.discount === 100);
+    if (discount_code && discountInfo?.valid) {
+      const r = await redeemCode(discount_code, client_id);
+      if (!r.ok) return res.status(409).json({ error: r.message });
     }
+
+    let subscription;
+    try {
+      subscription = await createSubscription(plan_key, client_id, isFree ? discount_code : null);
+    } catch (e) {
+      if (e.code === 'PAYMENTS_UNAVAILABLE') {
+        // Give the code back: nothing was purchased.
+        if (discount_code && discountInfo?.valid) {
+          await supabaseAdmin.from('discount_code_usage').delete()
+            .eq('code', String(discount_code).toUpperCase().trim()).eq('client_id', client_id);
+        }
+        return res.status(503).json({ error: e.message, payments_unavailable: true });
+      }
+      throw e;
+    }
+
+    const expiresAt = subscription.expires_at ||
+      new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const active = subscription.type === 'free';
+
+    const { error: subErr } = await supabaseAdmin.from('subscriptions').insert({
+      client_id,
+      plan_key,
+      plan_name: PLANS[plan_key]?.name,
+      status: active ? 'active' : 'pending',
+      subscription_type: subscription.type,
+      razorpay_subscription_id: subscription.subscription?.id || null,
+      discount_code: discount_code || null,
+      discount_pct: discountInfo?.discount || 0,
+      amount_paise: active ? 0 : PLANS[plan_key]?.amount,
+      started_at: new Date().toISOString(),
+      expires_at: expiresAt,
+      free_months_remaining: discountInfo?.duration_months || 0,
+    });
+    if (subErr) throw new Error(subErr.message);
+
+    await supabaseAdmin.from('clients').update({
+      subscription_plan: plan_key,
+      subscription_status: active ? 'active' : 'pending',
+      subscription_expires_at: expiresAt,
+    }).eq('id', client_id);
 
     res.json({ success: true, subscription, discount: discountInfo });
   } catch (err) {
-    console.error('Subscribe error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('Subscribe error:', err.message);
+    res.status(500).json({ error: 'Could not start your subscription. Please try again.' });
   }
 });
 
 // POST /api/payments/verify — verify Razorpay payment after checkout
-router.post('/verify', async (req, res) => {
-  const { order_id, payment_id, signature, client_id, plan_key } = req.body;
+router.post('/verify', requireSession, ownsBody('client_id'), async (req, res) => {
+  const { order_id, payment_id, signature, plan_key } = req.body || {};
+  const client_id = req.auth.clientId;
 
-  const valid = verifyPaymentSignature(order_id, payment_id, signature);
-  if (!valid) return res.status(400).json({ error: 'Invalid payment signature' });
-
-  if (supabaseAdmin) {
-    await supabaseAdmin.from('subscriptions').update({
-      status: 'active',
-      razorpay_payment_id: payment_id,
-      started_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    }).eq('client_id', client_id).eq('plan_key', plan_key);
-
-    await supabaseAdmin.from('clients').update({
-      subscription_status: 'active',
-    }).eq('id', client_id);
+  // verifyPaymentSignature fails closed: without RAZORPAY_KEY_SECRET it is false.
+  if (!verifyPaymentSignature(order_id, payment_id, signature)) {
+    return res.status(400).json({ error: 'Invalid payment signature' });
   }
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Temporarily unavailable.' });
 
+  const { error } = await supabaseAdmin.from('subscriptions').update({
+    status: 'active',
+    razorpay_payment_id: payment_id,
+    started_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  }).eq('client_id', client_id).eq('plan_key', plan_key);
+  if (error) return res.status(500).json({ error: 'Could not activate your subscription.' });
+
+  await supabaseAdmin.from('clients').update({ subscription_status: 'active' }).eq('id', client_id);
   res.json({ success: true, message: 'Payment verified. Subscription activated.' });
 });
 
 // GET /api/payments/status/:clientId — check subscription status
-router.get('/status/:clientId', async (req, res) => {
+router.get('/status/:clientId', requireSession, ownsParam('clientId'), async (req, res) => {
   if (!supabaseAdmin) {
-    // This granted every caller an ACTIVE BUILDER subscription whenever the
-    // database was unreachable. Same class of problem as the Razorpay demo
-    // fallback letting anyone through checkout: a failure must never
-    // silently upgrade someone.
+    // A failure must never silently upgrade someone.
     return res.status(503).json({
       status: 'unknown', plan: null, unavailable: true,
       message: 'Subscription status is temporarily unavailable.',
@@ -128,7 +172,7 @@ router.get('/status/:clientId', async (req, res) => {
     .eq('client_id', req.params.clientId)
     .order('started_at', { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
 
   if (!data) return res.json({ status: 'none', plan: null });
 
@@ -146,4 +190,3 @@ router.get('/status/:clientId', async (req, res) => {
 });
 
 module.exports = router;
-

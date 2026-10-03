@@ -127,6 +127,27 @@ async function send({ to, subject, html, text, clientId = null, type = 'general'
 // SPECIFIC EMAIL TYPES
 // ─────────────────────────────────────────────────────────────────────
 
+const esc = v => String(v == null ? '' : v)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** One-time code used to set or reset a PIN. Never logged with its value. */
+async function sendAuthCode(client, code) {
+  if (!client || !client.email) return false;
+  const html = wrapHTML(
+    'Your WealthGuard code',
+    `<h2 style="margin:0 0 12px;font-family:Georgia,serif;font-size:19px;color:#16211B;">Your verification code</h2>
+     <p style="margin:0 0 14px;">Use this code to set your PIN. It works once and expires in 15 minutes.</p>
+     <p style="margin:0 0 18px;font-size:30px;letter-spacing:6px;font-weight:700;color:#1B5E3F;">${esc(code)}</p>
+     <p style="margin:0;font-size:12px;color:#6E7A71;">If you did not ask for this, ignore this email. Nobody can access your account without it.</p>`,
+    'This is a security message, not marketing.'
+  );
+  return send({
+    to: client.email, subject: 'Your WealthGuard verification code',
+    html, text: `Your WealthGuard code is ${code}. It expires in 15 minutes.`,
+    clientId: client.id, type: 'auth_code',
+  });
+}
+
 async function sendMorningBrief(client, brief) {
   if (!client.email || client.email_brief_enabled === false) {
     await logEmail(client.id, client.email, 'morning_brief', 'Morning Brief', 'skipped',
@@ -142,11 +163,26 @@ async function sendMorningBrief(client, brief) {
     sections.push(`<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">Market Snapshot</h3>
       <p style="margin:0 0 18px;">${brief.market_snapshot}</p>`);
   }
-  if (brief.portfolio_note) {
-    sections.push(`<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">Your Portfolio</h3>
-      <p style="margin:0 0 18px;">${brief.portfolio_note}</p>`);
+  const H3 = t => `<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">${t}</h3>`;
+  if (brief.today_action) {
+    sections.push(`<div style="background:#E8F5EE;border-radius:8px;padding:12px 14px;margin:0 0 18px;font-size:14px;"><strong>Today:</strong> ${esc(brief.today_action)}</div>`);
   }
-  if (brief.top_signals?.length) {
+  if (brief.news?.length) {
+    sections.push(`${H3('In the news')}<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.news.map(n => `<li style="margin:0 0 6px;"><strong>${esc(n.title)}</strong>${n.severity ? ` <span style="font-size:11px;color:#6E7A71;">(${esc(n.severity)})</span>` : ''}${n.summary ? `<div style="font-size:12px;color:#6E7A71;">${esc(n.summary)}</div>` : ''}</li>`).join('')
+    }</ul>`);
+  }
+  if (brief.portfolio_note) {
+    sections.push(`${H3('Your Portfolio')}
+      <p style="margin:0 0 8px;">${esc(brief.portfolio_note)}</p>${
+      brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
+  }
+  if (brief.ideas?.length) {
+    sections.push(`${H3('Ideas worth a look')}<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.ideas.map(i => `<li style="margin:0 0 6px;"><strong>${esc(i.symbol)}</strong> <span style="font-size:11px;color:#2E7D52;">${esc(i.action)}</span>${i.entry ? `<div style="font-size:12px;color:#6E7A71;">Entry ~₹${esc(i.entry)}${i.target ? ` · Target ₹${esc(i.target)}` : ''}${i.stop ? ` · Stop-loss ₹${esc(i.stop)}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : ''}</li>`).join('')
+    }</ul>`);
+  }
+  if (!brief.ideas && brief.top_signals?.length) {
     const rows = brief.top_signals.map(s => `
       <tr>
         <td style="padding:8px 0;border-bottom:1px solid #E1E4DD;">
@@ -305,6 +341,7 @@ function isConfigured() {
 module.exports = {
   send,
   sendMorningBrief,
+  sendAuthCode,
   sendFlashAlert,
   sendPaymentGraceNotice,
   sendCategoryChangeNotice,

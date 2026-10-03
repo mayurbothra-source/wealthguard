@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node backend/server.js",
     "dev": "nodemon backend/server.js",
-    "test": "node tests/levers.maths.test.js && node tests/levers.scoring.test.js && node tests/db.test.js && node tests/opportunityEngine.test.js && node tests/pipeline.test.js && node tests/registration.test.js",
+    "test": "node tests/levers.maths.test.js && node tests/levers.scoring.test.js && node tests/db.test.js && node tests/opportunityEngine.test.js && node tests/pipeline.test.js && node tests/registration.test.js && node tests/security.test.js",
     "dry-run": "node scripts/dry_run_scoring.js"
   },
   "keywords": [],

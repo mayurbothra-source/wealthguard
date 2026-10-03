@@ -1,26 +1,24 @@
 /**
  * WealthGuard Morning Brief Engine
  *
- * Runs Mon–Fri at 7:30 AM IST. Generates a personalised brief for every
- * active client and emails it.
+ * Runs Mon–Fri at 7:30 AM IST (and builds on demand when a client opens the app
+ * and today's brief does not exist yet — see generateBriefForClient).
  *
- * Five sections per brief:
- *   1. Market snapshot    — Nifty, VIX regime, overnight AI-detected events
- *   2. Portfolio update   — how each held instrument moved vs our signal
- *   3. Top signals today  — filtered to the client's risk profile
- *   4. Goal progress      — SIP pace vs target for each active goal
- *   5. Education point    — rotating concept explanation
+ * Every client gets an in-app brief; only active/trial subscribers with an email
+ * address are also emailed.
  *
- * AI usage:
- *   Sections 1 and 5 are AI-generated once per day and SHARED across all
- *   clients (they are not client-specific). This means 2 AI calls per day
- *   total, not 2 per client — the cost stays flat as the client base grows.
+ * Sections:
+ *   Today        — the one thing to do (or "no action needed")
+ *   Market       — Nifty, VIX regime (placeholder 'demo' values are never shown)
+ *   In the news  — events from the AI scan, last 72 hours
+ *   Your holdings— what our signal says about each, and what that means
+ *   Ideas        — BUYs that fit the client's risk profile and are not already held;
+ *                  if none qualify it says so plainly
+ *   Goals, Learn — progress, and a rotating concept
  *
- *   Sections 2, 3 and 4 are computed directly from the client's own data with
- *   no AI call at all. They are already personal; AI would add nothing.
- *
- *   If AI is unavailable, a deterministic template fallback produces a fully
- *   usable brief from live market data. The brief always goes out.
+ * AI usage: only the market snapshot uses AI, once per hour, shared by all clients
+ * (memoised in getSharedSections). Everything per-client is computed from data.
+ * If AI is unavailable a deterministic template is used — the brief always works.
  */
 
 'use strict';
@@ -64,14 +62,18 @@ async function buildMarketSnapshot(snapshot, aiEvents) {
 
   // Deterministic facts — always accurate, never AI-invented
   const facts = [];
-  if (nifty?.price != null) {
+  // Values tagged source:'demo' are placeholders, not market data. They are
+  // never presented to a client as fact.
+  if (nifty?.price != null && nifty.source !== 'demo') {
     const dir = (nifty.change_pct ?? 0) >= 0 ? 'up' : 'down';
-    facts.push(`Nifty 50 closed ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${nifty.price.toLocaleString('en-IN')}`);
+    facts.push(`Nifty 50 is ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${nifty.price.toLocaleString('en-IN')}`);
+  } else {
+    facts.push('Live index data was unavailable when this brief was prepared');
   }
   if (vix != null) {
     facts.push(`India VIX is at ${Number(vix).toFixed(1)} (${regime?.regime || 'normal'})`);
   }
-  if (snapshot?.sensex?.price != null) {
+  if (snapshot?.sensex?.price != null && snapshot.sensex.source !== 'demo') {
     facts.push(`Sensex at ${snapshot.sensex.price.toLocaleString('en-IN')}`);
   }
 
@@ -119,111 +121,296 @@ async function buildEducationPoint() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// PER-CLIENT SECTIONS (computed, no AI needed)
+// DATES
 // ─────────────────────────────────────────────────────────────────────
 
-async function buildPortfolioNote(client) {
-  if (!supabaseAdmin) return null;
-  try {
-    const { data: holdings } = await supabaseAdmin
-      // NOTE: reads `portfolios` — the table the frontend actually writes to via
-      // POST /api/portfolio/add, and the one schema.sql defines. This used to
-      // read `portfolio_holdings`, which no migration ever created, so this
-      // query silently returned nothing and this engine never saw a single
-      // client holding.
-      .from('portfolios')
-      .select('instrument_name, quantity, avg_buy_price_inr')
-      .eq('client_id', client.id)
-      .eq('is_active', true);
-
-    if (!holdings?.length) {
-      return 'You have no holdings logged yet. Adding your existing investments lets us track them against our signals and alert you to material moves.';
-    }
-
-    // Fetch current signals for held instruments
-    const names = holdings.map(h => h.instrument_name);
-    const { data: signals } = await supabaseAdmin
-      .from('recommendations')
-      .select('instrument_name, action')
-      .in('instrument_name', names)
-      .is('client_id', null)
-      .eq('is_active', true);
-
-    const sigMap = {};
-    (signals || []).forEach(s => { sigMap[s.instrument_name] = s.action; });
-
-    const buys   = holdings.filter(h => sigMap[h.instrument_name] === 'BUY').length;
-    const sells  = holdings.filter(h => sigMap[h.instrument_name] === 'SELL').length;
-    const watch  = holdings.length - buys - sells;
-
-    const parts = [`You hold ${holdings.length} instrument${holdings.length > 1 ? 's' : ''}.`];
-    if (buys)  parts.push(`${buys} on BUY`);
-    if (watch) parts.push(`${watch} on WATCH`);
-    if (sells) parts.push(`${sells} on SELL — worth reviewing`);
-    return parts.join(' ') + '.';
-  } catch {
-    return null;
-  }
+/** Today's date in IST (YYYY-MM-DD). brief_date is an IST calendar day. */
+function istDate(now = Date.now()) {
+  return new Date(now + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
-async function buildTopSignals(client) {
-  if (!supabaseAdmin) return [];
-  try {
-    const band = riskBand(client.stated_risk_score);
-    const allowedCats = RISK_CATEGORY_MAP[band];
+// ─────────────────────────────────────────────────────────────────────
+// PER-CLIENT SECTIONS (computed from the client's own data, no AI call)
+// ─────────────────────────────────────────────────────────────────────
 
+const ACTION_ADVICE = {
+  BUY:   'Our signal is positive. Hold it; add only within your position-size limit.',
+  WATCH: 'Neutral for now. Hold it — no action needed.',
+  SELL:  'Our signal has turned negative. Review this holding and consider reducing it.',
+  NONE:  'We do not currently score this instrument, so there is no signal either way.',
+};
+
+const short = (t, n = 170) => {
+  const x = String(t || '').replace(/\s+/g, ' ').trim();
+  return x.length > n ? x.slice(0, n - 1) + '…' : x;
+};
+
+/** Risk score lives in client_behavioural_profiles, NOT on the clients row. */
+async function getRiskScore(clientId) {
+  try {
+    const { data } = await supabaseAdmin
+      .from('client_behavioural_profiles')
+      .select('stated_risk_score, effective_risk_score')
+      .eq('client_id', clientId)
+      .order('assessed_at', { ascending: false }).limit(1).maybeSingle();
+    return data?.effective_risk_score ?? data?.stated_risk_score ?? null;
+  } catch { return null; }
+}
+
+async function getHoldings(clientId) {
+  try {
+    const { data } = await supabaseAdmin
+      .from('portfolios')
+      .select('instrument_name, quantity, avg_buy_price_inr')
+      .eq('client_id', clientId).eq('is_active', true);
+    return data || [];
+  } catch { return []; }
+}
+
+/**
+ * What our current signal says about each thing the client holds, and what
+ * that means for them in plain words.
+ */
+async function buildHoldingActions(holdings) {
+  if (!holdings.length) return [];
+  const symbols = holdings.map(h => h.instrument_name);
+  let sigs = [];
+  try {
+    const { data } = await supabaseAdmin
+      .from('recommendations')
+      .select('instrument_name, action, stop_loss_inr, target_price_inr, entry_price_inr')
+      .in('instrument_name', symbols).is('client_id', null).eq('is_active', true)
+      .order('generated_at', { ascending: false });
+    sigs = data || [];
+  } catch {}
+  const bySymbol = {};
+  for (const s of sigs) if (!bySymbol[s.instrument_name]) bySymbol[s.instrument_name] = s;   // newest wins
+
+  return holdings.map(h => {
+    const s = bySymbol[h.instrument_name];
+    const action = s?.action || null;
+    return {
+      symbol: h.instrument_name,
+      action,
+      advice: ACTION_ADVICE[action || 'NONE'] || ACTION_ADVICE.NONE,
+      stop: s?.stop_loss_inr ?? null,
+      target: s?.target_price_inr ?? null,
+    };
+  });
+}
+
+function buildPortfolioNote(holdings, actions) {
+  if (!holdings.length) {
+    return 'You have no holdings logged yet. Add your existing investments so we can track them against our signals and tell you each morning what, if anything, needs attention.';
+  }
+  const n = (a) => actions.filter(x => x.action === a).length;
+  const none = actions.filter(x => !x.action).length;
+  const parts = [`You hold ${holdings.length} instrument${holdings.length > 1 ? 's' : ''}`];
+  if (n('BUY'))   parts.push(`${n('BUY')} on BUY`);
+  if (n('WATCH')) parts.push(`${n('WATCH')} on WATCH`);
+  if (n('SELL'))  parts.push(`${n('SELL')} on SELL — worth reviewing`);
+  if (none)       parts.push(`${none} not currently scored`);
+  return parts.join(', ') + '.';
+}
+
+/**
+ * New ideas that fit the client's risk band and that they do not already hold.
+ * BUYs first. If there are none, say so plainly — "no trade" is a valid, honest
+ * answer for a capital-preservation product — and show what is closest.
+ */
+async function buildIdeas(riskScore, heldSymbols) {
+  try {
+    const allowedCats = RISK_CATEGORY_MAP[riskBand(riskScore)];
     const { data: instruments } = await supabaseAdmin
       .from('instrument_universe')
       .select('symbol, name, category')
-      .in('category', allowedCats)
-      .eq('status', 'active');
+      .in('category', allowedCats).eq('status', 'active');
+    if (!instruments?.length) return { ideas: [], note: 'Our instrument list is being refreshed.' };
 
-    if (!instruments?.length) return [];
-    const symbols = instruments.map(i => i.symbol);
-
-    const { data: signals } = await supabaseAdmin
+    const meta = Object.fromEntries(instruments.map(i => [i.symbol, i]));
+    const { data: sigs } = await supabaseAdmin
       .from('recommendations')
-      .select('instrument_name, action, confidence_score, rationale_short')
-      .in('instrument_name', symbols)
-      .is('client_id', null)
-      .eq('is_active', true)
-      .order('confidence_score', { ascending: false })
-      .limit(3);
+      .select('instrument_name, action, confidence_score, signal_tier, rationale_short, entry_price_inr, target_price_inr, stop_loss_inr, horizon_days')
+      .in('instrument_name', Object.keys(meta))
+      .is('client_id', null).eq('is_active', true).eq('risk_gate_passed', true)
+      .order('confidence_score', { ascending: false }).limit(60);
 
-    return (signals || []).map(s => ({
-      symbol:    s.instrument_name,
-      action:    s.action,
+    const held = new Set(heldSymbols);
+    const toIdea = s => ({
+      symbol: s.instrument_name,
+      name: meta[s.instrument_name]?.name || s.instrument_name,
+      action: s.action,
+      high_conviction: s.signal_tier === 'high_conviction',
       rationale: s.rationale_short || '',
-    }));
-  } catch {
-    return [];
+      entry: s.entry_price_inr, target: s.target_price_inr, stop: s.stop_loss_inr,
+      horizon_days: s.horizon_days,
+    });
+
+    const buys = (sigs || []).filter(s => s.action === 'BUY' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
+    if (buys.length) return { ideas: buys, note: null };
+
+    const radar = (sigs || []).filter(s => s.action === 'WATCH' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
+    return {
+      ideas: radar,
+      note: 'No new BUY signals pass our risk checks for your profile today. Waiting is a valid position — we only ask you to act when the evidence is strong.' +
+            (radar.length ? ' These are closest to qualifying:' : ''),
+    };
+  } catch (e) {
+    console.warn(`   ⚠ buildIdeas: ${e.message}`);
+    return { ideas: [], note: null };
   }
 }
 
-async function buildGoalNote(client) {
-  if (!supabaseAdmin) return null;
+async function buildNews() {
+  try {
+    const { data } = await supabaseAdmin
+      .from('ai_events')
+      .select('title, severity, description, horizon_label, detected_at')
+      .eq('status', 'active')
+      .gte('detected_at', new Date(Date.now() - 72 * 3600 * 1000).toISOString())
+      .order('detected_at', { ascending: false }).limit(5);
+    return (data || []).map(e => ({
+      title: e.title, severity: e.severity, summary: short(e.description), horizon: e.horizon_label || null,
+    }));
+  } catch { return []; }
+}
+
+async function buildGoalNote(clientId) {
   try {
     const { data: goals } = await supabaseAdmin
       .from('client_goals')
       .select('goal_name, target_amount_inr, current_corpus_inr, target_date')
-      .eq('client_id', client.id);
-
+      .eq('client_id', clientId).eq('is_active', true);
     if (!goals?.length) return null;
-
-    const lines = goals.slice(0, 2).map(g => {
-      const current = g.current_corpus_inr || 0;
-      const target  = g.target_amount_inr  || 0;
-      const pct     = target > 0 ? (current / target) * 100 : 0;
+    return goals.slice(0, 2).map(g => {
+      const current = g.current_corpus_inr || 0, target = g.target_amount_inr || 0;
+      const pct = target > 0 ? (current / target) * 100 : 0;
       return `${g.goal_name}: ${fmtINR(current)} of ${fmtINR(target)} (${pct.toFixed(0)}%)`;
-    });
-    return lines.join('. ') + '.';
-  } catch {
-    return null;
+    }).join('. ') + '.';
+  } catch { return null; }
+}
+
+function decideTodayAction(holdings, actions, ideas) {
+  const sells = actions.filter(a => a.action === 'SELL');
+  if (sells.length) return `Review ${sells.map(s => s.symbol).join(', ')} — our signal on ${sells.length > 1 ? 'them has' : 'it has'} turned negative.`;
+  if (ideas.length && ideas[0].action === 'BUY') {
+    return `${ideas.length} new BUY idea${ideas.length > 1 ? 's fit' : ' fits'} your profile (${ideas.map(i => i.symbol).join(', ')}). Size any position within your limits and set the stop-loss first.`;
   }
+  if (!holdings.length) return 'Add your holdings so we can track them and tell you each morning what needs attention.';
+  return 'No action needed today. Your holdings are on BUY or WATCH and nothing new meets our bar.';
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// MAIN ENGINE
+// SHARED SECTIONS — built once, reused for every client
+// ─────────────────────────────────────────────────────────────────────
+
+const SHARED_TTL_MS = 60 * 60 * 1000;
+let _shared = null;   // { key, at, promise }
+
+/**
+ * Market snapshot, news and the education point are the same for everyone, so
+ * they are built once and memoised for an hour. That is what makes it safe to
+ * build a brief on demand when a client logs in: ten logins cost one AI call,
+ * not ten, and a free-tier key is not burned through.
+ */
+function getSharedSections({ force = false } = {}) {
+  const key = istDate();
+  if (!force && _shared && _shared.key === key && Date.now() - _shared.at < SHARED_TTL_MS) return _shared.promise;
+  const promise = (async () => {
+    const snapshot = await refreshAllMarketData();
+    const news = await buildNews();
+    const marketSnapshot = await buildMarketSnapshot(snapshot, news);
+    return { marketSnapshot, news, educationPoint: await buildEducationPoint(), dataNotes: [] };
+  })();
+  _shared = { key, at: Date.now(), promise };
+  promise.catch(() => { if (_shared && _shared.promise === promise) _shared = null; });
+  return promise;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// ONE CLIENT'S BRIEF
+// ─────────────────────────────────────────────────────────────────────
+
+async function buildBriefForClient(client, shared) {
+  const [riskScore, holdings, goalNote] = await Promise.all([
+    getRiskScore(client.id), getHoldings(client.id), buildGoalNote(client.id),
+  ]);
+  const actions = await buildHoldingActions(holdings);
+  const { ideas, note: ideasNote } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
+  const portfolioNote = buildPortfolioNote(holdings, actions);
+  const todayAction = decideTodayAction(holdings, actions, ideas);
+
+  const brief = {
+    market_snapshot: shared.marketSnapshot,
+    news:            shared.news,
+    today_action:    todayAction,
+    portfolio_note:  portfolioNote,
+    holding_actions: actions,
+    ideas,
+    ideas_note:      ideasNote,
+    top_signals:     ideas.map(i => ({ symbol: i.symbol, action: i.action, rationale: i.rationale })),
+    goal_note:       goalNote,
+    education_point: shared.educationPoint,
+  };
+
+  const today = istDate();
+  brief.full_text = [
+    `WealthGuard Morning Brief — ${today}`,
+    '',
+    `TODAY: ${todayAction}`,
+    '',
+    'MARKET SNAPSHOT', shared.marketSnapshot,
+    shared.news.length ? `\nIN THE NEWS\n${shared.news.map(n => `• ${n.title}${n.severity ? ` (${n.severity})` : ''}`).join('\n')}` : '',
+    `\nYOUR PORTFOLIO\n${portfolioNote}`,
+    actions.length ? actions.map(a => `• ${a.symbol} — ${a.action || 'no signal'}: ${a.advice}`).join('\n') : '',
+    ideas.length || ideasNote ? `\nIDEAS WORTH A LOOK${ideasNote ? `\n${ideasNote}` : ''}` : '',
+    ideas.length ? ideas.map(i => `• ${i.symbol} (${i.action})${i.entry ? ` entry ~₹${i.entry}` : ''}${i.target ? `, target ₹${i.target}` : ''}${i.stop ? `, stop-loss ₹${i.stop}` : ''}`).join('\n') : '',
+    goalNote ? `\nYOUR GOALS\n${goalNote}` : '',
+    `\nLEARN SOMETHING TODAY\n${shared.educationPoint}`,
+    '\nNot investment advice. WealthGuard is not a SEBI-registered investment adviser.',
+  ].filter(x => x !== '').join('\n');
+
+  return brief;
+}
+
+/** Writes the brief. brief_json is optional so a not-yet-migrated DB still works. */
+async function persistBrief(client, brief) {
+  const row = {
+    client_id:        client.id,
+    brief_date:       istDate(),
+    market_snapshot:  brief.market_snapshot,
+    portfolio_note:   brief.portfolio_note,
+    top_signals:      brief.top_signals,
+    goal_note:        brief.goal_note,
+    education_point:  brief.education_point,
+    full_text:        brief.full_text,
+    whatsapp_message: brief.full_text,     // the column the in-app tab already reads
+    ai_provider:      aiProvider.isConfigured() ? 'ai' : 'template',
+    brief_json:       { ...brief, generated_at: new Date().toISOString() },
+  };
+  const r = await db.writeTolerant('morning_briefs', 'upsert', row, ['brief_json'],
+    { onConflict: 'client_id,brief_date' });
+  return { ok: r.ok, row };
+}
+
+/**
+ * Builds (and stores) today's brief for ONE client, on demand. Used when a
+ * client opens the app and their 7:30 brief does not exist yet — a client who
+ * registered after 7:30, or a morning the scheduler missed, now gets a brief
+ * instead of "arrives tomorrow". Does not send email.
+ */
+async function generateBriefForClient(clientId) {
+  if (!supabaseAdmin) return null;
+  const { data: client } = await supabaseAdmin.from('clients').select('*').eq('id', clientId).maybeSingle();
+  if (!client) return null;
+  const shared = await getSharedSections();
+  const brief = await buildBriefForClient(client, shared);
+  const { row } = await persistBrief(client, brief);
+  return row;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MAIN ENGINE (07:30 IST, Mon–Fri)
 // ─────────────────────────────────────────────────────────────────────
 
 async function generateAndSendMorningBrief() {
@@ -234,149 +421,63 @@ async function generateAndSendMorningBrief() {
 
   const start = Date.now();
   console.log('📰 Generating morning briefs...');
-
-  const today = new Date().toISOString().split('T')[0];
-  let sent = 0, skipped = 0, failed = 0;
+  let sent = 0, skipped = 0, failed = 0, stored = 0;
 
   try {
-    // ── Shared data — fetched once, reused for every client ──────────
-    const snapshot = await refreshAllMarketData();
-
-    const { data: aiEvents } = await supabaseAdmin
-      .from('ai_events')
-      .select('title, severity')
-      .eq('status', 'active')
-      .gte('detected_at', new Date(Date.now() - 24 * 3600 * 1000).toISOString())
-      .limit(3);
-
-    const marketSnapshot = await buildMarketSnapshot(snapshot, aiEvents);
-    const educationPoint = await buildEducationPoint();
-
+    const shared = await getSharedSections({ force: true });
     console.log(`   Shared sections built (AI calls used: ${aiProvider.getUsage().google + aiProvider.getUsage().anthropic})`);
 
-    // ── Per-client briefs ─────────────────────────────────────────────
-    const { data: clients } = await supabaseAdmin
-      .from('clients')
-      .select('*')
-      .in('subscription_status', ['active', 'trial'])
-      .eq('onboarding_complete', true);
+    // EVERY client gets an in-app brief. This used to select only clients with
+    // onboarding_complete = true — a flag nothing ever set — so no brief was
+    // ever generated for anyone. Whether it is also EMAILED depends on having an
+    // address and an active/trial subscription.
+    const { data: clients } = await supabaseAdmin.from('clients').select('*').limit(5000);
 
     if (!clients?.length) {
-      console.log('📰 No active clients to brief.');
-      await reportRun({
-        engineName: 'morningBriefEngine', durationMs: Date.now() - start,
-        itemsProcessed: 0, itemsExpected: 0,
-      });
+      console.log('📰 No clients to brief.');
+      await reportRun({ engineName: 'morningBriefEngine', durationMs: Date.now() - start, itemsProcessed: 0, itemsExpected: 0 });
       return;
     }
 
     for (const client of clients) {
       try {
-        const [portfolioNote, topSignals, goalNote] = await Promise.all([
-          buildPortfolioNote(client),
-          buildTopSignals(client),
-          buildGoalNote(client),
-        ]);
+        const brief = await buildBriefForClient(client, shared);
+        const { ok } = await persistBrief(client, brief);
+        if (ok) stored++;
+        else console.warn(`   ⚠ Brief for ${client.full_name || client.id} could not be stored (run migration 002/006).`);
 
-        const brief = {
-          market_snapshot: marketSnapshot,
-          portfolio_note:  portfolioNote,
-          top_signals:     topSignals,
-          goal_note:       goalNote,
-          education_point: educationPoint,
-        };
-
-        // Plain-text version for email clients that block HTML
-        brief.full_text = [
-          `WealthGuard Morning Brief — ${today}`,
-          '',
-          'MARKET SNAPSHOT', marketSnapshot,
-          portfolioNote ? `\nYOUR PORTFOLIO\n${portfolioNote}` : '',
-          topSignals.length ? `\nTODAY'S SIGNALS\n${topSignals.map(s => `${s.symbol}: ${s.action}`).join('\n')}` : '',
-          goalNote ? `\nYOUR GOALS\n${goalNote}` : '',
-          `\nLEARN SOMETHING TODAY\n${educationPoint}`,
-        ].filter(Boolean).join('\n');
-
-        // Persist the brief (idempotent per client per day).
-        //
-        // This upsert used to be fire-and-forget. Ten of the columns it
-        // names did not exist on morning_briefs, PostgREST rejected the
-        // whole statement, and because the result was discarded no brief
-        // ever persisted and nothing was logged. Run the migration in
-        // scripts/migrations/002_morning_briefs_align.sql before relying
-        // on this.
-        //
-        // `whatsapp_message` is written alongside `full_text` on purpose:
-        // it is the column routes/brief.js and the frontend's Daily Brief
-        // tab already read, so the in-app brief shows the same text that
-        // was emailed.
-        const persisted = await db.tryWrite('morning_briefs', 'upsert', c =>
-          c.from('morning_briefs').upsert({
-            client_id:        client.id,
-            brief_date:       today,
-            market_snapshot:  marketSnapshot,
-            portfolio_note:   portfolioNote,
-            top_signals:      topSignals,
-            goal_note:        goalNote,
-            education_point:  educationPoint,
-            full_text:        brief.full_text,
-            whatsapp_message: brief.full_text,
-            ai_provider:      aiProvider.isConfigured() ? 'ai' : 'template',
-          }, { onConflict: 'client_id,brief_date' }));
-
-        if (!persisted) {
-          // The email below is still worth sending — the client gets their
-          // brief even if we could not store a copy — but this must not
-          // pass unremarked the way it did before.
-          console.warn(`   ⚠ Brief for ${client.full_name || client.id} could not be stored. ` +
-                       `It will still be emailed, but the in-app Daily Brief tab will be empty. ` +
-                       `Run scripts/migrations/002_morning_briefs_align.sql.`);
-        }
-
-        // Email it
-        const emailed = await emailEngine.sendMorningBrief(client, brief);
+        const emailable = ['active', 'trial'].includes(client.subscription_status);
+        const emailed = emailable ? await emailEngine.sendMorningBrief(client, brief) : false;
         if (emailed) {
           sent++;
-          // Both of these name columns added by migration 002/003. Routed
-          // through tryWrite so a missing column is reported rather than
-          // swallowed, and so a failure here cannot abort the client loop.
+          const today = istDate();
           await db.tryWrite('morning_briefs', 'update', c =>
-            c.from('morning_briefs')
-              .update({ email_sent: true, email_sent_at: new Date().toISOString() })
+            c.from('morning_briefs').update({ email_sent: true, email_sent_at: new Date().toISOString() })
               .eq('client_id', client.id).eq('brief_date', today));
           await db.tryWrite('clients', 'update', c =>
-            c.from('clients')
-              .update({ last_brief_sent_at: new Date().toISOString() })
-              .eq('id', client.id));
+            c.from('clients').update({ last_brief_sent_at: new Date().toISOString() }).eq('id', client.id));
         } else {
           skipped++;
         }
-
       } catch (e) {
         console.error(`   ❌ Brief failed for client ${client.id}: ${e.message}`);
         failed++;
       }
     }
 
-    const duration = Date.now() - start;
-    console.log(`📰 Morning briefs complete: ${sent} emailed, ${skipped} skipped (no email/opted out), ${failed} failed.`);
-
+    console.log(`📰 Morning briefs complete: ${stored} stored, ${sent} emailed, ${skipped} not emailed, ${failed} failed.`);
     await reportRun({
-      engineName:     'morningBriefEngine',
-      durationMs:     duration,
-      itemsProcessed: sent + skipped,
-      itemsExpected:  clients.length,
-      itemsFailed:    failed,
-      detail:         `${sent} emailed, ${skipped} skipped, AI provider: ${JSON.stringify(aiProvider.getUsage())}`,
+      engineName: 'morningBriefEngine', durationMs: Date.now() - start,
+      itemsProcessed: stored, itemsExpected: clients.length, itemsFailed: failed,
+      detail: `${stored} stored, ${sent} emailed, ${skipped} not emailed, AI: ${JSON.stringify(aiProvider.getUsage())}`,
     });
-
   } catch (e) {
     console.error('📰 Morning brief engine error:', e.message);
     await reportRun({
       engineName: 'morningBriefEngine', durationMs: Date.now() - start,
-      itemsProcessed: sent, itemsExpected: 1, itemsFailed: failed + 1, detail: e.message,
+      itemsProcessed: stored, itemsExpected: 1, itemsFailed: failed + 1, detail: e.message,
     });
   }
 }
 
-module.exports = { generateAndSendMorningBrief };
+module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, istDate };

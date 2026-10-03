@@ -8,12 +8,13 @@ router.get('/snapshot', async (req, res) => {
     const snapshot = await refreshAllMarketData();
     res.json({ success: true, data: snapshot });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Could not load market data.' });
   }
 });
 
 // GET /api/market/quote/:symbol
 router.get('/quote/:symbol', async (req, res) => {
+  if (!/^[A-Za-z0-9&.\-^_]{1,30}$/.test(req.params.symbol)) return res.status(400).json({ error: 'Invalid symbol.' });
   const quote = await getNSEQuote(req.params.symbol.toUpperCase());
   res.json({ success: true, quote });
 });
@@ -32,15 +33,16 @@ router.get('/regime', async (req, res) => {
 router.get('/instruments', async (req, res) => {
   try {
     const { supabaseAdmin } = require('../../config/supabase');
+    if (!supabaseAdmin) return res.status(503).json({ instruments: [], unavailable: true });
     const { data, error } = await supabaseAdmin
       .from('instrument_universe')
       .select('symbol, name, category')
       .order('category')
       .order('name');
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return res.status(500).json({ error: 'Could not load instruments.' });
     res.json({ instruments: data || [] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Could not load instruments.' });
   }
 });
 

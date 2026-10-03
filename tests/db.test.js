@@ -2,7 +2,7 @@ const Module=require('module'), orig=Module._load;
 let CLIENT={}; 
 Module._load=function(r,p,i){ if(r.includes('config/supabase')) return {supabaseAdmin:CLIENT}; return orig(r,p,i); };
 const db=require('../backend/lib/db.js');
-const ck=(n,c)=>console.log(`  ${c?'PASS':'FAIL'}  ${n}`);
+const ck=require('./_check');
 const logs=[]; const ow=console.warn, oe=console.error;
 console.warn=(...a)=>logs.push(a.join(' ')); console.error=(...a)=>logs.push(a.join(' '));
 

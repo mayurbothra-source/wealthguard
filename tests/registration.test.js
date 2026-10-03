@@ -5,8 +5,9 @@
  * whole statement, error not throw. That is the behaviour that broke account
  * creation, so a stub that accepted anything would prove nothing.
  */
+process.env.NODE_ENV='test'; process.env.JWT_SECRET='test-secret-test-secret-test-secret-123';
 const Module=require('module'), orig=Module._load;
-const ck=(n,c)=>console.log(`  ${c?'PASS':'FAIL'}  ${n}`);
+const ck=require('./_check');
 
 // Real column sets, from scripts/schema.sql + migration 003
 const COLS = {
@@ -77,11 +78,11 @@ app.use((req,res)=>{ if(req.path.startsWith('/api'))
 const http=require('http');
 const srv=http.createServer(app);
 
-function call(method,path,body){
+function call(method,path,body,token){
   return new Promise((resolve)=>{
     const data=body?JSON.stringify(body):null;
     const req=http.request({host:'127.0.0.1',port:srv.address().port,path,method,
-      headers:data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{}},
+      headers:Object.assign(data?{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}:{}, token?{Authorization:'Bearer '+token}:{})},
       r=>{let b='';r.on('data',c=>b+=c);r.on('end',()=>{
         let j=null; try{j=JSON.parse(b)}catch{}
         resolve({status:r.statusCode,body:j});});});
@@ -109,6 +110,8 @@ srv.listen(0, async () => {
   ROWS={}; REJECTED=[];
   let r = await call('POST','/api/auth/register',{...PAYLOAD});
   ck('registration returns 200 (was 500)', r.status===200);
+  ck('registration signs the new client in (token)', !!r.body?.token);
+  ck('a new account with profile answers is onboarding_complete', ROWS.clients?.[0]?.onboarding_complete===true);
   ck('a client_id comes back', !!r.body?.client_id);
   ck('no column was rejected', REJECTED.length===0);
   if(REJECTED.length) console.log('   rejected:', JSON.stringify(REJECTED));
@@ -156,15 +159,15 @@ srv.listen(0, async () => {
 
   console.log('\n── R2: the email route now EXISTS ──');
   ROWS={}; REJECTED=[];
-  await call('POST','/api/auth/register',{...PAYLOAD, phone_wa:'+919830000077', email:'a@b.com'});
-  const cid = ROWS.clients[0].id;
-  r = await call('POST',`/api/clients/${cid}/email`,{email:'Brief@Example.COM'});
+  const reg = await call('POST','/api/auth/register',{...PAYLOAD, phone_wa:'+919830000077', email:'a@b.com'});
+  const cid = ROWS.clients[0].id, tok = reg.body.token;
+  r = await call('POST',`/api/clients/${cid}/email`,{email:'Brief@Example.COM'}, tok);
   ck('returns 200 (was hanging for 60s)', r.status===200);
   ck('did not time out', r.status!=='TIMEOUT');
   ck('email normalised to lowercase', r.body?.email==='brief@example.com');
-  r = await call('POST',`/api/clients/${cid}/email`,{email:'nonsense'});
+  r = await call('POST',`/api/clients/${cid}/email`,{email:'nonsense'}, tok);
   ck('invalid email → 400', r.status===400);
-  r = await call('POST',`/api/clients/${cid}/email`,{});
+  r = await call('POST',`/api/clients/${cid}/email`,{}, tok);
   ck('missing email → 400', r.status===400);
 
   console.log('\n── R3: an unmatched /api path 404s instead of hanging ──');

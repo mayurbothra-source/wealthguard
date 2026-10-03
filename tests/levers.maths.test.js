@@ -1,5 +1,5 @@
 const fp=require('../backend/services/fundamentalsProvider.js');
-const ck=(n,c)=>console.log(`  ${c?'PASS':'FAIL'}  ${n}`);
+const ck=require('./_check');
 const approx=(a,b,t=0.5)=>a!=null&&Math.abs(a-b)<t;
 
 console.log('\n── dailyReturns ──');
