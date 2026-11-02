@@ -2052,6 +2052,7 @@ async function initiatePayment(){
   const price = PLAN_PRICE[state.selectedPlan];
   const discount = state.discount ? state.discount.d : 0;
   const finalPaise = Math.round(price * (1-discount/100)) * 100;
+  await loadRazorpaySdk();   // load the checkout script BEFORE creating a subscription, so a retry never orphans one
   const order = await API.post('/payments/subscribe', { client_id: clientId, plan_key: state.selectedPlan, discount_code: document.getElementById('disc-input').value.trim().toUpperCase() || null });
   // No more "demo access": a failed or unavailable payment never grants a plan.
   if (!order || order.error || !order.subscription){
@@ -2061,21 +2062,34 @@ async function initiatePayment(){
   if (order.subscription.type === 'free'){
     state.planTier = state.selectedPlan; setTimeout(enterApp, 800); return;
   }
-  if (typeof Razorpay === 'undefined'){ toast('⏳','Loading payment gateway...'); loadRazorpaySdk(); return; }
+  if (typeof Razorpay === 'undefined'){ toast('⏳','Loading payment gateway… tap Pay again in a moment.'); loadRazorpaySdk(); return; }
+  if (!order.razorpay_key || !order.razorpay_subscription_id){ toast('ℹ️','Payments are not fully set up yet. Please try again shortly.'); return; }
   const rzp = new Razorpay({
-    key: order.razorpay_key || 'rzp_test_placeholder', amount: finalPaise, currency:'INR', name:'WealthGuard',
-    description: `${PLAN_NAME[state.selectedPlan]} Plan — Monthly`, order_id: order.razorpay_order_id,
+    key: order.razorpay_key, subscription_id: order.razorpay_subscription_id, name:'WealthGuard',
+    description: `${PLAN_NAME[state.selectedPlan]} Plan — Monthly`,
     handler: async function(resp){
-      await API.post('/payments/verify', { order_id:resp.razorpay_order_id, payment_id:resp.razorpay_payment_id, signature:resp.razorpay_signature, client_id:clientId, plan_key:state.selectedPlan });
+      const v = await API.post('/payments/verify', { subscription_id:resp.razorpay_subscription_id, payment_id:resp.razorpay_payment_id, signature:resp.razorpay_signature, client_id:clientId });
+      if (!v || v.error || !v.success){
+        toast('⚠️', 'Your payment went through but we could not confirm it yet. It will activate automatically within a few minutes; if not, contact support.');
+        return;
+      }
       state.planTier = state.selectedPlan;
       toast('🎉','Payment successful. Welcome to WealthGuard.');
       setTimeout(enterApp, 1200);
     },
-    prefill:{ name:state.obData.name||'', contact:state.obData.phone||'' }, theme:{ color:'#1B5E3F' },
+    prefill:{ name:state.obData.name||'', contact:state.obData.phone||'', email:state.obData.email||'' }, theme:{ color:'#1B5E3F' },
   });
   rzp.open();
 }
-function loadRazorpaySdk(){ if(document.getElementById('rzp-sdk'))return; const s=document.createElement('script'); s.id='rzp-sdk'; s.src='https://checkout.razorpay.com/v1/checkout.js'; document.head.appendChild(s); }
+function loadRazorpaySdk(){
+  return new Promise(resolve=>{
+    if (typeof Razorpay !== 'undefined') return resolve(true);
+    let s = document.getElementById('rzp-sdk');
+    if (!s){ s=document.createElement('script'); s.id='rzp-sdk'; s.src='https://checkout.razorpay.com/v1/checkout.js'; document.head.appendChild(s); }
+    s.addEventListener('load', ()=>resolve(true)); s.addEventListener('error', ()=>resolve(false));
+    setTimeout(()=>resolve(typeof Razorpay !== 'undefined'), 6000);
+  });
+}
 
 async function ensureClientRegistered(){
   if (API.clientId) return API.clientId;

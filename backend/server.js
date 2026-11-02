@@ -30,6 +30,10 @@ app.use(cors({
 // support for the bare '*' pattern and throws instead of matching it.
 // 100 KB is far more than any request here needs (the old 10 MB limit applied
 // to unauthenticated routes too).
+// Razorpay webhook needs the RAW body to check its signature, so it is registered
+// before the JSON parser (which would otherwise consume and re-encode it).
+app.post('/api/payments/webhook', express.raw({ type: '*/*', limit: '100kb' }),
+  (req, res, next) => require('./routes/payments').handleWebhook(req, res).catch(next));
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 

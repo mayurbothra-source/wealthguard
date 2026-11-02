@@ -74,6 +74,42 @@ async function safeRun(label, fn) {
   }
 }
 
+/**
+ * Render's free plan puts the server to sleep after ~15 idle minutes, and a sleeping
+ * server runs no cron jobs. So on every start-up we check what we MISSED and run it:
+ *   - weekday, after 07:30 IST, and no brief stored for today  -> build briefs
+ *   - newest instrument score older than 8 days                -> run the scoring pass
+ *   - subscription lifecycle (idempotent)                       -> run
+ * This is a safety net, not a replacement: a paid always-on instance runs the real schedule.
+ */
+async function catchUpMissedJobs() {
+  const { supabaseAdmin } = require('../../config/supabase');
+  if (!supabaseAdmin) return { skipped: 'no database' };
+  const done = [];
+  try {
+    const ist = new Date(Date.now() + 5.5 * 3600e3);
+    const today = ist.toISOString().slice(0, 10);
+    const dow = ist.getUTCDay();                       // 0 Sun .. 6 Sat (IST)
+    const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    if (dow >= 1 && dow <= 5 && minutes >= 7 * 60 + 35) {
+      const { count } = await supabaseAdmin.from('morning_briefs')
+        .select('id', { count: 'exact', head: true }).eq('brief_date', today);
+      if (!count) { done.push('morning brief'); await safeRun('morningBriefEngine(catch-up)', generateAndSendMorningBrief); }
+    }
+    const { data: last } = await supabaseAdmin.from('instrument_scores')
+      .select('scored_at').order('scored_at', { ascending: false }).limit(1);
+    const lastAt = last && last[0] && new Date(last[0].scored_at).getTime();
+    if (!lastAt || Date.now() - lastAt > 8 * 86400e3) {
+      done.push('instrument scoring'); await safeRun('instrumentEngine(catch-up)', runInstrumentScoringEngine);
+    }
+    done.push('subscription lifecycle'); await safeRun('subscriptionEngine(catch-up)', runSubscriptionEngine);
+  } catch (e) {
+    console.error('Catch-up failed:', e.message);
+  }
+  if (done.length) console.log('   ↺ Catch-up ran:', done.join(', '));
+  return { done };
+}
+
 function startSchedulers() {
   console.log('\n⏰ Starting WealthGuard schedulers...');
 
@@ -138,6 +174,9 @@ function startSchedulers() {
   console.log('   ✓ Instrument universe review: 8:00 PM IST on the 1st of each month');
 
   console.log('');
+
+  // Give the server a minute to settle, then run anything a sleeping server missed.
+  setTimeout(() => { catchUpMissedJobs(); }, 60 * 1000);
 }
 
-module.exports = { startSchedulers, isMarketHours };
+module.exports = { startSchedulers, isMarketHours, catchUpMissedJobs };

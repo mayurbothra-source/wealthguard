@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../../config/supabase');
 const { requireSession, ownsParam } = require('../lib/session');
+const { getEntitlement } = require('../lib/entitlements');
 
 // GET /api/signals/:clientId — active signals for the signed-in client
 // (house-level signals plus any addressed to this client).
@@ -24,6 +25,15 @@ router.get('/:clientId', requireSession, ownsParam('clientId'), async (req, res)
   }
 
   try {
+    const ent = await getEntitlement(supabaseAdmin, clientId);
+    if (ent.access !== 'full') {
+      return res.json({
+        signals: [], count: 0, access: ent.access, plan: ent.plan,
+        message: ent.access === 'read_only'
+          ? 'Your plan has lapsed, so live signals are paused. Your history stays visible.'
+          : 'Choose a plan to see live signals.',
+      });
+    }
     let query = supabaseAdmin
       .from('recommendations')
       .select('*')
@@ -32,14 +42,14 @@ router.get('/:clientId', requireSession, ownsParam('clientId'), async (req, res)
       .eq('is_active', true)
       .gte('confidence_score', 0.60)
       .order('generated_at', { ascending: false })
-      .limit(limit);
+      .limit(Math.min(limit, ent.signalLimit));
 
     if (tier) query = query.eq('signal_tier', tier);
     if (action) query = query.eq('action', action);
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ signals: data, count: data.length });
+    res.json({ signals: data, count: data.length, plan: ent.plan, signal_limit: ent.signalLimit, access: ent.access });
   } catch (err) {
     console.error('signals GET:', err.message);
     res.status(500).json({ error: 'Could not load signals.' });

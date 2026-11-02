@@ -109,6 +109,38 @@ async function processTrialExpiries() {
 // PAYMENT GRACE PERIOD
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Paid clients whose billing period ended with no renewal webhook (a missed event, or
+ * a card that quietly failed) enter the same grace ladder as a lapsed trial.
+ * A 3-day buffer lets a normal renewal arrive first.
+ */
+async function processPaidExpiries() {
+  if (!supabaseAdmin) return { lapsed: 0 };
+  let lapsed = 0;
+  try {
+    const cutoff = new Date(Date.now() - 3 * 86400000).toISOString();
+    const { data: rows } = await supabaseAdmin.from('clients')
+      .select('id, full_name, email, subscription_status, subscription_expires_at')
+      .in('subscription_status', ['active', 'cancelled'])
+      .lt('subscription_expires_at', cutoff);
+    for (const c of (rows || [])) {
+      if (c.subscription_status === 'cancelled') {
+        // They chose to leave: no "payment failed" scare, just history-only access.
+        await supabaseAdmin.from('clients').update({ subscription_status: 'read_only', grace_stage: 3 }).eq('id', c.id);
+      } else {
+        await supabaseAdmin.from('clients').update({
+          subscription_status: 'payment_failed', payment_failed_at: new Date().toISOString(), grace_stage: 1,
+        }).eq('id', c.id);
+        await emailEngine.sendPaymentGraceNotice(c, 1, GRACE_STAGE_3_DAYS);
+      }
+      lapsed++;
+    }
+  } catch (e) {
+    console.warn(`   ⚠ Paid-expiry processing failed: ${e.message}`);
+  }
+  return { lapsed };
+}
+
 async function processGracePeriods() {
   if (!supabaseAdmin) return { advanced: 0, readOnly: 0, suspended: 0 };
   let advanced = 0, readOnly = 0, suspended = 0;
@@ -245,10 +277,11 @@ async function runSubscriptionEngine() {
   console.log('💳 Running subscription lifecycle engine...');
 
   const trials    = await processTrialExpiries();
+  const paid      = await processPaidExpiries();
   const grace     = await processGracePeriods();
   const referrals = await processReferralRewards();
 
-  const total = trials.expired + grace.advanced + grace.readOnly + grace.suspended + referrals.rewarded;
+  const total = paid.lapsed + trials.expired + grace.advanced + grace.readOnly + grace.suspended + referrals.rewarded;
   const duration = Date.now() - start;
 
   console.log(`💳 Subscription engine complete: ${trials.expired} trials expired, ` +

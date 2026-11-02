@@ -9,7 +9,7 @@
 const { supabaseAdmin } = require('../../config/supabase');
 const db = require('../lib/db');
 const { reportRun } = require('./healthEngine');
-const { getNSEQuote, getYahooQuote } = require('./marketData');
+const { getNSEQuote, getYahooQuote, getNiftyReturnForPeriod } = require('./marketData');
 
 // Checkpoint definitions in days
 const CHECKPOINTS = [

@@ -5,7 +5,7 @@ const { requireSession, ownsParam, ownsBody } = require('../lib/session');
 const { limit } = require('../lib/rateLimit');
 const {
   PLANS, DISCOUNT_CODES, validateDiscountCode,
-  createSubscription, verifyPaymentSignature, isConfigured
+  createSubscription, verifySubscriptionSignature, verifyWebhookSignature, isConfigured
 } = require('../services/payment');
 
 const codeLimiter = limit({ windowMs: 10 * 60e3, max: 30 });
@@ -88,8 +88,13 @@ router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res
 
     let subscription;
     try {
-      subscription = await createSubscription(plan_key, client_id, isFree ? discount_code : null);
+      subscription = await createSubscription(plan_key, client_id, discountInfo && discountInfo.valid ? discount_code : null);
     } catch (e) {
+      if (e.code === 'OFFER_NOT_CONFIGURED') {
+        await supabaseAdmin.from('discount_code_usage').delete()
+          .eq('code', String(discount_code).toUpperCase().trim()).eq('client_id', client_id);
+        return res.status(400).json({ error: e.message });
+      }
       if (e.code === 'PAYMENTS_UNAVAILABLE') {
         // Give the code back: nothing was purchased.
         if (discount_code && discountInfo?.valid) {
@@ -104,6 +109,10 @@ router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res
     const expiresAt = subscription.expires_at ||
       new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const active = subscription.type === 'free';
+    const rzpSubId = subscription.subscription && subscription.subscription.id;
+
+    // An abandoned checkout leaves a 'pending' row. Clear them so retries do not pile up.
+    await supabaseAdmin.from('subscriptions').delete().eq('client_id', client_id).eq('status', 'pending');
 
     const { error: subErr } = await supabaseAdmin.from('subscriptions').insert({
       client_id,
@@ -111,7 +120,7 @@ router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res
       plan_name: PLANS[plan_key]?.name,
       status: active ? 'active' : 'pending',
       subscription_type: subscription.type,
-      razorpay_subscription_id: subscription.subscription?.id || null,
+      razorpay_subscription_id: rzpSubId || null,
       discount_code: discount_code || null,
       discount_pct: discountInfo?.discount || 0,
       amount_paise: active ? 0 : PLANS[plan_key]?.amount,
@@ -127,35 +136,115 @@ router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res
       subscription_expires_at: expiresAt,
     }).eq('id', client_id);
 
-    res.json({ success: true, subscription, discount: discountInfo });
+    res.json({
+      success: true, subscription, discount: discountInfo,
+      // what the browser needs to open checkout: the PUBLIC key id and the subscription id
+      razorpay_key: subscription.key_id || null,
+      razorpay_subscription_id: rzpSubId || null,
+    });
   } catch (err) {
     console.error('Subscribe error:', err.message);
     res.status(500).json({ error: 'Could not start your subscription. Please try again.' });
   }
 });
 
-// POST /api/payments/verify — verify Razorpay payment after checkout
+// POST /api/payments/verify — called by the browser after Razorpay checkout succeeds.
+// The signature proves Razorpay confirmed the authorisation; the subscription id must
+// also be one WE created for THIS client, so a valid signature from someone else's
+// payment cannot activate your account.
 router.post('/verify', requireSession, ownsBody('client_id'), async (req, res) => {
-  const { order_id, payment_id, signature, plan_key } = req.body || {};
+  const { subscription_id, payment_id, signature } = req.body || {};
   const client_id = req.auth.clientId;
 
-  // verifyPaymentSignature fails closed: without RAZORPAY_KEY_SECRET it is false.
-  if (!verifyPaymentSignature(order_id, payment_id, signature)) {
+  if (!verifySubscriptionSignature(payment_id, subscription_id, signature)) {
     return res.status(400).json({ error: 'Invalid payment signature' });
   }
   if (!supabaseAdmin) return res.status(503).json({ error: 'Temporarily unavailable.' });
 
+  const { data: row } = await supabaseAdmin.from('subscriptions').select('id, plan_key')
+    .eq('client_id', client_id).eq('razorpay_subscription_id', subscription_id).maybeSingle();
+  if (!row) return res.status(404).json({ error: 'No matching subscription for this account.' });
+
+  // Provisional access until the webhook confirms the exact billing period.
+  const expires = new Date(Date.now() + 32 * 24 * 60 * 60 * 1000).toISOString();
   const { error } = await supabaseAdmin.from('subscriptions').update({
-    status: 'active',
-    razorpay_payment_id: payment_id,
-    started_at: new Date().toISOString(),
-    expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-  }).eq('client_id', client_id).eq('plan_key', plan_key);
+    status: 'active', razorpay_payment_id: payment_id, started_at: new Date().toISOString(), expires_at: expires,
+  }).eq('id', row.id);
   if (error) return res.status(500).json({ error: 'Could not activate your subscription.' });
 
-  await supabaseAdmin.from('clients').update({ subscription_status: 'active' }).eq('id', client_id);
+  await supabaseAdmin.from('clients').update({
+    subscription_plan: row.plan_key, subscription_status: 'active',
+    subscription_expires_at: expires, payment_failed_at: null, grace_stage: 0,
+  }).eq('id', client_id);
   res.json({ success: true, message: 'Payment verified. Subscription activated.' });
 });
+
+/**
+ * POST /api/payments/webhook — Razorpay tells us what really happened (renewals,
+ * failed charges, cancellations). Mounted in server.js BEFORE express.json so the
+ * raw bytes are available: the signature is over the exact body Razorpay sent.
+ */
+const ms = (sec) => (sec ? new Date(sec * 1000).toISOString() : null);
+
+async function handleWebhook(req, res) {
+  const raw = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+  if (!verifyWebhookSignature(raw, req.get('x-razorpay-signature'))) {
+    return res.status(400).json({ error: 'bad signature' });
+  }
+  if (!supabaseAdmin) return res.status(503).json({ error: 'unavailable' });
+
+  let evt;
+  try { evt = JSON.parse(raw); } catch { return res.status(400).json({ error: 'bad json' }); }
+  const eventId = req.get('x-razorpay-event-id') || null;
+  const type = evt.event;
+
+  try {
+    // Razorpay retries; do each event once.
+    if (eventId) {
+      const { error: dup } = await supabaseAdmin.from('payment_events')
+        .insert({ event_id: eventId, event_type: type });
+      if (dup && (dup.code === '23505' || /duplicate|unique/i.test(dup.message || ''))) {
+        return res.json({ ok: true, duplicate: true });
+      }
+    }
+
+    const sub = evt.payload && evt.payload.subscription && evt.payload.subscription.entity;
+    if (!sub || !sub.id) return res.json({ ok: true, ignored: type });
+
+    let { data: row } = await supabaseAdmin.from('subscriptions')
+      .select('id, client_id, plan_key').eq('razorpay_subscription_id', sub.id).maybeSingle();
+    if (!row) return res.json({ ok: true, unknown_subscription: true });
+
+    const periodEnd = ms(sub.current_end);
+    const pay = evt.payload.payment && evt.payload.payment.entity;
+    const setBoth = async (subFields, clientFields) => {
+      await supabaseAdmin.from('subscriptions').update(subFields).eq('id', row.id);
+      await supabaseAdmin.from('clients').update(clientFields).eq('id', row.client_id);
+    };
+
+    if (type === 'subscription.activated' || type === 'subscription.charged') {
+      const exp = periodEnd || new Date(Date.now() + 32 * 86400e3).toISOString();
+      await setBoth(
+        { status: 'active', expires_at: exp, ...(pay ? { razorpay_payment_id: pay.id } : {}) },
+        { subscription_plan: row.plan_key, subscription_status: 'active', subscription_expires_at: exp,
+          payment_failed_at: null, grace_stage: 0 });
+    } else if (type === 'subscription.pending' || type === 'subscription.halted') {
+      await setBoth({ status: type === 'subscription.halted' ? 'halted' : 'past_due' },
+        { subscription_status: 'payment_failed', payment_failed_at: new Date().toISOString(), grace_stage: 1 });
+    } else if (type === 'subscription.cancelled') {
+      await setBoth({ status: 'cancelled', cancelled_at: new Date().toISOString(), ...(periodEnd ? { expires_at: periodEnd } : {}) },
+        { subscription_status: 'cancelled', ...(periodEnd ? { subscription_expires_at: periodEnd } : {}) });
+    } else if (type === 'subscription.completed' || type === 'subscription.expired') {
+      await setBoth({ status: 'expired' }, { subscription_status: 'read_only', grace_stage: 3 });
+    }
+    // authenticated / updated / payment.* are recorded above and need no state change.
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('webhook error:', e.message);
+    // 500 makes Razorpay retry later, which is what we want for a transient fault.
+    res.status(500).json({ error: 'retry' });
+  }
+}
 
 // GET /api/payments/status/:clientId — check subscription status
 router.get('/status/:clientId', requireSession, ownsParam('clientId'), async (req, res) => {
@@ -190,3 +279,4 @@ router.get('/status/:clientId', requireSession, ownsParam('clientId'), async (re
 });
 
 module.exports = router;
+module.exports.handleWebhook = handleWebhook;

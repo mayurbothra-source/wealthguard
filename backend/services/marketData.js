@@ -316,6 +316,36 @@ async function getYahooQuote(symbol) {
   }
 }
 
+/**
+ * Nifty 50 % return between two dates, from Yahoo daily closes (^NSEI).
+ * Returns null (never a guess) when either end cannot be priced. Used by the track
+ * record to compute honest alpha; it was referenced but never written, so the daily
+ * track-record job crashed on every run.
+ */
+async function getNiftyReturnForPeriod(from, to) {
+  try {
+    const t1 = Math.floor(new Date(from).getTime() / 1000) - 5 * 86400;
+    const t2 = Math.floor(new Date(to).getTime() / 1000) + 86400;
+    if (!(t1 > 0) || !(t2 > t1)) return null;
+    const { data } = await axios.get(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent('^NSEI')}?period1=${t1}&period2=${t2}&interval=1d`,
+      { headers: YAHOO_HEADERS, timeout: 8000 });
+    const r = data?.chart?.result?.[0];
+    const ts = r?.timestamp, close = r?.indicators?.quote?.[0]?.close;
+    if (!ts || !close) return null;
+    const want = new Date(from).getTime() / 1000;
+    let startIdx = -1;                       // last close on or before the start date
+    for (let i = 0; i < ts.length; i++) if (ts[i] <= want + 86400 && close[i] != null) startIdx = i;
+    let endIdx = -1;
+    for (let i = ts.length - 1; i >= 0; i--) if (close[i] != null) { endIdx = i; break; }
+    if (startIdx < 0 || endIdx <= startIdx) return null;
+    return parseFloat((((close[endIdx] - close[startIdx]) / close[startIdx]) * 100).toFixed(2));
+  } catch (e) {
+    console.warn('⚠️  Nifty period return unavailable:', e.message);
+    return null;
+  }
+}
+
 // Sensex (BSE) — same reliability tier as Nifty, just a different exchange
 async function getSensex() {
   const q = await getYahooQuote('^BSESN');
@@ -428,6 +458,7 @@ async function refreshAllMarketData() {
 }
 
 module.exports = {
+  getNiftyReturnForPeriod,
   getNSEQuote,
   getNSEIndex,
   getIndiaVIX,

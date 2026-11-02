@@ -152,29 +152,64 @@ async function createSubscription(planKey, clientId, discountCode) {
       { status: 503, code: 'PAYMENTS_UNAVAILABLE' });
   }
 
-  const subscription = await razorpay.subscriptions.create({
+  const payload = {
     plan_id: plan.razorpay_plan_id,
     customer_notify: 1,
     quantity: 1,
-    total_count: 12,
-    notes: { client_id: clientId, discount_code: discountCode || '' },
-  });
+    total_count: 120,          // ten years of monthly cycles; the client can cancel any time
+    notes: { client_id: clientId, plan_key: planKey, discount_code: discountCode || '' },
+  };
+  // A partial discount is only honoured through a Razorpay Offer created in the
+  // dashboard (env RAZORPAY_OFFER_<CODE>). Without one we refuse rather than
+  // show a discount on screen and then charge full price.
+  if (discountCode) {
+    const offer = offerIdFor(discountCode);
+    if (!offer) {
+      throw Object.assign(new Error('That code cannot be applied to a paid plan yet. Remove it to continue at the full price.'),
+        { status: 400, code: 'OFFER_NOT_CONFIGURED' });
+    }
+    payload.offer_id = offer;
+  }
+  const subscription = await razorpay.subscriptions.create(payload);
 
-  return { type: 'razorpay', subscription, plan: planKey, plan_name: plan.name };
+  return { type: 'razorpay', subscription, plan: planKey, plan_name: plan.name, key_id: process.env.RAZORPAY_KEY_ID };
 }
 
-// ── VERIFY RAZORPAY PAYMENT SIGNATURE ──────────────────────
-function verifyPaymentSignature(orderId, paymentId, signature) {
-  // FAIL CLOSED. With no secret configured this used to return true, i.e. every
-  // "payment" verified. Without the secret nothing can be verified.
-  if (!process.env.RAZORPAY_KEY_SECRET) return false;
-  if (!orderId || !paymentId || typeof signature !== 'string') return false;
-  const expected = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(`${orderId}|${paymentId}`)
-    .digest('hex');
-  const a = Buffer.from(expected), b = Buffer.from(signature);
+function offerIdFor(code) {
+  return process.env['RAZORPAY_OFFER_' + String(code).toUpperCase().replace(/[^A-Z0-9]/g, '')] || null;
+}
+
+// ── SIGNATURES ──────────────────────────────────────────────
+// All three FAIL CLOSED: a missing secret means nothing verifies.
+function safeEqualHex(expected, given) {
+  if (typeof given !== 'string') return false;
+  const a = Buffer.from(expected), b = Buffer.from(given);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function hmac(secret, text) {
+  return crypto.createHmac('sha256', secret).update(text).digest('hex');
+}
+
+// One-time order checkout: HMAC(order_id|payment_id)
+function verifyPaymentSignature(orderId, paymentId, signature) {
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret || !orderId || !paymentId) return false;
+  return safeEqualHex(hmac(secret, `${orderId}|${paymentId}`), signature);
+}
+
+// Subscription checkout: HMAC(payment_id|subscription_id)  — note the order is reversed
+function verifySubscriptionSignature(paymentId, subscriptionId, signature) {
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret || !paymentId || !subscriptionId) return false;
+  return safeEqualHex(hmac(secret, `${paymentId}|${subscriptionId}`), signature);
+}
+
+// Webhook: HMAC of the RAW request body with the webhook secret (a different
+// secret from the API key secret; you choose it when creating the webhook).
+function verifyWebhookSignature(rawBody, signature) {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret || !rawBody || !signature) return false;
+  return safeEqualHex(hmac(secret, rawBody), signature);
 }
 
 module.exports = {
@@ -184,6 +219,10 @@ module.exports = {
   createOrder,
   createSubscription,
   verifyPaymentSignature,
+  verifySubscriptionSignature,
+  verifyWebhookSignature,
+  offerIdFor,
+  getRazorpay: () => razorpay,
   isConfigured: !!razorpay,
 };
 

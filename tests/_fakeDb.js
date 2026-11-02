@@ -26,6 +26,10 @@ function makeDb() {
           for (const r of list) if (rows(table).some(x => x.code === r.code && x.client_id === r.client_id))
             return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
         }
+        if (table === 'payment_events') {
+          for (const r of list) if (rows(table).some(x => x.event_id === r.event_id))
+            return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+        }
         rows(table).push(...list);
         return { data: Array.isArray(q.payload) ? list : list[0], error: null };
       }
