@@ -1,3 +1,4 @@
+process.env.NODE_ENV='test';
 const Module=require('module'), orig=Module._load, path=require('path');
 const ROOT=require('path').resolve(__dirname,'..');
 

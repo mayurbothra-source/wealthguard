@@ -66,7 +66,14 @@ const YAHOO_HEADERS = {
 
 // Yahoo tolerates automated requests but not a burst of 120. The weekly
 // scoring run has plenty of time, so pace it.
-const FETCH_GAP_MS      = 350;
+const IS_TEST = process.env.NODE_ENV === 'test';
+const FETCH_GAP_MS      = IS_TEST ? 0 : 900;
+// When Yahoo answers 429 (too many requests) or a server error, wait and try again
+// (on the second host too) instead of giving up. The 2 Nov run lost 74 of 120
+// instruments to 429s with no retry, so most of the universe scored identically.
+const RETRY_WAITS_MS    = IS_TEST ? [0, 0, 0] : [4000, 10000, 25000];
+const SECOND_PASS_WAIT_MS = IS_TEST ? 0 : 30000;
+const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const REQUEST_TIMEOUT_MS = 10000;
 const CACHE_MAX_AGE_HRS  = 30;   // one scoring cycle plus slack
 
@@ -230,13 +237,31 @@ function computePriceStats(closes) {
  * on, with range/interval parameters added — so the response shape is the
  * one already proven to work against this deployment.
  */
+/** GET with patience: retries 429 / 5xx / timeouts, alternating Yahoo hosts. */
+async function yahooGet(path, params, waits = RETRY_WAITS_MS) {
+  let lastErr;
+  for (let attempt = 0; attempt <= waits.length; attempt++) {
+    const host = YAHOO_HOSTS[attempt % YAHOO_HOSTS.length];
+    try {
+      return await axios.get(`https://${host}${path}`,
+        { headers: YAHOO_HEADERS, timeout: REQUEST_TIMEOUT_MS, params });
+    } catch (err) {
+      lastErr = err;
+      const status = err.response && err.response.status;
+      const retryable = !status || status === 429 || status >= 500;
+      if (!retryable || attempt === waits.length) break;
+      await sleep(waits[attempt] + (IS_TEST ? 0 : Math.floor(Math.random() * 1500)));
+    }
+  }
+  throw lastErr;
+}
+
 async function fetchPriceHistory(yahooTicker) {
   if (!yahooTicker) return { closes: null, reason: 'no yahoo_ticker on this instrument' };
   try {
-    const { data } = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooTicker)}`,
-      { headers: YAHOO_HEADERS, timeout: REQUEST_TIMEOUT_MS,
-        params: { range: '1y', interval: '1d', includePrePost: false } }
+    const { data } = await yahooGet(
+      `/v8/finance/chart/${encodeURIComponent(yahooTicker)}`,
+      { range: '1y', interval: '1d', includePrePost: false }
     );
     const result = data?.chart?.result?.[0];
     const closes = result?.indicators?.quote?.[0]?.close;
@@ -262,10 +287,11 @@ async function fetchPriceHistory(yahooTicker) {
 async function fetchFundamentals(yahooTicker) {
   if (!yahooTicker) return { data: null, reason: 'no yahoo_ticker' };
   try {
-    const { data } = await axios.get(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(yahooTicker)}`,
-      { headers: YAHOO_HEADERS, timeout: REQUEST_TIMEOUT_MS,
-        params: { modules: 'defaultKeyStatistics,financialData,summaryDetail' } }
+    // Fundamentals are optional: one retry at most, so a blocked endpoint cannot stall the run.
+    const { data } = await yahooGet(
+      `/v10/finance/quoteSummary/${encodeURIComponent(yahooTicker)}`,
+      { modules: 'defaultKeyStatistics,financialData,summaryDetail' },
+      RETRY_WAITS_MS.slice(0, 1)
     );
     const r = data?.quoteSummary?.result?.[0];
     if (!r) return { data: null, reason: 'quoteSummary returned no result' };
@@ -316,8 +342,15 @@ async function loadCache() {
   return map;
 }
 
+// A price fetch that FAILED (rate limit, timeout, no series) must never be served
+// from cache for 30 hours as if it were an answer — that is how one bad run
+// poisoned the next ones. "Statically priced" and "no ticker" are facts, not failures.
+const isFailedFetch = row =>
+  !row?.price_stats?.data_points && /chart fetch failed|timed out|chart returned no close|MFAPI returned no NAV/i.test(row?.price_reason || '');
+
 function isFresh(row) {
   if (!row?.refreshed_at) return false;
+  if (isFailedFetch(row)) return false;
   const ageHrs = (Date.now() - new Date(row.refreshed_at).getTime()) / 3600000;
   return ageHrs < CACHE_MAX_AGE_HRS;
 }
@@ -353,6 +386,7 @@ async function buildMetrics(instruments, opts = {}) {
     summary.reasons[reason] = (summary.reasons[reason] || 0) + 1;
   };
 
+  const retryList = [];
   for (const inst of instruments) {
     const symbol = inst.symbol;
     if (!symbol) continue;
@@ -424,6 +458,31 @@ async function buildMetrics(instruments, opts = {}) {
     summary.fetched++;
     if (priceStats?.data_points) summary.with_price_history++; else { summary.no_price_feed++; note(priceReason); }
     if (fundamentals) summary.with_fundamentals++; else { summary.fundamentals_unavailable++; note(fundReason); }
+    if (!priceStats && isFailedFetch({ price_stats: null, price_reason: priceReason })) retryList.push(inst);
+  }
+
+  // Second pass: whatever the rate limiter refused the first time gets another go
+  // after a cool-down, so a burst of 429s does not leave holes in the whole universe.
+  if (retryList.length) {
+    console.log(`   ↻ Retrying ${retryList.length} price fetch(es) that failed, after a short cool-down…`);
+    await sleep(SECOND_PASS_WAIT_MS);
+    for (const inst of retryList) {
+      const isMF = inst.price_source === 'mfapi';
+      const { closes, reason } = isMF ? await getMFNavHistory(inst.amfi_code) : await fetchPriceHistory(inst.yahoo_ticker);
+      await sleep(FETCH_GAP_MS);
+      const m = metrics[inst.symbol];
+      if (closes && m) {
+        const old = m.price_reason;
+        m.price_stats = computePriceStats(closes);
+        m.price_reason = null;
+        if (m.price_stats?.data_points) {
+          summary.with_price_history++; summary.no_price_feed--;
+          if (summary.reasons[old] > 1) summary.reasons[old]--; else delete summary.reasons[old];
+        }
+      } else if (m && reason) {
+        m.price_reason = reason;
+      }
+    }
   }
 
   // Peer context: relative strength needs the category's own median return,
@@ -487,6 +546,6 @@ module.exports = {
   // exported for tests and the dry-run harness
   computePriceStats, annualisedVolatility, sharpeRatio, maxDrawdown,
   rsi, sma, trailingReturn, dailyReturns,
-  fetchPriceHistory, fetchFundamentals,
+  fetchPriceHistory, fetchFundamentals, yahooGet, isFailedFetch,
   RISK_FREE_ANNUAL_PCT,
 };

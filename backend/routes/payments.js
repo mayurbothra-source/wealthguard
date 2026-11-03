@@ -5,7 +5,7 @@ const { requireSession, ownsParam, ownsBody } = require('../lib/session');
 const { limit } = require('../lib/rateLimit');
 const {
   PLANS, DISCOUNT_CODES, validateDiscountCode,
-  createSubscription, verifySubscriptionSignature, verifyWebhookSignature, isConfigured
+  createSubscription, cancelSubscription, verifySubscriptionSignature, verifyWebhookSignature, isConfigured
 } = require('../services/payment');
 
 const codeLimiter = limit({ windowMs: 10 * 60e3, max: 30 });
@@ -176,6 +176,25 @@ router.post('/verify', requireSession, ownsBody('client_id'), async (req, res) =
     subscription_plan: row.plan_key, subscription_status: 'active',
     subscription_expires_at: expires, payment_failed_at: null, grace_stage: 0,
   }).eq('id', client_id);
+
+  // Upgrade / plan switch: stop billing every OTHER paid plan this client still has,
+  // otherwise they would be charged for both each month. A failed cancel is logged
+  // loudly (support must fix it) but never blocks the customer's new plan.
+  const { data: older } = await supabaseAdmin.from('subscriptions')
+    .select('id, razorpay_subscription_id')
+    .eq('client_id', client_id).neq('id', row.id)
+    .not('razorpay_subscription_id', 'is', null)
+    .in('status', ['active', 'past_due']);
+  for (const o of older || []) {
+    const ok = await cancelSubscription(o.razorpay_subscription_id);
+    if (ok) {
+      await supabaseAdmin.from('subscriptions')
+        .update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', o.id);
+    } else {
+      console.error('ACTION NEEDED: could not cancel old subscription', o.razorpay_subscription_id,
+        'for client', client_id, '- cancel it in the Razorpay dashboard to avoid double billing.');
+    }
+  }
   res.json({ success: true, message: 'Payment verified. Subscription activated.' });
 });
 
@@ -189,8 +208,14 @@ const ms = (sec) => (sec ? new Date(sec * 1000).toISOString() : null);
 async function handleWebhook(req, res) {
   const raw = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
   if (!verifyWebhookSignature(raw, req.get('x-razorpay-signature'))) {
+    // Never log the secret or signature themselves, only facts that explain WHY.
+    console.warn('Webhook rejected: bad signature —',
+      'secret_configured=' + !!process.env.RAZORPAY_WEBHOOK_SECRET,
+      'signature_header=' + !!req.get('x-razorpay-signature'),
+      'body_bytes=' + raw.length);
     return res.status(400).json({ error: 'bad signature' });
   }
+  console.log('Webhook received:', (req.get('x-razorpay-event-id') || 'no-id'));
   if (!supabaseAdmin) return res.status(503).json({ error: 'unavailable' });
 
   let evt;
@@ -217,8 +242,19 @@ async function handleWebhook(req, res) {
 
     const periodEnd = ms(sub.current_end);
     const pay = evt.payload.payment && evt.payload.payment.entity;
+    // If the client has since moved to a newer paid plan, a late "cancelled"/"halted"
+    // etc. about the OLD plan must not downgrade them: update only that old row.
+    let newerActive = false;
+    if (type !== 'subscription.activated' && type !== 'subscription.charged') {
+      const { count } = await supabaseAdmin.from('subscriptions')
+        .select('id', { count: 'exact', head: true })
+        .eq('client_id', row.client_id).eq('status', 'active').neq('id', row.id)
+        .not('razorpay_subscription_id', 'is', null);
+      newerActive = (count || 0) > 0;
+    }
     const setBoth = async (subFields, clientFields) => {
       await supabaseAdmin.from('subscriptions').update(subFields).eq('id', row.id);
+      if (newerActive) return;
       await supabaseAdmin.from('clients').update(clientFields).eq('id', row.client_id);
     };
 

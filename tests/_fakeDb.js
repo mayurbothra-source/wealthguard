@@ -67,6 +67,8 @@ function makeDb() {
       delete() { q.op = 'delete'; return api; },
       eq(k, v) { q.filters.push(r => r[k] === v); return api; },
       is(k, v) { q.filters.push(r => (r[k] ?? null) === v); return api; },
+      neq(k, v) { q.filters.push(r => r[k] !== v); return api; },
+      not(k, op, v) { if (op === 'is') q.filters.push(r => (r[k] ?? null) !== v); return api; },
       in(k, vs) { q.filters.push(r => vs.includes(r[k])); return api; },
       gte(k, v) { q.filters.push(r => r[k] >= v); return api; },
       gt(k, v) { q.filters.push(r => r[k] > v); return api; },

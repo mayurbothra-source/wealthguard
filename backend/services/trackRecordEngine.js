@@ -25,6 +25,19 @@ const CHECKPOINTS = [
 const CHECKPOINT_TOLERANCE_DAYS = 14;
 
 /**
+ * Is a prediction old enough for this checkpoint to be measured?
+ *
+ * The window used to OPEN `tolerance` days BEFORE the checkpoint, so the 7-day
+ * "weekly" check fired on a signal's first day and stored a fake 0.0% result
+ * (entry price == current price). A checkpoint can only be measured once its
+ * day has actually arrived; the tolerance now applies only AFTER it, to catch up
+ * when the server was asleep (the free Render plan sleeps and misses cron jobs).
+ */
+function checkpointDue(daysOld, checkpointDays, lateToleranceDays = CHECKPOINT_TOLERANCE_DAYS) {
+  return daysOld >= checkpointDays - 0.5 && daysOld <= checkpointDays + lateToleranceDays;
+}
+
+/**
  * Fetches the current price for a prediction, using the SAME source routing
  * as the scoring engine.
  *
@@ -218,9 +231,7 @@ async function runTrackRecordCheckpoints() {
     const daysOld = (now - generatedAt) / (1000 * 60 * 60 * 24);
 
     for (const checkpoint of CHECKPOINTS) {
-      const windowStart = checkpoint.days - CHECKPOINT_TOLERANCE_DAYS;
-      const windowEnd   = checkpoint.days + CHECKPOINT_TOLERANCE_DAYS;
-      if (daysOld < windowStart || daysOld > windowEnd) continue;
+      if (!checkpointDue(daysOld, checkpoint.days)) continue;
 
       checked++;
 
@@ -334,4 +345,4 @@ async function runTrackRecordCheckpoints() {
 }
 
 module.exports = {
-  classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT, runTrackRecordCheckpoints };
+  checkpointDue, classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT, runTrackRecordCheckpoints };

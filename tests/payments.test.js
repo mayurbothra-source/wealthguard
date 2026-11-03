@@ -17,10 +17,12 @@ const Module = require('module'), orig = Module._load;
 const makeDb = require('./_fakeDb');
 const DB = makeDb();
 const created = [];
+const cancelled = [];
 Module._load = function (r, p, i) {
   if (r.includes('config/supabase')) return { supabaseAdmin: DB, supabase: DB };
   if (r === 'razorpay') return function Razorpay() {
-    return { subscriptions: { create: async (payload) => { created.push(payload); return { id: 'sub_' + created.length, status: 'created' }; } },
+    return { subscriptions: { create: async (payload) => { created.push(payload); return { id: 'sub_' + created.length, status: 'created' }; },
+                              cancel: async (id) => { cancelled.push(id); return { id, status: 'cancelled' }; } },
              orders: { create: async () => ({ id: 'order_1' }) } };
   };
   return orig(r, p, i);
@@ -112,6 +114,24 @@ srv.listen(0, async () => {
   ck('an unknown subscription id changes nothing and does not error', r.status === 200 && r.body.unknown_subscription === true);
   r = await hook(ev('subscription.completed'), 'evt_6');
   ck('completed/expired → read-only', cA().subscription_status === 'read_only');
+
+  console.log('\n── upgrading never bills two plans ──');
+  DB.seed('clients', [{ id: 'C', full_name: 'Carol', subscription_status: 'active', subscription_plan: 'starter' }]);
+  DB.seed('subscriptions', [{ id: 'old1', client_id: 'C', plan_key: 'starter', status: 'active', razorpay_subscription_id: 'sub_OLD',
+    subscription_type: 'razorpay', started_at: new Date(Date.now() - 864e5).toISOString() }]);
+  const tC = session.issueSession('C');
+  r = await call('POST', '/api/payments/subscribe', { client_id: 'C', plan_key: 'builder' }, tC);
+  ck('starting an upgrade does NOT cancel the old plan yet (checkout may be abandoned)', cancelled.length === 0 && DB.rows('subscriptions').find(x => x.id === 'old1').status === 'active');
+  const newId = r.body.razorpay_subscription_id;
+  await call('POST', '/api/payments/verify', { client_id: 'C', subscription_id: newId, payment_id: 'pay_9', signature: hmac('key_secret_for_tests', `pay_9|${newId}`) }, tC);
+  const cC = () => DB.rows('clients').find(c => c.id === 'C');
+  ck('after the new payment is verified, the old Razorpay plan is cancelled', cancelled.includes('sub_OLD'));
+  ck('…the old row is marked cancelled and the new one is active', DB.rows('subscriptions').find(x => x.id === 'old1').status === 'cancelled' && cC().subscription_plan === 'builder' && cC().subscription_status === 'active');
+  const lateEvt = { event: 'subscription.cancelled', payload: { subscription: { entity: { id: 'sub_OLD', current_end: end } } } };
+  r = await hook(lateEvt, 'evt_old_cancel');
+  ck("Razorpay's late 'cancelled' for the OLD plan does not downgrade the client", r.status === 200 && cC().subscription_plan === 'builder' && cC().subscription_status === 'active');
+  r = await call('POST', '/api/payments/webhook', null, null, { 'x-razorpay-signature': 'nope' }, '{"event":"x"}');
+  ck('a rejected webhook still answers 400 (and logs why)', r.status === 400);
 
   console.log('\n── partial discount codes ──');
   r = await call('POST', '/api/payments/subscribe', { client_id: 'B', plan_key: 'builder', discount_code: 'LAUNCH9SEP' }, tB);

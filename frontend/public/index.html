@@ -2363,8 +2363,11 @@ async function loadTrackRecord(){
     const cpBox = (cp, retField) => {
       if (!cp) return `<div class="cp pending"><div class="lbl">${retField}</div><div class="verdict">Pending</div></div>`;
       const ret = cp.return_1w_pct ?? cp.return_1m_pct ?? cp.return_3m_pct;
-      const cls = cp.direction_correct ? 'correct' : 'incorrect';
-      const icon = cp.direction_correct ? '✓ Correct' : '✗ Incorrect';
+      // A WATCH makes no directional claim: direction_correct is null, which is
+      // neither "correct" nor "incorrect". Show what the price did instead.
+      const noCall = cp.direction_correct == null;
+      const cls = noCall ? 'pending' : (cp.direction_correct ? 'correct' : 'incorrect');
+      const icon = noCall ? watchOutcomeLabel(cp.watch_outcome) : (cp.direction_correct ? '✓ Correct' : '✗ Incorrect');
       return `<div class="cp ${cls}"><div class="lbl">${retField}</div><div class="verdict">${icon}<br>${ret!=null?(ret>=0?'+':'')+ret.toFixed(1)+'%':''}</div></div>`;
     };
 
@@ -2391,11 +2394,15 @@ async function loadTrackRecord(){
     const shortTerm = outcomes.filter(o=>o.return_1w_pct!=null);
     const midTerm = outcomes.filter(o=>o.return_1m_pct!=null);
     const longTerm = outcomes.filter(o=>o.return_3m_pct!=null);
-    const pct = arr => arr.length ? Math.round(arr.filter(o=>o.direction_correct).length/arr.length*100)+'%' : '—';
+    // Accuracy counts DIRECTIONAL calls only (BUY/SELL). A WATCH claims no direction,
+    // so it is excluded from both the hit count and the total, never scored "wrong".
+    const directional = arr => arr.filter(o=>o.direction_correct != null);
+    const pct = arr => { const d = directional(arr); return d.length ? Math.round(d.filter(o=>o.direction_correct).length/d.length*100)+'%' : '—'; };
+    const cnt = (arr, empty) => { const d = directional(arr).length; return d ? `${d} directional call${d===1?'':'s'} measured` : (arr.length ? `${arr.length} watch call${arr.length===1?'':'s'} — no direction to score yet` : empty); };
     precRow.innerHTML = `
-      <div class="prec-card"><div class="lbl">Short-Term</div><div class="sub-lbl">(Weekly checkpoint)</div><div class="val">${pct(shortTerm)}</div><div class="count">${shortTerm.length} of ${shortTerm.length} measured</div></div>
-      <div class="prec-card"><div class="lbl">Mid-Term</div><div class="sub-lbl">(Monthly checkpoint)</div><div class="val">${pct(midTerm)}</div><div class="count">${midTerm.length} measured</div></div>
-      <div class="prec-card"><div class="lbl">Long-Term</div><div class="sub-lbl">(Quarterly checkpoint)</div><div class="val">${pct(longTerm)}</div><div class="count">${longTerm.length ? longTerm.length+' measured' : 'Building — check back soon'}</div></div>`;
+      <div class="prec-card"><div class="lbl">Short-Term</div><div class="sub-lbl">(Weekly checkpoint)</div><div class="val">${pct(shortTerm)}</div><div class="count">${cnt(shortTerm, 'Building — check back soon')}</div></div>
+      <div class="prec-card"><div class="lbl">Mid-Term</div><div class="sub-lbl">(Monthly checkpoint)</div><div class="val">${pct(midTerm)}</div><div class="count">${cnt(midTerm, 'Building — check back soon')}</div></div>
+      <div class="prec-card"><div class="lbl">Long-Term</div><div class="sub-lbl">(Quarterly checkpoint)</div><div class="val">${pct(longTerm)}</div><div class="count">${cnt(longTerm, 'Building — check back soon')}</div></div>`;
   } catch(e){ console.warn('Track record fetch failed', e.message); }
 }
 
@@ -2422,12 +2429,18 @@ const FD_RATES = [
 ];
 
 
+// What happened after a WATCH call (no right/wrong, just the outcome).
+function watchOutcomeLabel(o){
+  return o === 'held' ? 'Stayed steady' : o === 'rose_beyond_band' ? 'Rose' : o === 'fell_beyond_band' ? 'Fell' : 'No call';
+}
+
 function checkpointMiniHTML(checkpoints){
   const box = (cp, lbl) => {
     if (!cp) return `<div class="cpm pending"><div class="lbl">${lbl}</div><div class="v">Pending</div></div>`;
     const ret = cp.return_1w_pct ?? cp.return_1m_pct ?? cp.return_3m_pct;
-    const cls = cp.direction_correct ? 'correct' : 'incorrect';
-    const icon = cp.direction_correct ? '✓ Right' : '✗ Missed';
+    const noCall = cp.direction_correct == null;   // WATCH: no direction claimed
+    const cls = noCall ? 'pending' : (cp.direction_correct ? 'correct' : 'incorrect');
+    const icon = noCall ? watchOutcomeLabel(cp.watch_outcome) : (cp.direction_correct ? '✓ Right' : '✗ Missed');
     return `<div class="cpm ${cls}"><div class="lbl">${lbl}</div><div class="v">${icon}${ret!=null?'<br>'+(ret>=0?'+':'')+ret.toFixed(1)+'%':''}</div></div>`;
   };
   return `<div class="checkpoint-mini">${box(checkpoints.weekly,'Wk')}${box(checkpoints.monthly,'Mo')}${box(checkpoints.quarterly,'Qtr')}</div>`;

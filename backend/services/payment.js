@@ -175,6 +175,22 @@ async function createSubscription(planKey, clientId, discountCode) {
   return { type: 'razorpay', subscription, plan: planKey, plan_name: plan.name, key_id: process.env.RAZORPAY_KEY_ID };
 }
 
+// Cancel a subscription at Razorpay immediately (used when a client upgrades or
+// switches plan, so they are never billed for two plans at once). Returns true on
+// success. An already-cancelled/completed subscription counts as success.
+async function cancelSubscription(subscriptionId) {
+  if (!razorpay || !subscriptionId) return false;
+  try {
+    await razorpay.subscriptions.cancel(subscriptionId, false);
+    return true;
+  } catch (e) {
+    const msg = (e && e.error && e.error.description) || (e && e.message) || '';
+    if (/already|cancelled|completed|not.*cancel/i.test(msg)) return true;
+    console.error('Razorpay cancel failed for', subscriptionId, '-', msg);
+    return false;
+  }
+}
+
 function offerIdFor(code) {
   return process.env['RAZORPAY_OFFER_' + String(code).toUpperCase().replace(/[^A-Z0-9]/g, '')] || null;
 }
@@ -218,6 +234,7 @@ module.exports = {
   validateDiscountCode,
   createOrder,
   createSubscription,
+  cancelSubscription,
   verifyPaymentSignature,
   verifySubscriptionSignature,
   verifyWebhookSignature,

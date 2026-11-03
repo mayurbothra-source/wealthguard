@@ -99,9 +99,28 @@ async function catchUpMissedJobs() {
     const { data: last } = await supabaseAdmin.from('instrument_scores')
       .select('scored_at').order('scored_at', { ascending: false }).limit(1);
     const lastAt = last && last[0] && new Date(last[0].scored_at).getTime();
-    if (!lastAt || Date.now() - lastAt > 8 * 86400e3) {
+    let rerunScoring = !lastAt || Date.now() - lastAt > 8 * 86400e3;
+    // Self-heal a DEGRADED run: if most instruments were scored without any price
+    // history (Yahoo rate-limiting), every score is a neutral guess. Redo it, but
+    // never more than once a day so a persistent outage cannot loop.
+    if (!rerunScoring && Date.now() - lastAt > 20 * 3600e3) {
+      const { data: rows } = await supabaseAdmin.from('instrument_scores')
+        .select('price_data_points').eq('scored_at', last[0].scored_at);
+      if (rows && rows.length >= 20) {
+        const withHistory = rows.filter(r => (r.price_data_points || 0) > 0).length;
+        if (withHistory / rows.length < 0.5) {
+          console.log(`   ↺ Last scoring run had price history for only ${withHistory}/${rows.length} instruments — redoing it`);
+          rerunScoring = true;
+        }
+      }
+    }
+    if (rerunScoring) {
       done.push('instrument scoring'); await safeRun('instrumentEngine(catch-up)', runInstrumentScoringEngine);
     }
+    // Track-record checkpoints are only valid inside a window after each checkpoint day;
+    // a server asleep at 4:30 PM misses it and the checkpoint is lost for good. The job is
+    // idempotent (already-logged checkpoints are skipped), so run it whenever we wake.
+    done.push('track record'); await safeRun('trackRecordEngine(catch-up)', runTrackRecordCheckpoints);
     done.push('subscription lifecycle'); await safeRun('subscriptionEngine(catch-up)', runSubscriptionEngine);
   } catch (e) {
     console.error('Catch-up failed:', e.message);
