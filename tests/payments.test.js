@@ -121,7 +121,7 @@ srv.listen(0, async () => {
   ck('a % code WITH an offer id is passed to Razorpay', r.status === 200 && created[created.length - 1].offer_id === 'offer_early');
 
   console.log('\n── plan limits are enforced by the server ──');
-  const mk = (n) => Array.from({ length: n }, (_, k) => ({ id: 's' + k, client_id: null, risk_gate_passed: true, is_active: true, confidence_score: 0.8, action: 'BUY', generated_at: new Date(2026, 0, 1 + k).toISOString() }));
+  const mk = (n) => Array.from({ length: n }, (_, k) => ({ id: 's' + k, client_id: null, risk_gate_passed: true, is_active: true, confidence_score: 0.8, action: 'BUY', generated_at: new Date(Date.now() - k * 3600e3).toISOString() }));
   DB.seed('recommendations', mk(30));
   const plan = (id, p, st = 'active', extra = {}) => { Object.assign(DB.rows('clients').find(c => c.id === id), { subscription_plan: p, subscription_status: st, subscription_expires_at: new Date(Date.now() + 864e5).toISOString(), ...extra }); };
   plan('A', 'starter'); r = await call('GET', '/api/signals/A?limit=100', null, tA);

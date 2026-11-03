@@ -68,7 +68,7 @@ async function buildMarketSnapshot(snapshot, aiEvents) {
     const dir = (nifty.change_pct ?? 0) >= 0 ? 'up' : 'down';
     facts.push(`Nifty 50 is ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${nifty.price.toLocaleString('en-IN')}`);
   } else {
-    facts.push('Live index data was unavailable when this brief was prepared');
+    facts.push('The Nifty 50 level is not available right now');
   }
   if (vix != null) {
     facts.push(`India VIX is at ${Number(vix).toFixed(1)} (${regime?.regime || 'normal'})`);
@@ -233,6 +233,9 @@ async function buildIdeas(riskScore, heldSymbols) {
       .select('instrument_name, action, confidence_score, signal_tier, rationale_short, entry_price_inr, target_price_inr, stop_loss_inr, horizon_days')
       .in('instrument_name', Object.keys(meta))
       .is('client_id', null).eq('is_active', true).eq('risk_gate_passed', true)
+      // Only FRESH signals. Without this, a signal from an old scoring run stayed "active"
+      // forever and kept being sold as a new idea (three month-old bond BUYs were).
+      .gte('generated_at', new Date(Date.now() - 10 * 86400000).toISOString())
       .order('confidence_score', { ascending: false }).limit(60);
 
     const held = new Set(heldSymbols);

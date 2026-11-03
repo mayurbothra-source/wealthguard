@@ -40,6 +40,7 @@ router.get('/:clientId', requireSession, ownsParam('clientId'), async (req, res)
       .or(`client_id.eq.${clientId},client_id.is.null`)
       .eq('risk_gate_passed', true)
       .eq('is_active', true)
+      .gte('generated_at', new Date(Date.now() - 10 * 86400000).toISOString())   // fresh signals only
       .gte('confidence_score', 0.60)
       .order('generated_at', { ascending: false })
       .limit(Math.min(limit, ent.signalLimit));
