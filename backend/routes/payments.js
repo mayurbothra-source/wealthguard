@@ -8,6 +8,7 @@ const {
   createSubscription, cancelSubscription, verifySubscriptionSignature, verifyWebhookSignature, isConfigured
 } = require('../services/payment');
 
+const { paidPlansOpen } = require('../lib/freePeriod');
 const codeLimiter = limit({ windowMs: 10 * 60e3, max: 30 });
 
 // GET /api/payments/plans — list all plans
@@ -79,6 +80,16 @@ router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res
       }
     }
 
+    // Everything is free until the paid-plans date. Block real charges before then
+    // (free 100% codes are unaffected). Test Razorpay by setting PAID_PLANS_OPEN_FROM.
+    const wantsFree = !!(discountInfo && discountInfo.valid && discountInfo.discount === 100);
+    if (!wantsFree && !paidPlansOpen()) {
+      return res.status(403).json({
+        paid_not_open: true,
+        error: 'WealthGuard is free for everyone until 31 December 2026, so there is nothing to pay yet. You already have full access.',
+      });
+    }
+
     // Free activation (100% codes) first redeems the code, then activates.
     const isFree = !!(discountInfo && discountInfo.valid && discountInfo.discount === 100);
     if (discount_code && discountInfo?.valid) {
@@ -106,8 +117,15 @@ router.post('/subscribe', requireSession, ownsBody('client_id'), async (req, res
       throw e;
     }
 
-    const expiresAt = subscription.expires_at ||
+    let expiresAt = subscription.expires_at ||
       new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    if (subscription.type === 'free') {
+      // A code must never cut short a longer free period the client already has.
+      const { data: cur } = await supabaseAdmin.from('clients')
+        .select('subscription_expires_at').eq('id', client_id).maybeSingle();
+      const have = cur && cur.subscription_expires_at;
+      if (have && new Date(have) > new Date(expiresAt)) expiresAt = new Date(have).toISOString();
+    }
     const active = subscription.type === 'free';
     const rzpSubId = subscription.subscription && subscription.subscription.id;
 

@@ -5,6 +5,7 @@
  */
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-secret-test-secret-test-secret-123';
+process.env.PAID_PLANS_OPEN_FROM = '2020-01-01';
 process.env.RAZORPAY_KEY_ID = 'rzp_test_KEYID';
 process.env.RAZORPAY_KEY_SECRET = 'key_secret_for_tests';
 process.env.RAZORPAY_WEBHOOK_SECRET = 'webhook_secret_for_tests';
@@ -160,6 +161,26 @@ srv.listen(0, async () => {
   ck('cancelled but paid up → still full', e({ subscription_status: 'cancelled', subscription_plan: 'builder', subscription_expires_at: fut }) === 'full');
   ck('payment failed, early grace → full; late grace → read-only', e({ subscription_status: 'payment_failed', grace_stage: 1 }) === 'full' && e({ subscription_status: 'payment_failed', grace_stage: 3 }) === 'read_only');
   ck('trial without a plan gets the Builder allowance', entitlementFromRow({ subscription_status: 'trial' }).signalLimit === 15);
+
+  console.log('\n── free period rule ──');
+  const fp = require('../backend/lib/freePeriod');
+  const iso = (d) => fp.freeExpiryFor(d).toISOString();
+  ck('joining 3 Nov → free to 31 Dec 2026 end of day IST', iso('2026-11-03T10:00:00Z') === '2026-12-31T18:29:59.000Z');
+  ck('joining 29 Dec → still free to 31 Dec', iso('2026-12-29T10:00:00Z') === '2026-12-31T18:29:59.000Z');
+  ck('joining 30 Dec → 30 days from joining', iso('2026-12-30T10:00:00+05:30') === new Date(new Date('2026-12-30T10:00:00+05:30').getTime() + 30 * 864e5).toISOString());
+  ck('joining 15 Jan 2027 → 30 days', iso('2027-01-15T00:00:00Z') === '2027-02-14T00:00:00.000Z');
+  process.env.PAID_PLANS_OPEN_FROM = '2099-01-01';
+  ck('paid plans closed before the open date', fp.paidPlansOpen(new Date()) === false);
+  DB.rows('clients').find(c => c.id === 'B').subscription_expires_at = '2026-12-31T18:29:59.000Z';
+  r = await call('POST', '/api/payments/subscribe', { client_id: 'B', plan_key: 'starter' }, tB);
+  ck('a paid checkout before the open date is refused (nothing charged)', r.status === 403 && r.body.paid_not_open === true);
+  const n = created.length;
+  ck('…and no Razorpay subscription was created', created.length === n);
+  r = await call('POST', '/api/payments/subscribe', { client_id: 'B', plan_key: 'starter', discount_code: 'WGDEMO' }, tB);
+  ck('a 100% code still works and never shortens a longer free period',
+     r.status === 200 && new Date(DB.rows('clients').find(c => c.id === 'B').subscription_expires_at) >= new Date('2026-12-31T18:29:59.000Z'));
+  ck("entitlement: status 'trial' with plan 'none' gets the Builder allowance", entitlementFromRow({ subscription_status: 'trial', subscription_plan: 'none' }).signalLimit === 15);
+  process.env.PAID_PLANS_OPEN_FROM = '2020-01-01';
 
   srv.close();
 });

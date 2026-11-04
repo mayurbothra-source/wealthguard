@@ -26,7 +26,7 @@ const emailEngine       = require('./emailEngine');
 const { reportRun }     = require('./healthEngine');
 
 // Frozen policy dates
-const TRIAL_END_DATE      = new Date('2026-12-31T23:59:59Z');
+const TRIAL_END_DATE      = new Date('2026-12-31T18:29:59Z');
 const POST_TRIAL_FREE_DAYS = 30;   // signups after trial end get 1 month free
 
 // Grace period stages (days since payment failure)
@@ -49,9 +49,7 @@ function daysSince(dateStr) {
  * Joined after              → 30 days from their join date.
  */
 function calculateTrialExpiry(createdAt) {
-  const joined = new Date(createdAt);
-  if (joined < TRIAL_END_DATE) return TRIAL_END_DATE.toISOString();
-  return new Date(joined.getTime() + POST_TRIAL_FREE_DAYS * 86400000).toISOString();
+  return require('../lib/freePeriod').freeExpiryFor(createdAt || new Date()).toISOString();
 }
 
 async function processTrialExpiries() {

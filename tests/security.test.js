@@ -3,6 +3,7 @@
  * that was found in the code review, and asserts it no longer works.
  */
 process.env.NODE_ENV = 'test';
+process.env.PAID_PLANS_OPEN_FROM = '2020-01-01';
 process.env.JWT_SECRET = 'test-secret-test-secret-test-secret-123';
 process.env.ADMIN_TRIGGER_KEY = 'adminkey-adminkey-adminkey';
 delete process.env.RAZORPAY_KEY_SECRET;
@@ -146,7 +147,7 @@ function call(method, path, body, token, headers = {}) {
   ck('change-pin needs a session', r.status === 401);
 
   console.log('\n── registration signs the new client in ──');
-  r = await call('POST', '/api/auth/register', { phone_wa: '9000000009', full_name: 'New', age: 30, stated_risk_score: 5 });
+  r = await call('POST', '/api/auth/register', { phone_wa: '9000000009', full_name: 'New', email: 'new@example.com', age: 30, stated_risk_score: 5 });
   ck('returns a session token', !!r.body.token && session.verify(r.body.token)?.sub === r.body.client_id);
   ck('profile answers mark onboarding_complete (brief engine depends on it)', DB.rows('clients').find(c => c.id === r.body.client_id).onboarding_complete === true);
   r = await call('POST', '/api/auth/set-pin', { pin: '135790' }, r.body.token);
@@ -157,7 +158,7 @@ function call(method, path, body, token, headers = {}) {
   ck('a payment is NOT verified when no Razorpay secret is configured', r.status === 400);
   r = await call('POST', '/api/payments/subscribe', { client_id: 'A', plan_key: 'builder' }, tA);
   ck('a paid plan cannot be "bought" without a gateway (503)', r.status === 503);
-  ck('…no subscription row was created', DB.rows('subscriptions').length === 0);
+  ck('…no subscription row was created', DB.rows('subscriptions').filter(x => x.client_id === 'A').length === 0);
   ck('…and the client was not upgraded', DB.rows('clients').find(c => c.id === 'A').subscription_status === 'none');
   r = await call('POST', '/api/payments/subscribe', { client_id: 'B', plan_key: 'builder' }, tA);
   ck("Alice cannot start a subscription for Bob", r.status === 403);
@@ -251,7 +252,7 @@ function call(method, path, body, token, headers = {}) {
   await require('../backend/services/morningBriefEngine').generateAndSendMorningBrief();
   const briefed = new Set(DB.rows('morning_briefs').map(b => b.client_id));
   ck('the 07:30 engine now stores a brief for EVERY client (not only onboarding_complete ones)', ['A', 'B', 'N'].every(id => briefed.has(id)));
-  ck('…and emails only active subscribers', sent.length === 1 && sent[0] === 'A');
+  ck('…and emails only entitled subscribers', sent.includes('A') && !sent.includes('B'), JSON.stringify(sent));
 
   srv.close();
 })();

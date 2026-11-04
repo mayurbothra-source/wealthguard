@@ -19,7 +19,7 @@ function entitlementFromRow(c, now = Date.now()) {
   if (!c) return { access: 'none', plan: null, signalLimit: 0 };
   const status = c.subscription_status || 'none';
   const exp = c.subscription_expires_at ? new Date(c.subscription_expires_at).getTime() : null;
-  let plan = c.subscription_plan || (status === 'trial' ? TRIAL_PLAN : null);
+  let plan = (c.subscription_plan && c.subscription_plan !== 'none') ? c.subscription_plan : (status === 'trial' ? TRIAL_PLAN : null);
   let access = 'none';
 
   if (status === 'active' || status === 'trial' || status === 'cancelled') {

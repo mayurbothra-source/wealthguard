@@ -12,6 +12,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const router = express.Router();
+const freePeriod = require('../lib/freePeriod');
 const { supabaseAdmin } = require('../../config/supabase');
 const session = require('../lib/session');
 const { limit } = require('../lib/rateLimit');
@@ -257,6 +258,14 @@ router.post('/register', registerLimiter, async (req, res) => {
     return res.status(400).json({ error: 'phone_wa and full_name are required' });
   }
 
+  // Free access requires BOTH a working email and a mobile number (frozen rule).
+  if (!body.email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(body.email).trim())) {
+    return res.status(400).json({ error: 'A valid email address is required.' });
+  }
+  if (String(phone_wa).replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ error: 'A valid 10-digit mobile number is required.' });
+  }
+
   const existing = await getClientByPhone(phone_wa);
   if (existing) {
     return res.status(409).json({ error: 'An account with this phone number already exists.' });
@@ -287,6 +296,10 @@ router.post('/register', registerLimiter, async (req, res) => {
     phone_wa: String(phone_wa).trim(),
     full_name: String(full_name).trim(),
     pin_set: false,
+    // Launch free period: every new account gets full access (see lib/freePeriod.js).
+    subscription_status: 'trial',
+    subscription_plan: freePeriod.TRIAL_PLAN,
+    subscription_expires_at: freePeriod.freeExpiryFor().toISOString(),
     // The onboarding questionnaire IS the registration payload, so a client who
     // arrives with profile answers has completed it. Nothing else in the code
     // ever set this to true, which is why the morning-brief engine (which only
@@ -347,6 +360,17 @@ router.post('/register', registerLimiter, async (req, res) => {
       const { error: e } = await supabaseAdmin.from('client_goals').insert(rows);
       if (e) { warnings.push(`goals: ${e.message}`); console.warn(`   ⚠ goals insert: ${e.message}`); }
     }
+  }
+
+  // Mirror the free period in `subscriptions` so /payments/status reports it.
+  {
+    const exp = clientRow.subscription_expires_at;
+    const { error: e } = await supabaseAdmin.from('subscriptions').insert({
+      client_id: clientId, plan_key: freePeriod.TRIAL_PLAN, plan_name: 'Builder (launch free period)',
+      status: 'active', subscription_type: 'free', discount_pct: 100, amount_paise: 0,
+      started_at: new Date().toISOString(), expires_at: exp, free_months_remaining: 0,
+    });
+    if (e) { warnings.push(`free period record: ${e.message}`); console.warn(`   ⚠ ${e.message}`); }
   }
 
   console.log(`   ✓ Registered ${clientRow.full_name} (${clientId})` +

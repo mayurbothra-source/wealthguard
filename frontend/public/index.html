@@ -1041,7 +1041,7 @@ table.data-table{width:100%;border-collapse:collapse;}
           <div class="choice trial" id="trial-choice">
             <span class="badge-top">LIMITED TIME</span>
             <div class="ic">🎁</div>
-            <h3>Free 30-Day Trial</h3>
+            <h3>Free until 31 Dec 2026</h3>
             <p>Full platform access. No card required.</p>
             <div class="deadline">⏳ Available until 31 Dec 2026</div>
             <button class="btn btn-primary btn-sm" style="width:100%;" onclick="startFreeTrial()">Start Free Trial →</button>
@@ -1058,7 +1058,7 @@ table.data-table{width:100%;border-collapse:collapse;}
             <button class="btn btn-outline btn-sm" style="width:100%;margin-top:14px;" onclick="goToPricing()">View All Plans →</button>
           </div>
         </div>
-        <div class="fine">Trial converts to a paid subscription automatically after 30 days.<br>You'll always be asked to choose a plan before continuing.</div>
+        <div class="fine">No card needed. Nothing is charged automatically — you choose a plan yourself when paid plans start in 2027.</div>
         <div id="ob-reg-err" style="display:none;background:var(--danger-tint);color:var(--danger);border-radius:5px;padding:11px 13px;font-size:12.5px;margin-top:14px;line-height:1.55;"></div>
         <div class="ob-nav"><button class="btn btn-outline" onclick="obBack(5)">← Edit</button><button class="btn btn-primary" onclick="obNext(5)">Continue →</button></div>
       </div>
@@ -1093,7 +1093,7 @@ table.data-table{width:100%;border-collapse:collapse;}
     <button class="btn btn-ghost btn-sm" onclick="goTo('landing')" style="margin-bottom:20px;">← Back to home</button>
     <div class="pricing-head">
       <h1>Choose your plan</h1>
-      <p>Start free for 30 days. No card required. Cancel anytime.</p>
+      <p>Everything is free until 31 December 2026. No card required.</p>
       <div class="launch-banner">
         <div class="tag">🚀 LAUNCHING 9 SEPTEMBER 2026</div>
         <div class="msg">Use code <code>LAUNCH9SEP</code> for 50% off your first 3 months</div>
@@ -1963,16 +1963,12 @@ function prepStep5(){
    TRIAL / SUBSCRIPTION LOGIC
 ============================================================ */
 async function startFreeTrial(){
-  if (new Date() >= TRIAL_CUTOFF){ toast('⚠','Free trial is no longer available. Please choose a paid plan.'); goToPricing(); return; }
-  const clientId = await ensureClientRegistered();
-  const trialRes = await API.post('/payments/subscribe', { client_id: clientId, plan_key: 'builder', discount_code: 'WGDEMO' });
-  // 409 "already used" means this account has had its trial: carry on with what
-  // the server says they have, rather than pretending to start a new one.
-  if (trialRes && trialRes.error && trialRes.status !== 409){ toast('⚠', trialRes.error); return; }
-  const now = Date.now();
-  localStorage.setItem('wg_trial_start', String(now));
-  state.isTrial = true; state.trialStart = now; state.planTier = 'builder';
-  toast('🎉','Free trial activated! Full access for 30 days.');
+  // The free period is granted by the server when the account is created
+  // (everyone free until 31 Dec 2026; 30 days if joining from 30 Dec).
+  try { await ensureClientRegistered(); }
+  catch(e){ toast('⚠', e.message || 'Could not create your account.'); return; }
+  state.isTrial = true; state.planTier = 'builder';
+  toast('🎉','Welcome! You have full access, free, until 31 December 2026.');
   setTimeout(enterApp, 1000);
 }
 function checkTrialStatus(){

@@ -11,6 +11,7 @@ const ck=require('./_check');
 
 // Real column sets, from scripts/schema.sql + migration 003
 const COLS = {
+  subscriptions: new Set(['id','client_id','plan_key','plan_name','status','subscription_type','razorpay_subscription_id','razorpay_payment_id','discount_code','discount_pct','amount_paise','started_at','expires_at','free_months_remaining','cancelled_at','created_at']),
   clients: new Set(['id','full_name','pan_hash','email','phone_wa','tax_bracket','kyc_status',
     'is_active','onboarded_at','updated_at','pin_hash','pin_set','pin_attempts','pin_locked_until',
     'last_login_at','is_admin','onboarding_complete','subscription_plan','subscription_status',
@@ -138,6 +139,14 @@ srv.listen(0, async () => {
   r = await call('POST','/api/auth/register',{...PAYLOAD});
   ck('same phone → 409', r.status===409);
   ck('message is readable', /phone number already exists/i.test(r.body?.error||''));
+  r = await call('POST','/api/auth/register',{...PAYLOAD, phone_wa:'+919830000001'});
+  ck('new account gets the launch free period (trial, builder, expiry set)',
+     ROWS.clients[0].subscription_status==='trial' && ROWS.clients[0].subscription_plan==='builder' && !!ROWS.clients[0].subscription_expires_at);
+  ck('free period is recorded in subscriptions', (ROWS.subscriptions||[]).length===1 && ROWS.subscriptions[0].status==='active');
+  r = await call('POST','/api/auth/register',{...PAYLOAD, phone_wa:'+919830000555', email:''});
+  ck('missing email → 400 (free access needs email)', r.status===400);
+  r = await call('POST','/api/auth/register',{...PAYLOAD, phone_wa:'12345', email:'x@y.com'});
+  ck('short phone → 400', r.status===400);
   r = await call('POST','/api/auth/register',{...PAYLOAD, phone_wa:'+919830000001'});
   ck('same email → 409 (email is UNIQUE)', r.status===409);
   ck('names the email, not a constraint', /email address already exists/i.test(r.body?.error||''));
