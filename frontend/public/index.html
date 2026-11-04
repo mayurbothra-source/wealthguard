@@ -1753,6 +1753,7 @@ async function obSetPin(){
   if (result && result.success){
     if (result.token) API.setSession(tokenSub(result.token), result.token);
     msg.textContent='PIN set! Entering your dashboard...'; msg.className='login-msg ok';
+    state.needsPin = false;
     setTimeout(enterApp, 600);
   } else {
     msg.textContent=(result && result.error)||'Could not save PIN. Try again.'; msg.className='login-msg bad';
@@ -1962,14 +1963,20 @@ function prepStep5(){
 /* ============================================================
    TRIAL / SUBSCRIPTION LOGIC
 ============================================================ */
+/* After a plan is chosen (free trial, code, or payment): a brand-new account MUST set a PIN
+ * first, otherwise it cannot log in again. Only skip to the app if a PIN is already set. */
+function proceedAfterPlan(delay){
+  if (state.needsPin){ goTo('onboarding'); setStep(6); return; }
+  setTimeout(enterApp, delay || 600);
+}
 async function startFreeTrial(){
   // The free period is granted by the server when the account is created
   // (everyone free until 31 Dec 2026; 30 days if joining from 30 Dec).
   try { await ensureClientRegistered(); }
   catch(e){ toast('⚠', e.message || 'Could not create your account.'); return; }
   state.isTrial = true; state.planTier = 'builder';
-  toast('🎉','Welcome! You have full access, free, until 31 December 2026.');
-  setTimeout(enterApp, 1000);
+  toast('🎉','Welcome! You have full access, free, until 31 December 2026. Last step: set your PIN.');
+  proceedAfterPlan(1000);
 }
 function checkTrialStatus(){
   const start = localStorage.getItem('wg_trial_start');
@@ -2041,7 +2048,7 @@ async function activateFree(){
   }
   state.planTier = state.selectedPlan;
   toast('🎉', `${PLAN_NAME[state.selectedPlan]} plan activated. Welcome to WealthGuard.`);
-  setTimeout(enterApp, 1200);
+  proceedAfterPlan(1200);
 }
 async function initiatePayment(){
   const clientId = await ensureClientRegistered();
@@ -2071,7 +2078,7 @@ async function initiatePayment(){
       }
       state.planTier = state.selectedPlan;
       toast('🎉','Payment successful. Welcome to WealthGuard.');
-      setTimeout(enterApp, 1200);
+      proceedAfterPlan(1200);
     },
     prefill:{ name:state.obData.name||'', contact:state.obData.phone||'', email:state.obData.email||'' }, theme:{ color:'#1B5E3F' },
   });
@@ -2117,6 +2124,7 @@ async function ensureClientRegistered(){
     throw new Error(why);
   }
   API.setSession(id, result.token || result.setup_token);
+  state.needsPin = true;   // fresh account: it has no PIN yet
   // The /auth/register route may not persist `email` yet — if the backend
   // ignores unknown fields it would be dropped silently, which is exactly
   // the failure that left every brief undeliverable. Write it directly as
