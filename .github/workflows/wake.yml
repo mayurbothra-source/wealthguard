@@ -1,7 +1,7 @@
 # Wakes the free-plan Render server on a schedule so the daily jobs actually run.
-# Needs two GitHub repository secrets (Settings > Secrets and variables > Actions):
-#   BACKEND_URL        e.g. https://wealthguard-backend.onrender.com   (no trailing slash)
+# Needs one GitHub repository secret (Settings > Secrets and variables > Actions):
 #   ADMIN_TRIGGER_KEY  the same value as ADMIN_TRIGGER_KEY in Render
+# The backend URL is public, so it is set below (a BACKEND_URL variable can override it).
 name: wake-server
 on:
   workflow_dispatch: {}
@@ -18,10 +18,15 @@ jobs:
     steps:
       - name: Wake the server and run whatever is due
         env:
-          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          BACKEND_URL: ${{ vars.BACKEND_URL || 'https://wealthguard-backend.onrender.com' }}
           ADMIN_TRIGGER_KEY: ${{ secrets.ADMIN_TRIGGER_KEY }}
         run: |
-          if [ -z "$BACKEND_URL" ] || [ -z "$ADMIN_TRIGGER_KEY" ]; then echo "Missing BACKEND_URL / ADMIN_TRIGGER_KEY secrets"; exit 1; fi
+          # Strip stray spaces/newlines from pasted values and any trailing slash.
+          BACKEND_URL="$(printf '%s' "$BACKEND_URL" | tr -d '[:space:]')"; BACKEND_URL="${BACKEND_URL%/}"
+          ADMIN_TRIGGER_KEY="$(printf '%s' "$ADMIN_TRIGGER_KEY" | tr -d '[:space:]')"
+          case "$BACKEND_URL" in https://*) ;; *) BACKEND_URL="https://$BACKEND_URL" ;; esac
+          if [ -z "$ADMIN_TRIGGER_KEY" ]; then echo "Missing ADMIN_TRIGGER_KEY secret"; exit 1; fi
+          echo "Calling $BACKEND_URL/api/admin/wake"
           # A cold start can take 1-2 minutes, so allow long waits and retry.
           curl -sS --fail-with-body --max-time 180 --retry 4 --retry-delay 20 --retry-all-errors \
             -H "x-admin-key: $ADMIN_TRIGGER_KEY" "$BACKEND_URL/api/admin/wake"
