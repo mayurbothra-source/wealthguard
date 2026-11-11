@@ -350,7 +350,7 @@ router.post('/register', registerLimiter, async (req, res) => {
         target_date:       g.target_date
           ? (/^\d{4}$/.test(String(g.target_date).trim())
               ? `${String(g.target_date).trim()}-03-31`
-              : g.target_date)
+              : (/^\d{4}-\d{2}-\d{2}$/.test(String(g.target_date).trim()) ? String(g.target_date).trim() : null))   // "Ongoing" etc. -> no date
           : null,
         bucket_number:     i + 1,
         priority_rank:     i + 1,

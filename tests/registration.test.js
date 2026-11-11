@@ -102,7 +102,8 @@ const PAYLOAD = {
   stated_risk_score:6, panic_history:false, money_relationship:'security',
   sleep_test_threshold_pct:15,
   goals:[{goal_name:'Retirement',target_amount_inr:50000000,target_date:'2045'},
-         {goal_name:"Child's education",target_amount_inr:8000000,target_date:'2033'}],
+         {goal_name:"Child's education",target_amount_inr:8000000,target_date:'2033'},
+         {goal_name:'Emergency Fund',target_amount_inr:300000,target_date:'Ongoing'}],
   tax_bracket:30,
 };
 
@@ -130,7 +131,8 @@ srv.listen(0, async () => {
   ck('behavioural has risk + sleep test',
      ROWS.client_behavioural_profiles?.[0].stated_risk_score===6 &&
      ROWS.client_behavioural_profiles?.[0].sleep_test_threshold_pct===15);
-  ck('both goals created', (ROWS.client_goals||[]).length===2);
+  ck('all three goals created', (ROWS.client_goals||[]).length===3);
+  ck('goal date "Ongoing" is stored as no date, not a crash', ROWS.client_goals?.[2].target_date===null);
   ck('goal year "2045" became a DATE', ROWS.client_goals?.[0].target_date==='2045-03-31');
   ck('goals linked to the client', ROWS.client_goals?.[0].client_id===ROWS.clients[0].id);
   ck('goals numbered', ROWS.client_goals?.[0].bucket_number===1 && ROWS.client_goals?.[1].bucket_number===2);
