@@ -74,6 +74,25 @@ async function safeRun(label, fn) {
   }
 }
 
+/** Only one morning-brief run at a time (the 7:30 cron and a wake-up catch-up can overlap). */
+let _briefRunning = false;
+async function runBriefOnce(label) {
+  if (_briefRunning) { console.log(`   ↺ ${label}: a brief run is already in progress — skipping`); return; }
+  _briefRunning = true;
+  try { await safeRun(label, generateAndSendMorningBrief); } finally { _briefRunning = false; }
+}
+
+/** Did this engine report a run since midnight IST (today)? Used so wake-ups never repeat a daily job. */
+async function ranTodayIST(engineName, sinceMinutesAgo) {
+  const { supabaseAdmin } = require('../../config/supabase');
+  const ist = new Date(Date.now() + 5.5 * 3600e3);
+  const midnightUtc = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()) - 5.5 * 3600e3);
+  const since = sinceMinutesAgo ? new Date(Date.now() - sinceMinutesAgo * 60e3) : midnightUtc;
+  const { count } = await supabaseAdmin.from('system_health_log')
+    .select('id', { count: 'exact', head: true }).eq('engine_name', engineName).gte('run_at', since.toISOString());
+  return !!count;
+}
+
 /**
  * Render's free plan puts the server to sleep after ~15 idle minutes, and a sleeping
  * server runs no cron jobs. So on every start-up we check what we MISSED and run it:
@@ -91,10 +110,10 @@ async function catchUpMissedJobs() {
     const today = ist.toISOString().slice(0, 10);
     const dow = ist.getUTCDay();                       // 0 Sun .. 6 Sat (IST)
     const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-    if (dow >= 1 && dow <= 5 && minutes >= 7 * 60 + 35) {
+    if (dow >= 1 && dow <= 5 && minutes >= 7 * 60 + 30) {
       const { count } = await supabaseAdmin.from('morning_briefs')
         .select('id', { count: 'exact', head: true }).eq('brief_date', today);
-      if (!count) { done.push('morning brief'); await safeRun('morningBriefEngine(catch-up)', generateAndSendMorningBrief); }
+      if (!count) { done.push('morning brief'); await runBriefOnce('morningBriefEngine(catch-up)'); }
     }
     const { data: last } = await supabaseAdmin.from('instrument_scores')
       .select('scored_at').order('scored_at', { ascending: false }).limit(1);
@@ -129,12 +148,45 @@ async function catchUpMissedJobs() {
   return { done };
 }
 
+/**
+ * Everything that is DUE right now and has not run yet. Called by the external wake-up
+ * (GitHub Actions pings the server several times a day) and shared with start-up catch-up.
+ * Every step is idempotent, so extra pings never repeat work or re-send emails.
+ */
+async function runDueJobs() {
+  const { supabaseAdmin } = require('../../config/supabase');
+  if (!supabaseAdmin) return { skipped: 'no database' };
+  const done = [];
+  const caught = await catchUpMissedJobs();        // brief, scoring repair, track record, subscriptions
+  if (caught && caught.done) done.push(...caught.done);
+  try {
+    const ist = new Date(Date.now() + 5.5 * 3600e3);
+    const dow = ist.getUTCDay();
+    const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    const weekday = dow >= 1 && dow <= 5;
+    if (isMarketHours()) {
+      done.push('market data'); await safeRun('marketData(wake)', refreshAllMarketData);
+      if (!(await ranTodayIST('flashAlertEngine', 45))) { done.push('flash alerts'); await safeRun('flashAlertEngine(wake)', runFlashAlertScan); }
+    }
+    if (weekday && minutes >= 18 * 60 && !(await ranTodayIST('aiLeverEngine'))) {
+      done.push('AI lever scan'); await safeRun('aiLeverEngine(wake)', runAILeverScan);
+    }
+    if (weekday && minutes >= 22 * 60 && !(await ranTodayIST('opportunityEngine'))) {
+      done.push('opportunity engine'); await safeRun('opportunityEngine(wake)', runOpportunityEngine);
+    }
+  } catch (e) {
+    console.error('Wake-up jobs failed:', e.message);
+  }
+  console.log('   ⏰ Wake-up ran:', done.length ? done.join(', ') : 'nothing was due');
+  return { done };
+}
+
 function startSchedulers() {
   console.log('\n⏰ Starting WealthGuard schedulers...');
 
   // ── 07:30 IST Mon–Fri — Morning brief (02:00 UTC) ──────────────────
   cron.schedule('0 2 * * 1-5', () => {
-    safeRun('morningBriefEngine', generateAndSendMorningBrief);
+    runBriefOnce('morningBriefEngine');
   }, UTC);
   console.log('   ✓ Morning brief: 7:30 AM IST (Mon-Fri)');
 
@@ -198,4 +250,4 @@ function startSchedulers() {
   setTimeout(() => { catchUpMissedJobs(); }, 60 * 1000);
 }
 
-module.exports = { startSchedulers, isMarketHours, catchUpMissedJobs };
+module.exports = { startSchedulers, isMarketHours, catchUpMissedJobs, runDueJobs };

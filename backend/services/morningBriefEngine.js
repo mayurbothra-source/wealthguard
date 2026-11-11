@@ -442,7 +442,16 @@ async function generateAndSendMorningBrief() {
       return;
     }
 
+    // A second run on the same day (restart, wake-up ping) must not email anyone twice.
+    const alreadyEmailed = new Set();
+    try {
+      const { data: sentToday } = await supabaseAdmin.from('morning_briefs')
+        .select('client_id').eq('brief_date', istDate()).eq('email_sent', true);
+      (sentToday || []).forEach(r => alreadyEmailed.add(r.client_id));
+    } catch { /* if this lookup fails we fall back to the old behaviour */ }
+
     for (const client of clients) {
+      if (alreadyEmailed.has(client.id)) { skipped++; continue; }
       try {
         const brief = await buildBriefForClient(client, shared);
         const { ok } = await persistBrief(client, brief);

@@ -1,0 +1,27 @@
+# Wakes the free-plan Render server on a schedule so the daily jobs actually run.
+# Needs two GitHub repository secrets (Settings > Secrets and variables > Actions):
+#   BACKEND_URL        e.g. https://wealthguard-backend.onrender.com   (no trailing slash)
+#   ADMIN_TRIGGER_KEY  the same value as ADMIN_TRIGGER_KEY in Render
+name: wake-server
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '2 2 * * 1-5'      # 07:32 IST  morning brief
+    - cron: '32 3 * * *'       # 09:02 IST  subscription lifecycle
+    - cron: '35 4-9 * * 1-5'   # 10:05-15:05 IST hourly: market data + flash alerts
+    - cron: '5 11 * * 1-5'     # 16:35 IST  track record
+    - cron: '35 12 * * 1-5'    # 18:05 IST  AI lever scan
+    - cron: '35 16 * * 1-5'    # 22:05 IST  opportunity engine
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the server and run whatever is due
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          ADMIN_TRIGGER_KEY: ${{ secrets.ADMIN_TRIGGER_KEY }}
+        run: |
+          if [ -z "$BACKEND_URL" ] || [ -z "$ADMIN_TRIGGER_KEY" ]; then echo "Missing BACKEND_URL / ADMIN_TRIGGER_KEY secrets"; exit 1; fi
+          # A cold start can take 1-2 minutes, so allow long waits and retry.
+          curl -sS --fail-with-body --max-time 180 --retry 4 --retry-delay 20 --retry-all-errors \
+            -H "x-admin-key: $ADMIN_TRIGGER_KEY" "$BACKEND_URL/api/admin/wake"

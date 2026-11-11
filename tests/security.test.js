@@ -177,6 +177,10 @@ function call(method, path, body, token, headers = {}) {
   ck('no key → 401', r.status === 401);
   r = await call('GET', '/api/admin/issue-setup-code?phone=9000000003&key=wrong');
   ck('wrong key → 401', r.status === 401);
+  r = await call('GET', '/api/admin/wake');
+  ck('wake-up without the key → 401', r.status === 401);
+  r = await call('GET', '/api/admin/wake?key=wrong');
+  ck('wake-up with a wrong key → 401', r.status === 401);
   DB.rows('auth_codes').length = 0;
   r = await call('GET', '/api/admin/issue-setup-code?phone=9000000003', null, null, { 'x-admin-key': process.env.ADMIN_TRIGGER_KEY });
   ck('the key in a header works', r.status === 200 && /^\d{6}$/.test(r.body.code));

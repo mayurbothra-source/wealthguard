@@ -164,6 +164,26 @@ router.get('/trigger-flash-alerts', makeTrigger(
  * Health summary — what every engine has been doing.
  * Useful for a quick "is everything running?" check.
  */
+/**
+ * Wake-up: called on a schedule by GitHub Actions (.github/workflows/wake.yml).
+ * The request itself wakes a sleeping free-plan server; this then runs whatever is
+ * due and has not run yet. Safe to call as often as you like.
+ * Header:  x-admin-key: <ADMIN_TRIGGER_KEY>
+ */
+router.all('/wake', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  if (_runningEngines.has('wake')) return res.json({ success: true, message: 'A wake-up run is already in progress.' });
+  _runningEngines.add('wake');
+  res.json({ success: true, message: 'Awake. Running anything that is due — see Render logs for "Wake-up ran".' });
+  try {
+    await require('../services/scheduler').runDueJobs();
+  } catch (e) {
+    console.error('❌ Wake-up failed:', e.message);
+  } finally {
+    _runningEngines.delete('wake');
+  }
+});
+
 router.get('/health', async (req, res) => {
   if (!checkKey(req, res)) return;
   try {
