@@ -173,6 +173,19 @@ async function discoverGoogleModel() {
 // PROVIDER IMPLEMENTATIONS
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Newer Gemini models split a reply into several parts, and "thinking" models
+ * add thought parts before the answer. Join every non-thought text part —
+ * reading only parts[0] returned a fragment that could not be parsed as JSON.
+ */
+function extractGoogleText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts
+    .filter(p => typeof p.text === 'string' && !p.thought)
+    .map(p => p.text)
+    .join('');
+}
+
 async function callGoogle(prompt, expectJSON) {
   const model = await discoverGoogleModel();
   if (!model) throw new Error('No Google model available');
@@ -186,14 +199,30 @@ async function callGoogle(prompt, expectJSON) {
     ? `${prompt}\n\nRespond ONLY with valid JSON. No markdown fences, no commentary before or after the JSON.`
     : prompt;
 
-  const { data } = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_KEY}`,
-    { contents: [{ parts: [{ text: fullPrompt }] }] },
-    { timeout: REQUEST_TIMEOUT, headers: { 'Content-Type': 'application/json' } }
-  );
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_KEY}`;
+  const body = { contents: [{ parts: [{ text: fullPrompt }] }] };
+  // JSON mode: Gemini then returns bare JSON instead of prose / fenced code.
+  if (expectJSON) body.generationConfig = { responseMimeType: 'application/json' };
+  const opts = { timeout: REQUEST_TIMEOUT, headers: { 'Content-Type': 'application/json' } };
 
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error('Empty response from Google');
+  let data;
+  try {
+    ({ data } = await axios.post(url, body, opts));
+  } catch (e) {
+    // A model that rejects JSON mode answers 400 — retry once without it.
+    if (expectJSON && e.response?.status === 400) {
+      delete body.generationConfig;
+      ({ data } = await axios.post(url, body, opts));
+    } else {
+      throw e;
+    }
+  }
+
+  const text = extractGoogleText(data);
+  if (!text) {
+    const reason = data?.candidates?.[0]?.finishReason || data?.promptFeedback?.blockReason || 'unknown';
+    throw new Error(`Empty response from Google (finishReason: ${reason})`);
+  }
   usage.google++;
   recordSuccess();
   return text.trim();
@@ -289,7 +318,15 @@ async function ask(prompt, expectJSON = true) {
         usage.fallbacks++;
         console.log(`   🤖 AI provider: fell back to ${provider} successfully`);
       }
-      return expectJSON ? parseJSON(text) : text;
+      if (!expectJSON) return text;
+      try {
+        return parseJSON(text);
+      } catch (pe) {
+        // Show what came back so the next failure is diagnosable from the logs.
+        const excerpt = text.replace(/\s+/g, ' ').slice(0, 200);
+        pe.message = `${pe.message} from ${provider} (${text.length} chars): "${excerpt}"`;
+        throw pe;
+      }
 
     } catch (e) {
       lastError = e;
@@ -347,4 +384,5 @@ module.exports = {
   getUsage,
   resetUsage,
   discoverGoogleModel,   // exported for health checks
+  _test: { extractGoogleText, parseJSON },
 };
