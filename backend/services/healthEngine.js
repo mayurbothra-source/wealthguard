@@ -67,6 +67,22 @@ async function reportRun({
                : itemsFailed > 0 ? 'degraded'
                : 'ok';
 
+  // Was this engine already flagged today? The in-memory set below is lost on
+  // every restart, and the free server restarts several times a day — which is
+  // how one false alarm became three emails overnight. The database remembers.
+  let alreadyAlertedToday = alertedToday.has(engineName);
+  if (anomaly && !alreadyAlertedToday && supabaseAdmin) {
+    try {
+      const ist = new Date(Date.now() + 5.5 * 3600e3);
+      const istMidnightUtc = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()) - 5.5 * 3600e3);
+      const { count } = await supabaseAdmin.from('system_health_log')
+        .select('id', { count: 'exact', head: true })
+        .eq('engine_name', engineName).eq('anomaly_flag', true)
+        .gte('run_at', istMidnightUtc.toISOString());
+      if (count) alreadyAlertedToday = true;
+    } catch { /* if the lookup fails, fall back to the in-memory check */ }
+  }
+
   if (supabaseAdmin) {
     try {
       await supabaseAdmin.from('system_health_log').insert({
@@ -86,7 +102,7 @@ async function reportRun({
   }
 
   // Alert on anomaly — once per engine per day
-  if (anomaly && !alertedToday.has(engineName)) {
+  if (anomaly && !alreadyAlertedToday) {
     alertedToday.add(engineName);
     await sendAnomalyAlert(engineName, {
       itemsProcessed, itemsExpected, itemsFailed, detail, durationMs,

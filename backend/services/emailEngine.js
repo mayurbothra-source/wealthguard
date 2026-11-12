@@ -177,10 +177,12 @@ async function sendMorningBrief(client, brief) {
       <p style="margin:0 0 8px;">${esc(brief.portfolio_note)}</p>${
       brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
   }
-  if (brief.ideas?.length) {
-    sections.push(`${H3('Ideas worth a look')}<ul style="margin:0 0 18px;padding-left:18px;">${
-      brief.ideas.map(i => `<li style="margin:0 0 6px;"><strong>${esc(i.symbol)}</strong> <span style="font-size:11px;color:#2E7D52;">${esc(i.action)}</span>${i.entry ? `<div style="font-size:12px;color:#6E7A71;">Entry ~₹${esc(i.entry)}${i.target ? ` · Target ₹${esc(i.target)}` : ''}${i.stop ? ` · Stop-loss ₹${esc(i.stop)}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : ''}</li>`).join('')
-    }</ul>`);
+  if (brief.ideas?.length || brief.ideas_note) {
+    const label = a => a === 'BUY' ? 'BUY' : a === 'WATCH' ? 'WATCHING — not a buy yet' : a;
+    sections.push(`${H3('Ideas worth a look')}${brief.ideas_note ? `<p style="margin:0 0 8px;">${esc(brief.ideas_note)}</p>` : ''}${
+      brief.ideas?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.ideas.map(i => `<li style="margin:0 0 8px;"><strong>${esc(i.symbol)}</strong>${i.name && i.name !== i.symbol ? ` <span style="color:#6E7A71;">${esc(i.name)}</span>` : ''} <span style="font-size:11px;color:${i.action === 'BUY' ? '#2E7D52' : '#6E7A71'};">${esc(label(i.action))}</span>${i.entry ? `<div style="font-size:12px;color:#6E7A71;">Price ~₹${esc(i.entry)}${i.target ? ` · Target ₹${esc(i.target)}` : ''}${i.stop ? ` · Stop-loss ₹${esc(i.stop)}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : ''}${i.rationale ? `<div style="font-size:12px;color:#3A463E;margin-top:2px;">${esc(i.rationale)}</div>` : ''}</li>`).join('')
+      }</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
   }
   if (!brief.ideas && brief.top_signals?.length) {
     const rows = brief.top_signals.map(s => `

@@ -40,6 +40,9 @@ app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 // ── STATIC FRONTEND ───────────────────────────────
 app.use(express.static(path.join(__dirname, '../frontend/public')));
 
+// Cheap liveness check; also what the keep-awake pings hit while jobs run.
+app.get('/healthz', (req, res) => res.json({ ok: true, ...require('./lib/keepAwake').status() }));
+
 // ── API ROUTES ────────────────────────────────────
 app.use('/api/auth',         require('./routes/auth'));
 app.use('/api/clients',      require('./routes/clients'));

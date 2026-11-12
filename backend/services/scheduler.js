@@ -60,7 +60,8 @@ function isFirstOfMonthIST() {
 /** Wraps every scheduled run so one failing engine never kills the process. */
 async function safeRun(label, fn) {
   try {
-    await fn();
+    // Keep the free-plan server awake until the job finishes (see lib/keepAwake).
+    await require('../lib/keepAwake').during(label, fn);
   } catch (e) {
     console.error(`Scheduler error [${label}]:`, e.message);
     // Report the failure to the health engine so it triggers an admin alert
@@ -97,7 +98,7 @@ async function ranTodayIST(engineName, sinceMinutesAgo) {
  * Render's free plan puts the server to sleep after ~15 idle minutes, and a sleeping
  * server runs no cron jobs. So on every start-up we check what we MISSED and run it:
  *   - weekday, after 07:30 IST, and no brief stored for today  -> build briefs
- *   - newest instrument score older than 8 days                -> run the scoring pass
+ *   - newest instrument score older than 6 days                -> run the scoring pass
  *   - subscription lifecycle (idempotent)                       -> run
  * This is a safety net, not a replacement: a paid always-on instance runs the real schedule.
  */
@@ -118,7 +119,7 @@ async function catchUpMissedJobs() {
     const { data: last } = await supabaseAdmin.from('instrument_scores')
       .select('scored_at').order('scored_at', { ascending: false }).limit(1);
     const lastAt = last && last[0] && new Date(last[0].scored_at).getTime();
-    let rerunScoring = !lastAt || Date.now() - lastAt > 8 * 86400e3;
+    let rerunScoring = !lastAt || Date.now() - lastAt > 6 * 86400e3;   // weekly run (Sunday evening) was missed
     // Self-heal a DEGRADED run: if most instruments were scored without any price
     // history (Yahoo rate-limiting), every score is a neutral guess. Redo it, but
     // never more than once a day so a persistent outage cannot loop.
@@ -156,22 +157,40 @@ async function catchUpMissedJobs() {
 async function runDueJobs() {
   const { supabaseAdmin } = require('../../config/supabase');
   if (!supabaseAdmin) return { skipped: 'no database' };
+  // One keep-awake span over the whole sequence, so the gaps between jobs are covered too.
+  return require('../lib/keepAwake').during('wake', () => _runDueJobs());
+}
+
+/**
+ * Is an evening job due? GitHub runs scheduled wake-ups up to ~2 hours late, so a
+ * 22:05 IST ping can arrive after midnight. "Evening" therefore runs from `fromMinutes`
+ * on a weekday until 07:00 IST the next morning, and the job is due if it has not
+ * run in the last `withinHours`.
+ */
+async function eveningJobDue(engineName, fromMinutes, withinHours) {
+  const ist = new Date(Date.now() + 5.5 * 3600e3);
+  const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const dow = ist.getUTCDay();
+  const prevDow = (dow + 6) % 7;
+  const isWeekday = d => d >= 1 && d <= 5;
+  const inWindow = (isWeekday(dow) && minutes >= fromMinutes) || (minutes < 7 * 60 && isWeekday(prevDow));
+  if (!inWindow) return false;
+  return !(await ranTodayIST(engineName, withinHours * 60));
+}
+
+async function _runDueJobs() {
   const done = [];
   const caught = await catchUpMissedJobs();        // brief, scoring repair, track record, subscriptions
   if (caught && caught.done) done.push(...caught.done);
   try {
-    const ist = new Date(Date.now() + 5.5 * 3600e3);
-    const dow = ist.getUTCDay();
-    const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-    const weekday = dow >= 1 && dow <= 5;
     if (isMarketHours()) {
       done.push('market data'); await safeRun('marketData(wake)', refreshAllMarketData);
       if (!(await ranTodayIST('flashAlertEngine', 45))) { done.push('flash alerts'); await safeRun('flashAlertEngine(wake)', runFlashAlertScan); }
     }
-    if (weekday && minutes >= 18 * 60 && !(await ranTodayIST('aiLeverEngine'))) {
+    if (await eveningJobDue('aiLeverEngine', 18 * 60, 14)) {
       done.push('AI lever scan'); await safeRun('aiLeverEngine(wake)', runAILeverScan);
     }
-    if (weekday && minutes >= 22 * 60 && !(await ranTodayIST('opportunityEngine'))) {
+    if (await eveningJobDue('opportunityEngine', 22 * 60, 14)) {
       done.push('opportunity engine'); await safeRun('opportunityEngine(wake)', runOpportunityEngine);
     }
   } catch (e) {
@@ -250,4 +269,4 @@ function startSchedulers() {
   setTimeout(() => { catchUpMissedJobs(); }, 60 * 1000);
 }
 
-module.exports = { startSchedulers, isMarketHours, catchUpMissedJobs, runDueJobs };
+module.exports = { startSchedulers, isMarketHours, catchUpMissedJobs, runDueJobs, _test: { eveningJobDue } };
