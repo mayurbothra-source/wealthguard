@@ -67,7 +67,7 @@ const YAHOO_HEADERS = {
 // Yahoo tolerates automated requests but not a burst of 120. The weekly
 // scoring run has plenty of time, so pace it.
 const IS_TEST = process.env.NODE_ENV === 'test';
-const FETCH_GAP_MS      = IS_TEST ? 0 : 900;
+const FETCH_GAP_MS      = IS_TEST ? 0 : 1500;   // slower, but the run is kept awake now
 // When Yahoo answers 429 (too many requests) or a server error, wait and try again
 // (on the second host too) instead of giving up. The 2 Nov run lost 74 of 120
 // instruments to 429s with no retry, so most of the universe scored identically.

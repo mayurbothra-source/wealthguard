@@ -495,8 +495,10 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
     }
   } catch {}
 
-  // ── Deactivate previous engine signals (recent ones only) ────────────
-  const eightDaysAgo = new Date(Date.now() - 8 * 86400000).toISOString();
+  // ── Deactivate every previous engine signal for this instrument ──────
+  // This used to touch only the last 8 days, so older signals stayed "active"
+  // for ever (up to 4 per instrument). The track record still measures
+  // deactivated signals — it does not filter on is_active.
   try {
     await supabaseAdmin
       .from('recommendations')
@@ -504,8 +506,7 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
       .eq('instrument_name', instrument.symbol)
       .is('instrument_id', null)
       .is('client_id', null)
-      .eq('is_active', true)
-      .gte('generated_at', eightDaysAgo);
+      .eq('is_active', true);
   } catch (e) {
     console.warn(`   ⚠ Could not deactivate old signals for ${instrument.symbol}: ${e.message}`);
   }

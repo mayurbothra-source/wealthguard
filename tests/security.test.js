@@ -198,14 +198,20 @@ function call(method, path, body, token, headers = {}) {
 
   console.log('\n── morning brief ──');
   DB.seed('instrument_universe', [
-    { symbol: 'LC_OLD', name: 'Old Large', category: 'large_cap_equity', status: 'active' },
-    { symbol: 'LC1', name: 'Large One', category: 'large_cap_equity', status: 'active' },
-    { symbol: 'LC2', name: 'Large Two', category: 'large_cap_equity', status: 'active' },
-    { symbol: 'SM1', name: 'Small One', category: 'small_cap_equity', status: 'active' },
-    { symbol: 'HELD', name: 'Held One', category: 'large_cap_equity', status: 'active' },
+    { id: 'u0', symbol: 'LC_OLD', name: 'Old Large', category: 'large_cap_equity', status: 'active', price_source: 'yahoo' },
+    { id: 'u1', symbol: 'LC1', name: 'Large One', category: 'large_cap_equity', status: 'active', price_source: 'yahoo' },
+    { id: 'u2', symbol: 'LC2', name: 'Large Two', category: 'large_cap_equity', status: 'active', price_source: 'yahoo' },
+    { id: 'u3', symbol: 'SM1', name: 'Small One', category: 'small_cap_equity', status: 'active', price_source: 'yahoo' },
+    { id: 'u4', symbol: 'HELD', name: 'Held One', category: 'large_cap_equity', status: 'active', price_source: 'yahoo' },
+    { id: 'u5', symbol: 'GUESS', name: 'Unmeasured', category: 'large_cap_equity', status: 'active', price_source: 'yahoo' },
+    { id: 'u6', symbol: 'FLOATBOND', name: 'Static bond', category: 'bond_gsec', status: 'active', price_source: 'static' },
   ]);
+  const scored = (id, pts) => ({ instrument_id: id, scored_at: new Date(Date.now() - 86400000).toISOString(), price_data_points: pts, data_complete: pts > 0 });
+  // GUESS was scored on category defaults only (Yahoo refused its price history).
+  DB.seed('instrument_scores', ['u0', 'u1', 'u2', 'u3', 'u4', 'u6'].map(id => scored(id, 250)).concat([scored('u5', 0)]));
   const sig = (s, a, c, extra = {}) => ({ client_id: null, instrument_name: s, action: a, confidence_score: c, is_active: true, risk_gate_passed: true, rationale_short: `${a} ${s}`, entry_price_inr: 100, target_price_inr: 110, stop_loss_inr: 95, horizon_days: 14, signal_tier: 'standard', generated_at: new Date(Date.now() - 86400000).toISOString(), ...extra });
-  DB.seed('recommendations', [sig('LC_OLD', 'BUY', 0.99, { generated_at: new Date(Date.now() - 30 * 86400000).toISOString() }), sig('LC1', 'BUY', 0.8), sig('LC2', 'WATCH', 0.6), sig('SM1', 'BUY', 0.9), sig('HELD', 'SELL', 0.4)]);
+  DB.seed('recommendations', [sig('LC_OLD', 'BUY', 0.99, { generated_at: new Date(Date.now() - 30 * 86400000).toISOString() }), sig('LC1', 'BUY', 0.8), sig('LC2', 'WATCH', 0.6), sig('SM1', 'BUY', 0.9), sig('HELD', 'SELL', 0.4),
+    sig('GUESS', 'BUY', 0.97), sig('FLOATBOND', 'BUY', 0.98), sig('LC1', 'BUY', 0.5, { generated_at: new Date(Date.now() - 3 * 86400000).toISOString() })]);
   DB.seed('ai_events', [{ title: 'RBI holds rates', severity: 'MEDIUM', description: 'Policy unchanged.', status: 'active', detected_at: new Date().toISOString() }]);
   DB.seed('client_behavioural_profiles', [{ client_id: 'A', stated_risk_score: 2, assessed_at: '2026-09-01' }]);   // LOW risk
   DB.seed('portfolios', [{ id: 'hA2', client_id: 'A', instrument_name: 'HELD', quantity: 1, avg_buy_price_inr: 10, is_active: true }]);
@@ -225,6 +231,9 @@ function call(method, path, body, token, headers = {}) {
   ck('ideas recommend the BUY that fits', j?.ideas?.[0]?.symbol === 'LC1' && j.ideas[0].action === 'BUY' && j.ideas[0].entry === 100);
   ck('a month-old BUY (still marked active) is NOT offered as a new idea', !j?.ideas?.some(i => i.symbol === 'LC_OLD'));
   ck('ideas never repeat something already held', !j?.ideas?.some(i => i.symbol === 'HELD'));
+  ck('a score built on defaults (no price history) is never an idea', !j?.ideas?.some(i => i.symbol === 'GUESS'));
+  ck('an untradeable, statically-priced instrument is never an idea', !j?.ideas?.some(i => i.symbol === 'FLOATBOND'));
+  ck('each instrument appears once (newest signal wins)', j?.ideas?.filter(i => i.symbol === 'LC1').length === 1);
   ck('placeholder (demo) market values are not shown as fact', !/82,?000/.test(j?.market_snapshot || ''));
   const text = r.body.brief.whatsapp_message;
   ck('the plain-text brief (what the app shows) contains the sections', /TODAY:/.test(text) && /IN THE NEWS/.test(text) && /IDEAS WORTH A LOOK/.test(text));
@@ -239,6 +248,15 @@ function call(method, path, body, token, headers = {}) {
   DB.rows('morning_briefs').length = 0;
   r = await call('GET', '/api/brief/A', null, tAnew);
   ck('with no qualifying BUY, the brief says so plainly', /No new BUY signals/.test(r.body.brief?.brief_json?.ideas_note || ''));
+  ck('watchlist items are labelled as not a recommendation', /not a recommendation to buy/.test(r.body.brief?.brief_json?.ideas_note || ''));
+
+  // scoring never completed with live data → no ideas at all, and it says why
+  DB.rows('instrument_scores').forEach(x => { x.price_data_points = 0; x.data_complete = false; });
+  DB.rows('morning_briefs').length = 0;
+  r = await call('GET', '/api/brief/A', null, tAnew);
+  ck('with no measured scores, no ideas are shown', (r.body.brief?.brief_json?.ideas || []).length === 0);
+  ck('…and the brief explains why', /not completed with live price data/.test(r.body.brief?.brief_json?.ideas_note || ''));
+  DB.rows('instrument_scores').forEach(x => { x.price_data_points = 250; x.data_complete = true; });
 
   // unmigrated DB: brief_json column missing
   DB.rejectColumns.morning_briefs = new Set(['brief_json']);

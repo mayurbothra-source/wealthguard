@@ -60,21 +60,25 @@ async function buildMarketSnapshot(snapshot, aiEvents) {
   const vix   = snapshot?.vix;
   const regime = snapshot?.vixRegime;
 
-  // Deterministic facts — always accurate, never AI-invented
+  // Deterministic facts — always accurate, never AI-invented.
+  // Values tagged source:'demo' are placeholders, not market data, and are
+  // never shown. A 'supabase_cache' value is a real earlier reading and says so.
+  const fmtTime = iso => new Date(iso).toLocaleString('en-IN',
+    { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+  const asOf = q => q?.source === 'supabase_cache' && q.as_of ? ` (last reading, ${fmtTime(q.as_of)})` : '';
   const facts = [];
-  // Values tagged source:'demo' are placeholders, not market data. They are
-  // never presented to a client as fact.
   if (nifty?.price != null && nifty.source !== 'demo') {
     const dir = (nifty.change_pct ?? 0) >= 0 ? 'up' : 'down';
-    facts.push(`Nifty 50 is ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${nifty.price.toLocaleString('en-IN')}`);
-  } else {
-    facts.push('The Nifty 50 level is not available right now');
+    facts.push(`Nifty 50 is ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${Number(nifty.price).toLocaleString('en-IN')}${asOf(nifty)}`);
   }
-  if (vix != null) {
-    facts.push(`India VIX is at ${Number(vix).toFixed(1)} (${regime?.regime || 'normal'})`);
+  if (vix != null && snapshot?.vixSource && snapshot.vixSource !== 'demo') {
+    facts.push(`India VIX is at ${Number(vix).toFixed(1)} (${regime?.regime || 'normal'})${asOf({ source: snapshot.vixSource, as_of: snapshot.vixAsOf })}`);
   }
   if (snapshot?.sensex?.price != null && snapshot.sensex.source !== 'demo') {
-    facts.push(`Sensex at ${snapshot.sensex.price.toLocaleString('en-IN')}`);
+    facts.push(`Sensex at ${Number(snapshot.sensex.price).toLocaleString('en-IN')}`);
+  }
+  if (!facts.length) {
+    return 'Live market data could not be fetched this morning, so we are not quoting index levels rather than show numbers that may be wrong.';
   }
 
   const eventLine = aiEvents?.length
@@ -180,6 +184,8 @@ async function buildHoldingActions(holdings) {
       .from('recommendations')
       .select('instrument_name, action, stop_loss_inr, target_price_inr, entry_price_inr')
       .in('instrument_name', symbols).is('client_id', null).eq('is_active', true)
+      // A stale signal is no longer our view — show "no current signal" instead.
+      .gte('generated_at', new Date(Date.now() - 10 * 86400000).toISOString())
       .order('generated_at', { ascending: false });
     sigs = data || [];
   } catch {}
@@ -223,20 +229,61 @@ async function buildIdeas(riskScore, heldSymbols) {
     const allowedCats = RISK_CATEGORY_MAP[riskBand(riskScore)];
     const { data: instruments } = await supabaseAdmin
       .from('instrument_universe')
-      .select('symbol, name, category')
+      .select('id, symbol, name, category, price_source')
       .in('category', allowedCats).eq('status', 'active');
-    if (!instruments?.length) return { ideas: [], note: 'Our instrument list is being refreshed.' };
+    // A statically-priced instrument (e.g. RBI Floating Rate Bond) has no market
+    // price and cannot be bought or sold on an exchange, so it is never an "idea".
+    const tradeable = (instruments || []).filter(i => !['static', 'static_reference'].includes(i.price_source));
+    if (!tradeable.length) return { ideas: [], note: 'Our instrument list is being refreshed.' };
 
-    const meta = Object.fromEntries(instruments.map(i => [i.symbol, i]));
+    const meta = Object.fromEntries(tradeable.map(i => [i.symbol, i]));
+    const since = new Date(Date.now() - 10 * 86400000).toISOString();
     const { data: sigs } = await supabaseAdmin
       .from('recommendations')
-      .select('instrument_name, action, confidence_score, signal_tier, rationale_short, entry_price_inr, target_price_inr, stop_loss_inr, horizon_days')
+      .select('instrument_name, action, confidence_score, signal_tier, rationale_short, rationale_text, entry_price_inr, target_price_inr, stop_loss_inr, horizon_days, generated_at')
       .in('instrument_name', Object.keys(meta))
       .is('client_id', null).eq('is_active', true).eq('risk_gate_passed', true)
       // Only FRESH signals. Without this, a signal from an old scoring run stayed "active"
       // forever and kept being sold as a new idea (three month-old bond BUYs were).
-      .gte('generated_at', new Date(Date.now() - 10 * 86400000).toISOString())
-      .order('confidence_score', { ascending: false }).limit(60);
+      .gte('generated_at', since)
+      .order('generated_at', { ascending: false }).limit(300);
+
+    // Only signals whose score was measured from the instrument's own price
+    // history. A run where Yahoo refused most requests scores everything on
+    // category defaults — those numbers say nothing about the instrument.
+    const measured = new Set();
+    try {
+      const ids = tradeable.map(i => i.id);
+      const { data: scores } = await supabaseAdmin
+        .from('instrument_scores')
+        .select('instrument_id, scored_at, price_data_points, data_complete')
+        .in('instrument_id', ids).gte('scored_at', since)
+        .order('scored_at', { ascending: false }).limit(2000);
+      const seen = new Set();
+      for (const sc of scores || []) {
+        if (seen.has(sc.instrument_id)) continue;          // newest score per instrument
+        seen.add(sc.instrument_id);
+        if ((sc.price_data_points || 0) > 0 || sc.data_complete === true) measured.add(sc.instrument_id);
+      }
+    } catch (e) {
+      console.warn(`   ⚠ buildIdeas: could not check score quality — ${e.message}`);
+    }
+
+    const newest = {};
+    for (const s of sigs || []) {
+      const inst = meta[s.instrument_name];
+      if (!inst || !measured.has(inst.id)) continue;
+      if (!newest[s.instrument_name]) newest[s.instrument_name] = s;   // one per instrument
+    }
+    const usable = Object.values(newest)
+      .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0));
+
+    if (!usable.length) {
+      return {
+        ideas: [],
+        note: 'No ideas today. Our weekly analysis has not completed with live price data, and we would rather say nothing than suggest something we have not properly measured.',
+      };
+    }
 
     const held = new Set(heldSymbols);
     const toIdea = s => ({
@@ -244,19 +291,19 @@ async function buildIdeas(riskScore, heldSymbols) {
       name: meta[s.instrument_name]?.name || s.instrument_name,
       action: s.action,
       high_conviction: s.signal_tier === 'high_conviction',
-      rationale: s.rationale_short || '',
+      rationale: short(s.rationale_text || s.rationale_short || '', 220),
       entry: s.entry_price_inr, target: s.target_price_inr, stop: s.stop_loss_inr,
       horizon_days: s.horizon_days,
     });
 
-    const buys = (sigs || []).filter(s => s.action === 'BUY' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
+    const buys = usable.filter(s => s.action === 'BUY' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
     if (buys.length) return { ideas: buys, note: null };
 
-    const radar = (sigs || []).filter(s => s.action === 'WATCH' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
+    const radar = usable.filter(s => s.action === 'WATCH' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
     return {
       ideas: radar,
       note: 'No new BUY signals pass our risk checks for your profile today. Waiting is a valid position — we only ask you to act when the evidence is strong.' +
-            (radar.length ? ' These are closest to qualifying:' : ''),
+            (radar.length ? ' These are on our watchlist — not a recommendation to buy yet:' : ''),
     };
   } catch (e) {
     console.warn(`   ⚠ buildIdeas: ${e.message}`);
@@ -285,7 +332,7 @@ async function buildGoalNote(clientId) {
       .select('goal_name, target_amount_inr, current_corpus_inr, target_date')
       .eq('client_id', clientId).eq('is_active', true);
     if (!goals?.length) return null;
-    return goals.slice(0, 2).map(g => {
+    return goals.slice(0, 6).map(g => {
       const current = g.current_corpus_inr || 0, target = g.target_amount_inr || 0;
       const pct = target > 0 ? (current / target) * 100 : 0;
       return `${g.goal_name}: ${fmtINR(current)} of ${fmtINR(target)} (${pct.toFixed(0)}%)`;
@@ -492,4 +539,4 @@ async function generateAndSendMorningBrief() {
   }
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, istDate };
+module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, istDate, _test: { buildMarketSnapshot } };

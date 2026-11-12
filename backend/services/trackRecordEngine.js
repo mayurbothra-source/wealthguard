@@ -224,7 +224,7 @@ async function runTrackRecordCheckpoints() {
     return;
   }
 
-  let checked = 0, logged = 0, skipped = 0;
+  let checked = 0, logged = 0, skipped = 0, alreadyLogged = 0;
 
   for (const pred of predictions) {
     const generatedAt = new Date(pred.generated_at);
@@ -237,7 +237,7 @@ async function runTrackRecordCheckpoints() {
 
       // Skip if this checkpoint was already logged
       const alreadyDone = await checkpointAlreadyLogged(pred.id, checkpoint.field);
-      if (alreadyDone) { skipped++; continue; }
+      if (alreadyDone) { alreadyLogged++; continue; }
 
       // Skip if no entry price (can't calculate return)
       if (!pred.entry_price_inr) {
@@ -329,7 +329,7 @@ async function runTrackRecordCheckpoints() {
     }
   }
 
-  console.log(`📋 Track record engine complete: ${checked} checkpoints evaluated, ${logged} logged, ${skipped} skipped.`);
+  console.log(`📋 Track record engine complete: ${checked} checkpoints in window, ${alreadyLogged} already recorded, ${logged} logged, ${skipped} skipped.`);
 
   // Health reporting — if predictions exist but nothing was checked,
   // that is an anomaly worth an immediate alert. This is exactly the
@@ -337,10 +337,13 @@ async function runTrackRecordCheckpoints() {
   await reportRun({
     engineName:     'trackRecordEngine',
     durationMs:     Date.now() - engineStart,
+    // "Already recorded" is not a failure: every wake-up re-runs this job, and a
+    // checkpoint logged earlier today is simply done. Counting those as failed
+    // made 500/500 look like a total failure and emailed a false alarm.
     itemsProcessed: logged,
-    itemsExpected:  checked > 0 ? checked : null,
+    itemsExpected:  checked - alreadyLogged > 0 ? checked - alreadyLogged : null,
     itemsFailed:    skipped,
-    detail:         `${checked} checkpoints in window, ${logged} written, ${skipped} skipped (no price or already logged)`,
+    detail:         `${checked} checkpoints in window: ${alreadyLogged} already recorded, ${logged} written, ${skipped} could not be measured (no price or implausible)`,
   });
 }
 

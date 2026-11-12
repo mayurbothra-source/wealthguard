@@ -12,6 +12,7 @@ on:
     - cron: '5 11 * * 1-5'     # 16:35 IST  track record
     - cron: '35 12 * * 1-5'    # 18:05 IST  AI lever scan
     - cron: '35 16 * * 1-5'    # 22:05 IST  opportunity engine
+    - cron: '35 14 * * 0'      # 20:05 IST Sunday  weekly instrument scoring
 jobs:
   wake:
     runs-on: ubuntu-latest

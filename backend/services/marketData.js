@@ -119,6 +119,37 @@ async function getNSEQuote(symbol) {
 }
 
 // ── NSE INDEX ──────────────────────────────────────────
+// NSE blocks requests from cloud servers (Render included), so in production
+// the NSE call almost always fails. Order of preference:
+//   1. NSE live   2. Yahoo live (^NSEI / ^INDIAVIX)   3. last real reading saved
+//   in Supabase (up to 3 days old, labelled 'supabase_cache' with its time)
+//   4. a placeholder labelled source:'demo' — never shown to a client as fact.
+const INDEX_YAHOO = { 'NIFTY 50': '^NSEI', 'INDIA VIX': '^INDIAVIX' };
+const INDEX_CACHE_KEY = 'index_prices_v1';
+const INDEX_CACHE_MAX_AGE_MS = 3 * 86400e3;
+
+async function loadIndexCache() {
+  if (!supabaseAdmin) return {};
+  try {
+    const { data } = await supabaseAdmin.from('market_cache')
+      .select('data').eq('cache_key', INDEX_CACHE_KEY).maybeSingle();
+    return (data && data.data) || {};
+  } catch { return {}; }
+}
+
+async function saveIndexReading(indexName, reading) {
+  if (!supabaseAdmin) return;
+  try {
+    const all = await loadIndexCache();
+    all[indexName] = { price: reading.price, change_pct: reading.change_pct, source: reading.source, at: new Date().toISOString() };
+    await supabaseAdmin.from('market_cache').upsert(
+      { cache_key: INDEX_CACHE_KEY, data: all, updated_at: new Date().toISOString() },
+      { onConflict: 'cache_key' });
+  } catch (e) {
+    console.warn(`Could not save ${indexName} to the index cache: ${e.message}`);
+  }
+}
+
 async function getNSEIndex(indexName = 'NIFTY 50') {
   try {
     const { data } = await axios.get(
@@ -126,8 +157,8 @@ async function getNSEIndex(indexName = 'NIFTY 50') {
       { headers: NSE_HEADERS, timeout: 8000 }
     );
     const idx = data.data?.find(d => d.indexSymbol === indexName);
-    if (!idx) throw new Error('Index not found');
-    return {
+    if (!idx || idx.last == null) throw new Error('Index not found');
+    const live = {
       name: idx.indexSymbol,
       price: idx.last,
       change_pct: idx.percentChange,
@@ -136,29 +167,53 @@ async function getNSEIndex(indexName = 'NIFTY 50') {
       low: idx.low,
       source: 'nse_live'
     };
-  } catch {
-    // BUGFIX: this fallback used to always return the Nifty demo price
-    // regardless of which index was requested — meaning a blocked NSE
-    // request for "INDIA VIX" silently returned ~24,650 mislabeled as VIX,
-    // which would make classifyVIXRegime() always report 'crisis' and
-    // incorrectly freeze every BUY signal platform-wide. Fixed by making
-    // the fallback index-aware.
-    const DEMO_INDEX_FALLBACK = {
-      'NIFTY 50':   { price: 24650.25, change_pct: 0.68 },
-      'INDIA VIX':  { price: 13.42,    change_pct: -0.82 },
-    };
-    const fallback = DEMO_INDEX_FALLBACK[indexName] || { price: 0, change_pct: 0 };
-    return { name: indexName, price: fallback.price, change_pct: fallback.change_pct, source: 'demo' };
+    saveIndexReading(indexName, live);
+    return live;
+  } catch { /* NSE blocked or down — try Yahoo */ }
+
+  const ticker = INDEX_YAHOO[indexName];
+  if (ticker) {
+    const q = await getYahooQuote(ticker);
+    if (q && q.price != null) {
+      const live = { name: indexName, price: q.price, change_pct: q.change_pct, source: 'yahoo_live' };
+      saveIndexReading(indexName, live);
+      return live;
+    }
   }
+
+  const cached = (await loadIndexCache())[indexName];
+  if (cached && cached.price != null && Date.now() - new Date(cached.at).getTime() < INDEX_CACHE_MAX_AGE_MS) {
+    return { name: indexName, price: cached.price, change_pct: cached.change_pct, source: 'supabase_cache', as_of: cached.at };
+  }
+
+  // Index-aware placeholder (a blocked "INDIA VIX" request once returned the
+  // Nifty level as VIX). Labelled demo: callers must not present it as fact.
+  const DEMO_INDEX_FALLBACK = {
+    'NIFTY 50':   { price: 24650.25, change_pct: 0.68 },
+    'INDIA VIX':  { price: 13.42,    change_pct: -0.82 },
+  };
+  const fallback = DEMO_INDEX_FALLBACK[indexName] || { price: 0, change_pct: 0 };
+  return { name: indexName, price: fallback.price, change_pct: fallback.change_pct, source: 'demo' };
 }
 
 // ── INDIA VIX ──────────────────────────────────────────
+/** VIX with its provenance: { price, change_pct, source, as_of? }. */
+async function getIndiaVIXQuote() {
+  return getNSEIndex('INDIA VIX');
+}
+
+/**
+ * VIX as a plain number, for the risk gate and flash alerts. Uses the live or
+ * last real reading; only if neither exists does it return the placeholder,
+ * and it says so in the logs.
+ */
 async function getIndiaVIX() {
   try {
-    const result = await getNSEIndex('INDIA VIX');
-    return result.price || 13.42;
+    const q = await getIndiaVIXQuote();
+    if (q.source === 'demo') console.warn('   ⚠ India VIX unavailable (NSE, Yahoo and cache all failed) — using placeholder 13.42');
+    return q.price || 13.42;
   } catch {
-    return 13.42; // demo
+    return 13.42; // placeholder
   }
 }
 
@@ -418,9 +473,9 @@ async function refreshAllMarketData() {
     return _snapshotCache;
   }
   console.log('📊 Refreshing market data...');
-  const [nifty, vix, flows, macro, sensex, usdInr] = await Promise.all([
+  const [nifty, vixQuote, flows, macro, sensex, usdInr] = await Promise.all([
     getNSEIndex('NIFTY 50'),
-    getIndiaVIX(),
+    getIndiaVIXQuote(),
     getFIIDIIFlows(),
     getMacroIndicators(),
     getSensex(),
@@ -449,9 +504,13 @@ async function refreshAllMarketData() {
     }
   }
 
+  const vix = vixQuote.price;
   const regime = classifyVIXRegime(vix);
-  const snapshot = { nifty, vix, vixRegime: regime, flows, macro, sensex, usdInr, gold, silver, refreshedAt: new Date().toISOString() };
-  console.log(`   Nifty: ${nifty.price} | Sensex: ${sensex.price} [${sensex.source}] | VIX: ${vix} [${regime.regime}]`);
+  const snapshot = {
+    nifty, vix, vixSource: vixQuote.source, vixAsOf: vixQuote.as_of || null,
+    vixRegime: regime, flows, macro, sensex, usdInr, gold, silver, refreshedAt: new Date().toISOString(),
+  };
+  console.log(`   Nifty: ${nifty.price} [${nifty.source}] | Sensex: ${sensex.price} [${sensex.source}] | VIX: ${vix} [${vixQuote.source}, ${regime.regime}]`);
   _snapshotCache = snapshot;
   _snapshotCacheTime = now;
   return snapshot;
@@ -462,6 +521,7 @@ module.exports = {
   getNSEQuote,
   getNSEIndex,
   getIndiaVIX,
+  getIndiaVIXQuote,
   getMFNav,
   getMFNavHistory,
   getFIIDIIFlows,
