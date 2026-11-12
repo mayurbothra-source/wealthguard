@@ -80,10 +80,8 @@ async function fetchCurrentPrice(rec) {
       if (priceData) {
         // A static reference price never changes, so a "return" computed
         // against it is always 0% and tells the client nothing. Skip it.
-        if (priceData.source === 'static_reference') {
-          console.warn(`   ⚠ ${symbol}: static reference price — no meaningful return to measure, skipped`);
-          return null;
-        }
+        // It is a fact about the instrument, not a failure (see notMeasurable below).
+        if (priceData.source === 'static_reference') return { notMeasurable: true };
         return priceData;
       }
     } catch (e) {
@@ -224,7 +222,8 @@ async function runTrackRecordCheckpoints() {
     return;
   }
 
-  let checked = 0, logged = 0, skipped = 0, alreadyLogged = 0;
+  let checked = 0, logged = 0, skipped = 0, alreadyLogged = 0, notMeasurable = 0;
+  const staticSymbols = new Set();
 
   for (const pred of predictions) {
     const generatedAt = new Date(pred.generated_at);
@@ -247,6 +246,7 @@ async function runTrackRecordCheckpoints() {
 
       // Fetch current price
       const priceData = await fetchCurrentPrice(pred);
+      if (priceData && priceData.notMeasurable) { notMeasurable++; staticSymbols.add(pred.instrument_name); continue; }
       if (!priceData) { skipped++; continue; }
 
       const returnPct = ((priceData.price - pred.entry_price_inr) / pred.entry_price_inr) * 100;
@@ -329,7 +329,8 @@ async function runTrackRecordCheckpoints() {
     }
   }
 
-  console.log(`📋 Track record engine complete: ${checked} checkpoints in window, ${alreadyLogged} already recorded, ${logged} logged, ${skipped} skipped.`);
+  if (staticSymbols.size) console.log(`   ⓘ No market price, so no return to measure (not a failure): ${[...staticSymbols].join(', ')}`);
+  console.log(`📋 Track record engine complete: ${checked} checkpoints in window, ${alreadyLogged} already recorded, ${notMeasurable} not measurable (static price), ${logged} logged, ${skipped} skipped.`);
 
   // Health reporting — if predictions exist but nothing was checked,
   // that is an anomaly worth an immediate alert. This is exactly the
@@ -341,9 +342,11 @@ async function runTrackRecordCheckpoints() {
     // checkpoint logged earlier today is simply done. Counting those as failed
     // made 500/500 look like a total failure and emailed a false alarm.
     itemsProcessed: logged,
-    itemsExpected:  checked - alreadyLogged > 0 ? checked - alreadyLogged : null,
+    // Statically-priced bonds/SGBs have no market price, so their checkpoints can
+    // never be measured — also not a failure.
+    itemsExpected:  checked - alreadyLogged - notMeasurable > 0 ? checked - alreadyLogged - notMeasurable : null,
     itemsFailed:    skipped,
-    detail:         `${checked} checkpoints in window: ${alreadyLogged} already recorded, ${logged} written, ${skipped} could not be measured (no price or implausible)`,
+    detail:         `${checked} checkpoints in window: ${alreadyLogged} already recorded, ${notMeasurable} not measurable (static price), ${logged} written, ${skipped} failed (no live price or implausible)`,
   });
 }
 
