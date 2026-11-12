@@ -26,6 +26,7 @@
 const { supabaseAdmin } = require('../../config/supabase');
 const db = require('../lib/db');
 const aiProvider        = require('./aiProvider');
+const startingPlan      = require('./startingPlan');
 const emailEngine       = require('./emailEngine');
 const { reportRun }     = require('./healthEngine');
 const { refreshAllMarketData } = require('./marketData');
@@ -381,6 +382,74 @@ function getSharedSections({ force = false } = {}) {
 // ONE CLIENT'S BRIEF
 // ─────────────────────────────────────────────────────────────────────
 
+/** Panic history lives on the behavioural profile; it lowers the equity cap. */
+async function getPanicHistory(clientId) {
+  try {
+    const { data } = await supabaseAdmin.from('client_behavioural_profiles')
+      .select('panic_history').eq('client_id', clientId)
+      .order('assessed_at', { ascending: false }).limit(1).maybeSingle();
+    return !!data?.panic_history;
+  } catch { return false; }
+}
+
+async function getGoals(clientId) {
+  try {
+    const { data } = await supabaseAdmin.from('client_goals')
+      .select('goal_name, goal_type, target_amount_inr, current_corpus_inr, target_date')
+      .eq('client_id', clientId).eq('is_active', true);
+    return data || [];
+  } catch { return []; }
+}
+
+/**
+ * Every tradeable instrument with what we know about it: was its latest score
+ * measured on real price data, and what is our current signal. Shared by all
+ * clients, so cached for an hour like the other shared sections.
+ */
+let _pool = null;
+async function getInstrumentPool() {
+  if (_pool && Date.now() - _pool.at < SHARED_TTL_MS) return _pool.rows;
+  const since = new Date(Date.now() - 10 * 86400000).toISOString();
+  const { data: inst } = await supabaseAdmin.from('instrument_universe')
+    .select('id, symbol, name, category, instrument_type, price_source').eq('status', 'active');
+  const tradeable = (inst || []).filter(i => !['static', 'static_reference'].includes(i.price_source));
+  const ids = tradeable.map(i => i.id);
+  const { data: scores } = await supabaseAdmin.from('instrument_scores')
+    .select('instrument_id, scored_at, price_data_points, data_complete')
+    .in('instrument_id', ids).gte('scored_at', since)
+    .order('scored_at', { ascending: false }).limit(2000);
+  const measured = new Set(), seen = new Set();
+  for (const sc of scores || []) {
+    if (seen.has(sc.instrument_id)) continue;
+    seen.add(sc.instrument_id);
+    if ((sc.price_data_points || 0) > 0 || sc.data_complete === true) measured.add(sc.instrument_id);
+  }
+  const { data: sigs } = await supabaseAdmin.from('recommendations')
+    .select('instrument_name, action, confidence_score, generated_at')
+    .in('instrument_name', tradeable.map(i => i.symbol))
+    .is('client_id', null).eq('is_active', true).gte('generated_at', since)
+    .order('generated_at', { ascending: false }).limit(1000);
+  const sig = {};
+  for (const r of sigs || []) if (!sig[r.instrument_name]) sig[r.instrument_name] = r;
+  const rows = tradeable.map(i => ({
+    symbol: i.symbol, name: i.name, category: i.category, instrument_type: i.instrument_type,
+    measured: measured.has(i.id), action: sig[i.symbol]?.action || null,
+    confidence: Number(sig[i.symbol]?.confidence_score) || 0,
+  }));
+  _pool = { at: Date.now(), rows };
+  return rows;
+}
+
+async function buildStartingPlanForClient(clientId, riskScore) {
+  try {
+    const [panicHistory, goals, pool] = await Promise.all([getPanicHistory(clientId), getGoals(clientId), getInstrumentPool()]);
+    return startingPlan.buildStartingPlan({ riskScore, panicHistory, goals, pool });
+  } catch (e) {
+    console.warn(`   ⚠ starting plan: ${e.message}`);
+    return null;
+  }
+}
+
 async function buildBriefForClient(client, shared) {
   const [riskScore, holdings, goalNote] = await Promise.all([
     getRiskScore(client.id), getHoldings(client.id), buildGoalNote(client.id),
@@ -388,7 +457,11 @@ async function buildBriefForClient(client, shared) {
   const actions = await buildHoldingActions(holdings);
   const { ideas, note: ideasNote } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
   const portfolioNote = buildPortfolioNote(holdings, actions);
-  const todayAction = decideTodayAction(holdings, actions, ideas);
+  // A client with nothing logged gets a starting plan built from their profile and goals.
+  const plan = holdings.length ? null : await buildStartingPlanForClient(client.id, riskScore);
+  const todayAction = plan
+    ? 'Your starting plan is below — monthly amounts for each goal and where to put them. Add what you buy as holdings and we will track it every morning.'
+    : decideTodayAction(holdings, actions, ideas);
 
   const brief = {
     market_snapshot: shared.marketSnapshot,
@@ -400,6 +473,7 @@ async function buildBriefForClient(client, shared) {
     ideas_note:      ideasNote,
     top_signals:     ideas.map(i => ({ symbol: i.symbol, action: i.action, rationale: i.rationale })),
     goal_note:       goalNote,
+    starting_plan:   plan,
     education_point: shared.educationPoint,
   };
 
@@ -412,6 +486,7 @@ async function buildBriefForClient(client, shared) {
     'MARKET SNAPSHOT', shared.marketSnapshot,
     shared.news.length ? `\nIN THE NEWS\n${shared.news.map(n => `• ${n.title}${n.severity ? ` (${n.severity})` : ''}`).join('\n')}` : '',
     `\nYOUR PORTFOLIO\n${portfolioNote}`,
+    plan ? `\nYOUR STARTING PLAN\n${startingPlan.planToText(plan)}` : '',
     actions.length ? actions.map(a => `• ${a.symbol} — ${a.action || 'no signal'}: ${a.advice}`).join('\n') : '',
     ideas.length || ideasNote ? `\nIDEAS WORTH A LOOK${ideasNote ? `\n${ideasNote}` : ''}` : '',
     ideas.length ? ideas.map(i => `• ${i.symbol} (${i.action})${i.entry ? ` entry ~₹${i.entry}` : ''}${i.target ? `, target ₹${i.target}` : ''}${i.stop ? `, stop-loss ₹${i.stop}` : ''}`).join('\n') : '',

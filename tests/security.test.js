@@ -258,6 +258,17 @@ function call(method, path, body, token, headers = {}) {
   ck('…and the brief explains why', /not completed with live price data/.test(r.body.brief?.brief_json?.ideas_note || ''));
   DB.rows('instrument_scores').forEach(x => { x.price_data_points = 250; x.data_complete = true; });
 
+  // no holdings → a starting plan built from the profile and goals
+  DB.rows('portfolios').forEach(x => { x.is_active = false; });
+  DB.seed('client_goals', [{ client_id: 'A', goal_name: 'Emergency Fund', target_amount_inr: 300000, current_corpus_inr: 0, target_date: '2030-03-31', is_active: true }]);
+  DB.rows('morning_briefs').length = 0;
+  r = await call('GET', '/api/brief/A', null, tAnew);
+  const sp = r.body.brief?.brief_json?.starting_plan;
+  ck('a client with no holdings gets a starting plan', !!sp && sp.goals?.[0]?.goal === 'Emergency Fund' && sp.goals[0].monthly_needed > 0);
+  ck('…shown in the brief text the app displays', /YOUR STARTING PLAN/.test(r.body.brief?.whatsapp_message || ''));
+  ck("…and today's action points to it", /starting plan/i.test(r.body.brief?.brief_json?.today_action || ''));
+  DB.rows('portfolios').forEach(x => { x.is_active = true; });
+
   // unmigrated DB: brief_json column missing
   DB.rejectColumns.morning_briefs = new Set(['brief_json']);
   DB.rows('morning_briefs').length = 0; 

@@ -177,6 +177,19 @@ async function sendMorningBrief(client, brief) {
       <p style="margin:0 0 8px;">${esc(brief.portfolio_note)}</p>${
       brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
   }
+  if (brief.starting_plan?.goals?.length) {
+    const { fmtINR } = require('./startingPlan');
+    const plan = brief.starting_plan;
+    const goalsHtml = plan.goals.map((g, i) => {
+      const when = g.target_date ? ` by ${new Date(g.target_date).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })}` : '';
+      const need = g.monthly_needed != null ? ` — <strong>about ${fmtINR(g.monthly_needed)}/month</strong>` : '';
+      const rows = g.sleeves.map(sl => `<li style="margin:0 0 3px;">${sl.pct}% ${esc(sl.label)}${g.monthly_needed ? ` (~${fmtINR(Math.round(g.monthly_needed * sl.pct / 10000) * 100)})` : ''}${sl.instruments.length ? `: <span style="color:#3A463E;">${sl.instruments.map(x => esc(x.name || x.symbol)).join(', ')}</span>` : ''}</li>`).join('');
+      return `<div style="margin:0 0 10px;"><strong>${i + 1}. ${esc(g.goal)}</strong>${g.target ? ` (${fmtINR(g.target)}${when})` : ''}${need}<ul style="margin:4px 0 0;padding-left:18px;font-size:13px;">${rows}</ul></div>`;
+    }).join('');
+    sections.push(`${H3('Your starting plan')}<p style="margin:0 0 8px;">Based on your ${esc(plan.risk_band)} risk profile${plan.goals.length > 1 ? ' and goals' : ''}:</p>${goalsHtml}${
+      plan.has_emergency_goal ? '' : '<p style="margin:0 0 6px;font-size:12px;">Before other goals, most planners suggest an emergency fund of 3–6 months of expenses in a liquid fund.</p>'
+    }<p style="margin:0 0 18px;font-size:12px;color:#6E7A71;">${esc(plan.assumptions)} Invest what you are comfortable with — any amount helps. Add what you buy as holdings and we will track it every morning.</p>`);
+  }
   if (brief.ideas?.length || brief.ideas_note) {
     const label = a => a === 'BUY' ? 'BUY' : a === 'WATCH' ? 'WATCHING — not a buy yet' : a;
     sections.push(`${H3('Ideas worth a look')}${brief.ideas_note ? `<p style="margin:0 0 8px;">${esc(brief.ideas_note)}</p>` : ''}${
