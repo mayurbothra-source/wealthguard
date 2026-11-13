@@ -153,7 +153,7 @@ async function notifyClientsForAlert(alert, instrument) {
       // query silently returned nothing and this engine never saw a single
       // client holding.
       .from('portfolios')
-      .select('client_id')
+      .select('client_id, entry_source')
       .eq('instrument_name', instrument.symbol)
       .eq('is_active', true);
 
@@ -202,11 +202,14 @@ async function notifyClientsForAlert(alert, instrument) {
       .select('id, full_name, email, email_alerts_enabled')
       .in('id', holdings.map(h => h.client_id));
 
+    // One email per client per flash alert, logged in alert_deliveries (WS5).
+    const { deliverAlert } = require('./holdingAlerts');
+    const demoClients = new Set(holdings.filter(h => h.entry_source === 'demo_seed').map(h => h.client_id));
     for (const client of (clients || [])) {
-      if (client.email && client.email_alerts_enabled !== false) {
-        emailEngine.sendFlashAlert(client, { ...alert, signal_context: signalContext })
-          .catch(() => {});
-      }
+      deliverAlert(client, {
+        key: `flash:${alert.id}`, type: 'flash_alert', instrumentId: instrument.id, demo: demoClients.has(client.id),
+        title: `${instrument.name} ${alert.move_pct > 0 ? '+' : ''}${Number(alert.move_pct).toFixed(1)}% this hour`, body,
+      }).catch(() => {});
     }
 
     return holdings.length;
@@ -323,4 +326,4 @@ async function runFlashAlertScan() {
   });
 }
 
-module.exports = { runFlashAlertScan, isMarketHours };
+module.exports = { runFlashAlertScan, isMarketHours, _test: { notifyClientsForAlert } };
