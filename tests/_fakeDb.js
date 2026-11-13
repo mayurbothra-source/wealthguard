@@ -10,12 +10,14 @@ function makeDb() {
   const T = {};              // table -> rows
   let seq = 1;
   const rejectColumns = {};  // table -> Set of columns that "do not exist"
+  const missingTables = new Set();  // tables that "do not exist yet" (migration not run)
   const rows = t => (T[t] = T[t] || []);
 
   function builder(table) {
     const q = { op: 'select', filters: [], order: null, lim: null, payload: null, head: false, count: false, onConflict: null, single: null };
     const match = r => q.filters.every(f => f(r));
     const run = () => {
+      if (missingTables.has(table)) return { data: null, count: null, error: { code: '42P01', message: `relation "public.${table}" does not exist` } };
       const bad = q.payload && [].concat(q.payload).flatMap(Object.keys).find(k => rejectColumns[table]?.has(k));
       if (bad) return { data: null, error: { code: 'PGRST204', message: `Could not find the '${bad}' column of '${table}' in the schema cache` } };
 
@@ -24,6 +26,10 @@ function makeDb() {
         // unique (code, client_id) on discount_code_usage, like the migration adds
         if (table === 'discount_code_usage') {
           for (const r of list) if (rows(table).some(x => x.code === r.code && x.client_id === r.client_id))
+            return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+        }
+        if (table === 'brief_deliveries') {
+          for (const r of list) if (rows(table).some(x => x.client_id === r.client_id && x.ist_date === r.ist_date))
             return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
         }
         if (table === 'payment_events') {
@@ -87,6 +93,6 @@ function makeDb() {
     return api;
   }
 
-  return { from: builder, T, rows, rejectColumns, seed(t, list) { rows(t).push(...list.map(r => ({ id: r.id || `${t[0]}${seq++}`, ...r }))); } };
+  return { from: builder, T, rows, rejectColumns, missingTables, seed(t, list) { rows(t).push(...list.map(r => ({ id: r.id || `${t[0]}${seq++}`, ...r }))); } };
 }
 module.exports = makeDb;

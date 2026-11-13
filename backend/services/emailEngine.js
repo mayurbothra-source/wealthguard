@@ -86,21 +86,22 @@ async function logEmail(clientId, to, type, subject, status, errorDetail) {
 }
 
 /**
- * Sends an email. Never throws — returns true/false.
+ * Sends an email. Never throws. Returns { ok, id, error, skipped } where `id` is
+ * the provider's message id (Resend) when the send succeeded.
  */
-async function send({ to, subject, html, text, clientId = null, type = 'general' }) {
+async function sendDetailed({ to, subject, html, text, clientId = null, type = 'general' }) {
   if (!RESEND_KEY) {
     console.warn('   ⚠ Email: RESEND_API_KEY not set — skipping send');
     await logEmail(clientId, to, type, subject, 'skipped', 'RESEND_API_KEY not configured');
-    return false;
+    return { ok: false, skipped: true, error: 'RESEND_API_KEY not configured' };
   }
   if (!to) {
     await logEmail(clientId, to, type, subject, 'skipped', 'No recipient address');
-    return false;
+    return { ok: false, skipped: true, error: 'No recipient address' };
   }
 
   try {
-    await axios.post(
+    const res = await axios.post(
       RESEND_URL,
       { from: FROM, to: [to], subject, html, text: text || undefined },
       {
@@ -112,15 +113,20 @@ async function send({ to, subject, html, text, clientId = null, type = 'general'
       }
     );
     await logEmail(clientId, to, type, subject, 'sent', null);
-    return true;
+    return { ok: true, id: res?.data?.id || null };
   } catch (e) {
     const detail = e.response
       ? `HTTP ${e.response.status} — ${JSON.stringify(e.response.data).slice(0, 200)}`
       : e.message;
     console.warn(`   ⚠ Email send failed to ${to}: ${detail}`);
     await logEmail(clientId, to, type, subject, 'failed', detail);
-    return false;
+    return { ok: false, error: detail };
   }
+}
+
+/** Sends an email. Never throws — returns true/false. */
+async function send(args) {
+  return (await sendDetailed(args)).ok;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -150,13 +156,21 @@ async function sendAuthCode(client, code) {
 
 async function sendMorningBrief(client, brief) {
   if (!client.email || client.email_brief_enabled === false) {
-    await logEmail(client.id, client.email, 'morning_brief', 'Morning Brief', 'skipped',
-      !client.email ? 'No email on file' : 'Client opted out');
-    return false;
+    const why = !client.email ? 'No email on file' : 'Client opted out';
+    await logEmail(client.id, client.email, 'morning_brief', 'Morning Brief', 'skipped', why);
+    return { ok: false, skipped: true, error: why };
   }
+  const { subject, html, text } = renderMorningBrief(client, brief);
+  // Detailed result so delivery tracking can store the provider's message id.
+  return sendDetailed({ to: client.email, subject, html, text, clientId: client.id, type: 'morning_brief' });
+}
 
-  const dateStr = new Date().toLocaleDateString('en-IN',
-    { weekday: 'long', day: 'numeric', month: 'long' });
+/**
+ * The exact email (subject, HTML, plain text) for a brief — used to send it and
+ * by the admin preview, so what the admin sees is what the client receives.
+ */
+function renderMorningBrief(client, brief, now = new Date()) {
+  const dateStr = require('../lib/istTime').istLongDate(now);
 
   const sections = [];
   if (brief.market_snapshot) {
@@ -229,14 +243,7 @@ async function sendMorningBrief(client, brief) {
     'You are receiving this because you have morning briefs enabled. You can turn them off in your profile settings.'
   );
 
-  return send({
-    to:       client.email,
-    subject:  `WealthGuard Morning Brief — ${dateStr}`,
-    html,
-    text:     brief.full_text || undefined,
-    clientId: client.id,
-    type:     'morning_brief',
-  });
+  return { subject: `WealthGuard Morning Brief — ${dateStr}`, html, text: brief.full_text || undefined };
 }
 
 async function sendFlashAlert(client, alert) {
@@ -356,6 +363,8 @@ function isConfigured() {
 module.exports = {
   send,
   sendMorningBrief,
+  renderMorningBrief,
+  sendDetailed,
   sendAuthCode,
   sendFlashAlert,
   sendPaymentGraceNotice,
