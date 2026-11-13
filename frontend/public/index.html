@@ -1236,6 +1236,13 @@ table.data-table{width:100%;border-collapse:collapse;}
     </div>
     <div style="max-width:1100px;margin:0 auto;padding:20px 24px 60px;">
 
+      <!-- System health (WS6) -->
+      <div class="sip-section">
+        <div class="sip-section-title">🩺 System health</div>
+        <div class="sip-section-sub">Did today's brief go out, is the data fresh, and what failed recently — on one screen.</div>
+        <div id="admin-system-health"><div class="empty-state"><p>Loading&hellip;</p></div></div>
+      </div>
+
       <!-- Market data freshness (WS2) -->
       <div class="sip-section">
         <div class="sip-section-title">📊 Market data freshness</div>
@@ -4046,7 +4053,38 @@ async function loadAdminDataFreshness(){
   }
 }
 
+async function loadAdminSystemHealth(){
+  const el = document.getElementById('admin-system-health');
+  if (!el) return;
+  try {
+    const r = await fetch(API.base + '/admin/system-health', { headers: API._headers() });
+    const h = await r.json();
+    if (!r.ok) { el.innerHTML = `<div class="empty-state"><p>${esc(h.error || 'Could not load')}</p></div>`; return; }
+    const t = iso => iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+    const b = h.brief || {};
+    const briefOk = b.sent != null && b.sent === b.eligible;
+    const pill = (ok, txt) => `<span class="admin-badge ${ok ? 'badge-low' : 'badge-high'}">${txt}</span>`;
+    const inst = h.freshness.instruments || {};
+    el.innerHTML = `
+      <div class="admin-log-row"><div><b>Today's brief (${esc(h.date)})</b> ${pill(briefOk, briefOk ? 'all sent' : 'check')}</div>
+        <div style="color:var(--muted);font-size:11px;">${b.sent == null ? esc(b.note || 'no delivery log') :
+          `sent ${b.sent} of ${b.eligible} · failed ${b.failed} · skipped (late) ${b.skipped_late} · not attempted ${b.pending} · first ${t(b.first_sent_at)} · last ${t(b.last_sent_at)}`}</div></div>
+      <div class="admin-log-row"><div><b>Data freshness</b> ${pill(h.freshness.indices_ok, h.freshness.indices_ok ? 'OK' : 'WARN')}</div>
+        <div style="color:var(--muted);font-size:11px;">${(h.freshness.indices || []).map(x => `${esc(x.label)}: ${esc(x.status)}${x.unverified ? '/unverified' : ''} (${esc(x.source)}, ${x.age_hours != null ? x.age_hours + ' h' : '—'})`).join(' · ')}
+          <br>instruments priced in the last 2 trading days: ${inst.priced_fresh ?? '—'} · stale or never priced: ${inst.priced_stale_or_unknown ?? '—'}</div></div>
+      <div class="admin-log-row"><div><b>Instruments by price mode</b></div>
+        <div style="color:var(--muted);font-size:11px;">live ${h.price_modes.live ?? 0} · daily NAV ${h.price_modes.daily_nav ?? 0} · static ${h.price_modes.static ?? 0}</div></div>
+      <div class="admin-log-row"><div><b>Scheduled jobs (last run)</b></div>
+        <div style="color:var(--muted);font-size:11px;">${(h.jobs || []).map(j => `${esc(j.engine)}: ${pill(j.status === 'ok', esc(j.status))} ${t(j.last_run)}`).join('<br>') || 'no runs logged'}</div></div>
+      <div class="admin-log-row"><div><b>Last ${h.errors.length} errors</b></div>
+        <div style="color:var(--muted);font-size:11px;">${h.errors.map(e => `${t(e.at)} · ${esc(e.source)} · ${esc(String(e.message).slice(0, 160))}`).join('<br>') || 'none'}</div></div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p>Could not load: ${esc(e.message)}</p></div>`;
+  }
+}
+
 async function loadAdminView(){
+  loadAdminSystemHealth();
   loadAdminDataFreshness();
   if (!sb) return;
   await Promise.all([

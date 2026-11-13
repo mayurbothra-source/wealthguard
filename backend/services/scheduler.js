@@ -209,6 +209,12 @@ function startSchedulers() {
   }, UTC);
   console.log('   ✓ Morning brief: 7:30 AM IST (Mon-Fri)');
 
+  // ── 08:30 IST Mon–Fri — Admin daily summary (03:00 UTC) ────────────
+  cron.schedule('0 3 * * 1-5', () => {
+    safeRun('dailySummary', () => require('./systemHealth').sendDailySummary());
+  }, UTC);
+  console.log('   ✓ Admin daily summary: 8:30 AM IST (Mon-Fri)');
+
   // ── 09:00 IST daily — Subscription lifecycle (03:30 UTC) ───────────
   cron.schedule('30 3 * * *', () => {
     safeRun('subscriptionEngine', runSubscriptionEngine);
