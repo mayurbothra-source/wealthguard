@@ -163,6 +163,9 @@ async function getMFNav(amfiCode) {
       amfi_code: amfiCode,
       nav: parseFloat(data.data?.[0]?.nav),
       date: data.data?.[0]?.date,
+      // MFAPI dates are dd-mm-yyyy; NAVs are struck at the day's close (IST).
+      as_of: (/^(\d{2})-(\d{2})-(\d{4})$/.exec(data.data?.[0]?.date || '') || []).length
+        ? (([, d, m, y]) => `${y}-${m}-${d}T15:30:00+05:30`)(/^(\d{2})-(\d{2})-(\d{4})$/.exec(data.data[0].date)) : null,
       fund_name: data.meta?.fund_house + ' - ' + data.meta?.scheme_name,
       source: 'mfapi_live'
     };
@@ -292,7 +295,9 @@ async function getYahooQuote(symbol) {
     const price = meta.regularMarketPrice;
     const prevClose = meta.previousClose || meta.chartPreviousClose;
     const change_pct = prevClose ? ((price - prevClose) / prevClose) * 100 : 0;
-    return { symbol, price, change_pct: parseFloat(change_pct.toFixed(2)), source: 'yahoo_live' };
+    // as_of: when this price was true (market time), so callers can tell a live price from a stale one.
+    const as_of = meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : null;
+    return { symbol, price, change_pct: parseFloat(change_pct.toFixed(2)), source: 'yahoo_live', as_of };
   } catch (err) {
     // Previously this swallowed the error completely, making it impossible
     // to tell WHY Yahoo failed (blocked? timeout? changed response shape?)
