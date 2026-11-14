@@ -154,7 +154,7 @@ async function deliverMorningBriefs({ trigger = 'cron', now = new Date(), ignore
     let brief;
     try {
       brief = await engine.buildBriefForClient(client, shared);
-      const { ok } = await engine.persistBrief(client, brief);
+      const { ok } = await engine.persistBrief(client, brief, date);
       if (ok) built++;
     } catch (e) {
       console.error(`   ❌ Brief build failed for ${client.id}: ${e.message}`);
