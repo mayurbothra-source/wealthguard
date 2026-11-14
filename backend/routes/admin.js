@@ -240,6 +240,66 @@ router.get('/data-freshness', async (req, res) => {
   }
 });
 
+/**
+ * Checks instrument price sources from the server (which can reach Yahoo and
+ * MFAPI), without changing anything:
+ *   - candidate Yahoo tickers for instruments with a disputed ticker
+ *   - every mutual fund's AMFI code: scheme name, latest NAV date, duplicates
+ *   GET /api/admin/verify-instruments   (admin key or admin session)
+ * Use the result to decide which ticker / code corrections to apply.
+ */
+const TICKER_CANDIDATES = {
+  BHARAT22ETF: ['ICICIB22.NS', 'BHARAT22.NS'],
+  AXISGOLD:    ['AXISGOLD.NS', 'AXISGOLDETF.NS'],
+  SBIGOLD:     ['SETFGOLD.NS', 'SBIGOLD.NS'],
+};
+router.get('/verify-instruments', async (req, res) => {
+  if (!(await checkAdmin(req, res))) return;
+  try {
+    const axios = require('axios');
+    const { supabaseAdmin } = require('../../config/supabase');
+    const { getYahooQuote } = require('../services/marketData');
+    const tickers = [];
+    for (const [symbol, list] of Object.entries(TICKER_CANDIDATES)) {
+      for (const t of list) {
+        const q = await getYahooQuote(t);
+        tickers.push({ symbol, ticker: t, ok: !!q, price: q?.price ?? null, as_of: q?.as_of ?? null });
+        await new Promise(r => setTimeout(r, 800));
+      }
+    }
+    const { data: funds } = await supabaseAdmin.from('instrument_universe')
+      .select('symbol, name, amfi_code, status').eq('price_source', 'mfapi');
+    const seen = {};
+    (funds || []).forEach(f => { if (f.amfi_code) (seen[f.amfi_code] = seen[f.amfi_code] || []).push(f.symbol); });
+    const mf = [];
+    for (const f of funds || []) {
+      const row = { symbol: f.symbol, name: f.name, status: f.status, amfi_code: f.amfi_code, issues: [] };
+      if (!f.amfi_code) { row.issues.push('no amfi_code'); mf.push(row); continue; }
+      if (seen[f.amfi_code].length > 1) row.issues.push(`code shared with ${seen[f.amfi_code].filter(x => x !== f.symbol).join(', ')}`);
+      try {
+        const { data } = await axios.get(`https://api.mfapi.in/mf/${f.amfi_code}/latest`, { timeout: 10000 });
+        row.scheme_name = data?.meta?.scheme_name || null;
+        row.nav = data?.data?.[0]?.nav ?? null;
+        row.nav_date = data?.data?.[0]?.date ?? null;
+        if (!row.scheme_name) row.issues.push('MFAPI returned no scheme');
+        const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(row.nav_date || '');
+        if (m && Date.now() - new Date(`${m[3]}-${m[2]}-${m[1]}`).getTime() > 7 * 86400e3) row.issues.push(`latest NAV is from ${row.nav_date}`);
+        const amc = (f.name || '').split(/\s+/)[0].toLowerCase();
+        if (row.scheme_name && amc && !row.scheme_name.toLowerCase().includes(amc)) row.issues.push('scheme name does not match the fund house');
+        if (row.scheme_name && /idcw|dividend|bonus/i.test(row.scheme_name)) row.issues.push('not a growth plan');
+      } catch (e) {
+        row.issues.push(`MFAPI error: ${e.message}`);
+      }
+      mf.push(row);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    res.json({ checked_at: new Date().toISOString(), tickers, mutual_funds: mf,
+               funds_with_issues: mf.filter(x => x.issues.length).length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/health', async (req, res) => {
   if (!checkKey(req, res)) return;
   try {
