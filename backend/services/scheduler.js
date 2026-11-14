@@ -185,6 +185,7 @@ async function _runDueJobs() {
     if (isMarketHours()) {
       done.push('market data'); await safeRun('marketData(wake)', refreshAllMarketData);
       if (!(await ranTodayIST('flashAlertEngine', 45))) { done.push('flash alerts'); await safeRun('flashAlertEngine(wake)', runFlashAlertScan); }
+      done.push('holding alerts'); await safeRun('holdingAlerts(wake)', () => require('./holdingAlerts').runHoldingAlertScan());
     }
     if (await eveningJobDue('aiLeverEngine', 18 * 60, 14)) {
       done.push('AI lever scan'); await safeRun('aiLeverEngine(wake)', runAILeverScan);
@@ -222,9 +223,12 @@ function startSchedulers() {
 
   // ── Every hour at :05 during market hours — Flash alerts ───────────
   cron.schedule('5 * * * *', async () => {
-    if (isMarketHours()) await safeRun('flashAlertEngine', runFlashAlertScan);
+    if (isMarketHours()) {
+      await safeRun('flashAlertEngine', runFlashAlertScan);
+      await safeRun('holdingAlerts', () => require('./holdingAlerts').runHoldingAlertScan());
+    }
   });
-  console.log('   ✓ Flash alert scan: Every hour during market hours');
+  console.log('   ✓ Flash alert + stop-loss / critical-risk scan: Every hour during market hours');
 
   // ── 16:30 IST Mon–Fri — EOD + track record (11:00 UTC) ─────────────
   cron.schedule('0 11 * * 1-5', () => {

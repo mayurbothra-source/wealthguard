@@ -184,7 +184,7 @@ async function getHoldings(clientId) {
   try {
     const { data } = await supabaseAdmin
       .from('portfolios')
-      .select('instrument_name, quantity, avg_buy_price_inr')
+      .select('*')
       .eq('client_id', clientId).eq('is_active', true);
     return data || [];
   } catch { return []; }
@@ -456,7 +456,73 @@ async function buildGoalNote(clientId) {
   } catch { return null; }
 }
 
-function decideTodayAction(holdings, actions, ideas) {
+/** Current prices for holdings, memoised for 30 minutes so N clients cost one fetch per instrument. */
+const _px = new Map();
+async function priceOf(inst) {
+  const hit = _px.get(inst.symbol);
+  if (hit && Date.now() - hit.at < 30 * 60e3) return hit.v;
+  let v = null;
+  try { v = await require('./instrumentEngine').fetchInstrumentPrice(inst); } catch { v = null; }
+  _px.set(inst.symbol, { at: Date.now(), v });
+  return v;
+}
+
+/**
+ * Value, day change, P&L and a HOLD / REVIEW / EXIT status for each holding,
+ * tied to our current signal, the stop-loss and any CRITICAL AI flag.
+ */
+async function buildPortfolio(holdings, actions) {
+  if (!holdings.length) return null;
+  const { holdingStatus } = require('./holdingAlerts');
+  const symbols = [...new Set(holdings.map(h => h.instrument_name))];
+  const { data: insts } = await supabaseAdmin.from('instrument_universe').select('*').in('symbol', symbols);
+  const inst = Object.fromEntries((insts || []).map(i => [i.symbol, i]));
+  let critical = new Set();
+  try {
+    const ids = (insts || []).map(i => i.id);
+    const { data: flags } = ids.length ? await supabaseAdmin.from('ai_instrument_flags').select('instrument_id, risk_level, is_active')
+      .eq('is_active', true).eq('risk_level', 'CRITICAL').in('instrument_id', ids) : { data: [] };
+    critical = new Set((flags || []).map(f => f.instrument_id));
+  } catch { /* no flags table → no critical flags */ }
+  const act = Object.fromEntries(actions.map(a => [a.symbol, a]));
+
+  let value = 0, cost = 0, dayChange = 0, priced = 0;
+  const rows = [];
+  for (const h of holdings) {
+    const i = inst[h.instrument_name] || { symbol: h.instrument_name };
+    const q = i.id ? await priceOf(i) : null;
+    const price = q?.price ?? null;
+    const qty = Number(h.quantity) || 0, avg = Number(h.avg_buy_price_inr) || 0;
+    const a = act[h.instrument_name];
+    const stop = Number(h.stop_loss_price) || (a?.action === 'BUY' ? Number(a.stop) : null) || null;
+    const st = holdingStatus({ price, stop, signalAction: a?.action, aiCritical: critical.has(i.id) });
+    const val = price != null ? qty * price : null;
+    const chgPct = price != null && q?.change_pct != null && q.source !== 'mfapi_live' ? Number(q.change_pct) : null;
+    const dayAbs = val != null && chgPct != null ? val - val / (1 + chgPct / 100) : null;
+    if (val != null) { value += val; cost += qty * avg; priced++; if (dayAbs != null) dayChange += dayAbs; }
+    rows.push({
+      symbol: h.instrument_name, name: i.name || h.instrument_name, quantity: qty, avg_price: avg,
+      price, value: val != null ? Math.round(val) : null,
+      day_change_pct: chgPct,
+      pnl: val != null ? Math.round(val - qty * avg) : null,
+      pnl_pct: val != null && avg > 0 ? Math.round(((price - avg) / avg) * 10000) / 100 : null,
+      stop, signal: a?.action || null, status: st.status, reasons: st.reasons,
+    });
+  }
+  return {
+    holdings: rows, priced, total: holdings.length,
+    value: priced ? Math.round(value) : null,
+    day_change: priced ? Math.round(dayChange) : null,
+    pnl: priced ? Math.round(value - cost) : null,
+    pnl_pct: priced && cost > 0 ? Math.round(((value - cost) / cost) * 10000) / 100 : null,
+    exits: rows.filter(r => r.status === 'EXIT').map(r => r.symbol),
+    reviews: rows.filter(r => r.status === 'REVIEW').map(r => r.symbol),
+  };
+}
+
+function decideTodayAction(holdings, actions, ideas, portfolio = null) {
+  if (portfolio?.exits?.length) return `Stop-loss reached on ${portfolio.exits.join(', ')} — review ${portfolio.exits.length > 1 ? 'these holdings' : 'this holding'} today.`;
+  if (portfolio?.reviews?.length) return `Review ${portfolio.reviews.join(', ')} — details under Your Portfolio.`;
   const sells = actions.filter(a => a.action === 'SELL');
   if (sells.length) return `Review ${sells.map(s => s.symbol).join(', ')} — our signal on ${sells.length > 1 ? 'them has' : 'it has'} turned negative.`;
   if (ideas.length && ideas[0].action === 'BUY') {
@@ -578,11 +644,12 @@ async function buildBriefForClient(client, shared) {
   const tierPlan = require('../lib/entitlements').entitlementFromRow(client).plan;
   const opportunities = await buildOpportunities(tierPlan);
   const portfolioNote = buildPortfolioNote(holdings, actions);
+  const portfolio = await buildPortfolio(holdings, actions);
   // A client with nothing logged gets a starting plan built from their profile and goals.
   const plan = holdings.length ? null : await buildStartingPlanForClient(client.id, riskScore);
   const todayAction = plan
     ? 'Your starting plan is below — monthly amounts for each goal and where to put them. Add what you buy as holdings and we will track it every morning.'
-    : decideTodayAction(holdings, actions, ideas);
+    : decideTodayAction(holdings, actions, ideas, portfolio);
 
   const brief = {
     market_snapshot: shared.marketSnapshot,
@@ -591,6 +658,7 @@ async function buildBriefForClient(client, shared) {
     today_action:    todayAction,
     portfolio_note:  portfolioNote,
     holding_actions: actions,
+    portfolio,
     ideas,
     ideas_note:      ideasNote,
     no_ideas:        noIdeas,
@@ -612,7 +680,10 @@ async function buildBriefForClient(client, shared) {
     shared.news.length ? `\nIN THE NEWS\n${shared.news.map(n => `• ${n.title}${n.severity ? ` (${n.severity})` : ''}`).join('\n')}` : '',
     `\nYOUR PORTFOLIO\n${portfolioNote}`,
     plan ? `\nYOUR STARTING PLAN\n${startingPlan.planToText(plan)}` : '',
-    actions.length ? actions.map(a => `• ${a.symbol} — ${a.action || 'no signal'}: ${a.advice}`).join('\n') : '',
+    portfolio ? [
+      portfolio.value != null ? `Value ₹${portfolio.value.toLocaleString('en-IN')}${portfolio.day_change != null ? `, today ${portfolio.day_change >= 0 ? '+' : '−'}₹${Math.abs(portfolio.day_change).toLocaleString('en-IN')}` : ''}${portfolio.pnl != null ? `, gain/loss ${portfolio.pnl >= 0 ? '+' : '−'}₹${Math.abs(portfolio.pnl).toLocaleString('en-IN')} (${portfolio.pnl_pct}%)` : ''}` : 'Prices for your holdings could not be fetched this morning.',
+      ...portfolio.holdings.map(r => `• ${r.status} — ${r.symbol}${r.price != null ? ` ₹${r.price}` : ''}${r.pnl_pct != null ? ` (${r.pnl_pct >= 0 ? '+' : ''}${r.pnl_pct}%)` : ''}${r.reasons.length ? `: ${r.reasons.join('; ')}` : ''}`),
+    ].join('\n') : '',
     ideas.length || ideasNote ? `\nIDEAS WORTH A LOOK${ideasNote ? `\n${ideasNote}` : ''}` : '',
     ideas.length ? ideas.map(i => [
       `• ${i.symbol} (${i.action === 'WATCH' ? 'watching — not a buy yet' : i.action})${i.ai_label ? ` ${i.ai_label}` : ''}${i.confidence ? ` · confidence ${i.confidence}` : ''}`,
@@ -685,4 +756,4 @@ async function generateAndSendMorningBrief(opts = {}) {
   return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, confidenceBand } };
+module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildPortfolio, resetPriceCache: () => _px.clear(), buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, confidenceBand } };
