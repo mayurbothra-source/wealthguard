@@ -631,10 +631,12 @@ async function buildBriefForClient(client, shared) {
 }
 
 /** Writes the brief. brief_json is optional so a not-yet-migrated DB still works. */
-async function persistBrief(client, brief) {
+async function persistBrief(client, brief, date = istDate()) {
   const row = {
     client_id:        client.id,
-    brief_date:       istDate(),
+    // The delivery run passes its own IST date so a run that crosses midnight
+    // stores and marks the brief under the same day it is tracking.
+    brief_date:       date,
     market_snapshot:  brief.market_snapshot,
     portfolio_note:   brief.portfolio_note,
     top_signals:      brief.top_signals,
