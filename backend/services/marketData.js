@@ -28,8 +28,6 @@ const DEMO_PRICES = {
   ICICIBANK:{ price: 1243.75, change: 0.45, volume: 9876500 },
   TATAMOTORS:{price: 712.30,  change: -0.18, volume: 15234000 },
   SBIN:     { price: 834.50,  change: 1.23, volume: 18456000 },
-  NIFTY50:  { price: 24650.25,change: 0.68, volume: 0 },
-  INDIAVIX: { price: 13.42,  change: -0.82, volume: 0 },
   GOLDBEES: { price: 5842.00, change: 0.34, volume: 234000 },
 };
 
@@ -37,7 +35,6 @@ const DEMO_PRICES = {
 // downstream, same honesty rule as everything else: never presented as live
 // unless it genuinely is.
 const DEMO_YAHOO = {
-  SENSEX:  { price: 80845.20, change_pct: 0.54 },
   USDINR:  { price: 83.42, change_pct: -0.12 },
   GOLD_USD_OZ: { price: 2620.50, change_pct: 0.31 },
   SILVER_USD_OZ: { price: 30.80, change_pct: 0.85 },
@@ -118,102 +115,40 @@ async function getNSEQuote(symbol) {
   }
 }
 
-// ── NSE INDEX ──────────────────────────────────────────
-// NSE blocks requests from cloud servers (Render included), so in production
-// the NSE call almost always fails. Order of preference:
-//   1. NSE live   2. Yahoo live (^NSEI / ^INDIAVIX)   3. last real reading saved
-//   in Supabase (up to 3 days old, labelled 'supabase_cache' with its time)
-//   4. a placeholder labelled source:'demo' — never shown to a client as fact.
-const INDEX_YAHOO = { 'NIFTY 50': '^NSEI', 'INDIA VIX': '^INDIAVIX' };
-const INDEX_CACHE_KEY = 'index_prices_v1';
-const INDEX_CACHE_MAX_AGE_MS = 3 * 86400e3;
+// ── INDICES (Nifty 50, Sensex, India VIX) ─────────────────
+// All index figures come from indexData.js: NSE → Yahoo → Yahoo (2nd host) →
+// last stored reading, each with as_of, previous close and trust checks.
+// There are deliberately no hard-coded fallback values any more.
+const indexData = require('./indexData');
+const INDEX_KEY = { 'NIFTY 50': 'nifty', 'INDIA VIX': 'vix', 'SENSEX': 'sensex' };
 
-async function loadIndexCache() {
-  if (!supabaseAdmin) return {};
-  try {
-    const { data } = await supabaseAdmin.from('market_cache')
-      .select('data').eq('cache_key', INDEX_CACHE_KEY).maybeSingle();
-    return (data && data.data) || {};
-  } catch { return {}; }
-}
-
-async function saveIndexReading(indexName, reading) {
-  if (!supabaseAdmin) return;
-  try {
-    const all = await loadIndexCache();
-    all[indexName] = { price: reading.price, change_pct: reading.change_pct, source: reading.source, at: new Date().toISOString() };
-    await supabaseAdmin.from('market_cache').upsert(
-      { cache_key: INDEX_CACHE_KEY, data: all, updated_at: new Date().toISOString() },
-      { onConflict: 'cache_key' });
-  } catch (e) {
-    console.warn(`Could not save ${indexName} to the index cache: ${e.message}`);
-  }
-}
-
+/** Legacy shape: { name, price, change_pct, source, as_of, status } — price null when missing. */
 async function getNSEIndex(indexName = 'NIFTY 50') {
-  try {
-    const { data } = await axios.get(
-      `https://www.nseindia.com/api/allIndices`,
-      { headers: NSE_HEADERS, timeout: 8000 }
-    );
-    const idx = data.data?.find(d => d.indexSymbol === indexName);
-    if (!idx || idx.last == null) throw new Error('Index not found');
-    const live = {
-      name: idx.indexSymbol,
-      price: idx.last,
-      change_pct: idx.percentChange,
-      open: idx.open,
-      high: idx.high,
-      low: idx.low,
-      source: 'nse_live'
-    };
-    saveIndexReading(indexName, live);
-    return live;
-  } catch { /* NSE blocked or down — try Yahoo */ }
-
-  const ticker = INDEX_YAHOO[indexName];
-  if (ticker) {
-    const q = await getYahooQuote(ticker);
-    if (q && q.price != null) {
-      const live = { name: indexName, price: q.price, change_pct: q.change_pct, source: 'yahoo_live' };
-      saveIndexReading(indexName, live);
-      return live;
-    }
-  }
-
-  const cached = (await loadIndexCache())[indexName];
-  if (cached && cached.price != null && Date.now() - new Date(cached.at).getTime() < INDEX_CACHE_MAX_AGE_MS) {
-    return { name: indexName, price: cached.price, change_pct: cached.change_pct, source: 'supabase_cache', as_of: cached.at };
-  }
-
-  // Index-aware placeholder (a blocked "INDIA VIX" request once returned the
-  // Nifty level as VIX). Labelled demo: callers must not present it as fact.
-  const DEMO_INDEX_FALLBACK = {
-    'NIFTY 50':   { price: 24650.25, change_pct: 0.68 },
-    'INDIA VIX':  { price: 13.42,    change_pct: -0.82 },
-  };
-  const fallback = DEMO_INDEX_FALLBACK[indexName] || { price: 0, change_pct: 0 };
-  return { name: indexName, price: fallback.price, change_pct: fallback.change_pct, source: 'demo' };
+  const key = INDEX_KEY[indexName];
+  if (!key) return { name: indexName, price: null, change_pct: null, source: 'none', status: 'missing' };
+  const snap = await indexData.getIndexSnapshot();
+  const x = snap[key];
+  return { name: indexName, price: x.price, change_pct: x.change_pct, prev_close: x.prev_close,
+           source: x.source, as_of: x.as_of, status: x.status, unverified: x.unverified };
 }
 
-// ── INDIA VIX ──────────────────────────────────────────
-/** VIX with its provenance: { price, change_pct, source, as_of? }. */
+/** VIX with its provenance. price is null when no source and no stored reading exist. */
 async function getIndiaVIXQuote() {
   return getNSEIndex('INDIA VIX');
 }
 
 /**
- * VIX as a plain number, for the risk gate and flash alerts. Uses the live or
- * last real reading; only if neither exists does it return the placeholder,
- * and it says so in the logs.
+ * VIX as a plain number for the risk gate and flash alerts, or null when it is
+ * unknown. Callers must handle null (the risk gate treats unknown VIX
+ * conservatively); there is no default value.
  */
 async function getIndiaVIX() {
   try {
     const q = await getIndiaVIXQuote();
-    if (q.source === 'demo') console.warn('   ⚠ India VIX unavailable (NSE, Yahoo and cache all failed) — using placeholder 13.42');
-    return q.price || 13.42;
+    if (q.price == null) console.warn('   ⚠ India VIX unavailable from every source — treated as unknown');
+    return q.price ?? null;
   } catch {
-    return 13.42; // placeholder
+    return null;
   }
 }
 
@@ -312,6 +247,7 @@ async function getMacroIndicators() {
 
 // ── VIX REGIME CLASSIFICATION ──────────────────────────
 function classifyVIXRegime(vix) {
+  if (vix == null || isNaN(vix)) return { regime: 'unknown', label: 'India VIX unavailable — volatility cannot be judged', buy_signals_active: true };
   if (vix < 12)  return { regime: 'calm',     label: 'Greed Zone — exercise caution on new entries', buy_signals_active: true };
   if (vix < 16)  return { regime: 'normal',   label: 'Normal market — all signals active',          buy_signals_active: true };
   if (vix < 20)  return { regime: 'elevated', label: 'Elevated fear — favour High Conviction only', buy_signals_active: true };
@@ -401,12 +337,11 @@ async function getNiftyReturnForPeriod(from, to) {
   }
 }
 
-// Sensex (BSE) — same reliability tier as Nifty, just a different exchange
+// Sensex (BSE) — from indexData (Yahoo ^BSESN, then the last stored reading). No default.
 async function getSensex() {
-  const q = await getYahooQuote('^BSESN');
-  if (q) return q;
-  const demo = DEMO_YAHOO.SENSEX;
-  return { symbol: '^BSESN', price: demo.price, change_pct: demo.change_pct, source: 'demo' };
+  const x = (await indexData.getIndexSnapshot()).sensex;
+  return { symbol: '^BSESN', price: x.price, change_pct: x.change_pct, prev_close: x.prev_close,
+           source: x.source, as_of: x.as_of, status: x.status, unverified: x.unverified };
 }
 
 // USD/INR — generally the most reliable of the four new feeds (forex pairs
@@ -473,12 +408,10 @@ async function refreshAllMarketData() {
     return _snapshotCache;
   }
   console.log('📊 Refreshing market data...');
-  const [nifty, vixQuote, flows, macro, sensex, usdInr] = await Promise.all([
-    getNSEIndex('NIFTY 50'),
-    getIndiaVIXQuote(),
+  const [indices, flows, macro, usdInr] = await Promise.all([
+    indexData.getIndexSnapshot(),
     getFIIDIIFlows(),
     getMacroIndicators(),
-    getSensex(),
     getUsdInr(),
   ]);
   const [gold, silver] = await Promise.all([
@@ -486,31 +419,33 @@ async function refreshAllMarketData() {
     getSilverINR(usdInr.price),
   ]);
 
-  // If Yahoo returned live prices, save them to Supabase so the next
-  // server restart can use them instead of hardcoded placeholders.
-  const yahooLive = [sensex, usdInr, gold, silver].every(x => x.source === 'yahoo_live');
+  // USD/INR, gold and silver: if Yahoo answered, store them; if not, use the
+  // stored values (labelled) before the placeholders. Indices have their own store.
+  const yahooLive = [usdInr, gold, silver].every(x => x.source === 'yahoo_live');
   if (yahooLive) {
-    await saveYahooCacheToSupabase({ sensex, usdInr, gold, silver, savedAt: new Date().toISOString() });
-    console.log('   ✓ Live Yahoo prices saved to Supabase cache');
+    await saveYahooCacheToSupabase({ usdInr, gold, silver, savedAt: new Date().toISOString() });
   } else {
-    // Yahoo failed this cycle — try Supabase-cached prices before
-    // falling all the way back to the hardcoded placeholder numbers.
     const cached = await loadYahooCacheFromSupabase();
     if (cached) {
-      if (sensex.source === 'demo' && cached.sensex) Object.assign(sensex, cached.sensex, { source: 'supabase_cache' });
       if (usdInr.source === 'demo' && cached.usdInr) Object.assign(usdInr, cached.usdInr, { source: 'supabase_cache' });
       if (gold.source === 'demo' && cached.gold) Object.assign(gold, cached.gold, { source: 'supabase_cache' });
       if (silver.source === 'demo' && cached.silver) Object.assign(silver, cached.silver, { source: 'supabase_cache' });
     }
   }
 
-  const vix = vixQuote.price;
+  const asLegacy = (x, symbol) => ({ symbol, name: x.label, price: x.price, change_pct: x.change_pct, prev_close: x.prev_close,
+                                     source: x.source, as_of: x.as_of, status: x.status, unverified: x.unverified });
+  const nifty = asLegacy(indices.nifty, '^NSEI');
+  const sensex = asLegacy(indices.sensex, '^BSESN');
+  const vix = indices.vix.price;            // null when unknown — never a default
   const regime = classifyVIXRegime(vix);
   const snapshot = {
-    nifty, vix, vixSource: vixQuote.source, vixAsOf: vixQuote.as_of || null,
-    vixRegime: regime, flows, macro, sensex, usdInr, gold, silver, refreshedAt: new Date().toISOString(),
+    nifty, vix, vixSource: indices.vix.source, vixAsOf: indices.vix.as_of, vixStatus: indices.vix.status,
+    vixRegime: regime, flows, macro, sensex, usdInr, gold, silver, indices, refreshedAt: new Date().toISOString(),
   };
-  console.log(`   Nifty: ${nifty.price} [${nifty.source}] | Sensex: ${sensex.price} [${sensex.source}] | VIX: ${vix} [${vixQuote.source}, ${regime.regime}]`);
+  const fmt = x => `${x.price ?? '—'} [${x.source}, ${x.status}${x.unverified ? ', unverified' : ''}]`;
+  console.log(`   Nifty: ${fmt(indices.nifty)} | Sensex: ${fmt(indices.sensex)} | VIX: ${fmt(indices.vix)} (${regime.regime})`);
+  await indexData.reportIndexWarnings(indices);
   _snapshotCache = snapshot;
   _snapshotCacheTime = now;
   return snapshot;

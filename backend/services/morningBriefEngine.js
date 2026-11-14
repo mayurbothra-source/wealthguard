@@ -56,28 +56,45 @@ function fmtINR(n) {
 // SHARED SECTIONS (generated once per day, reused for all clients)
 // ─────────────────────────────────────────────────────────────────────
 
-async function buildMarketSnapshot(snapshot, aiEvents) {
-  const nifty = snapshot?.nifty;
-  const vix   = snapshot?.vix;
-  const regime = snapshot?.vixRegime;
-
-  // Deterministic facts — always accurate, never AI-invented.
-  // Values tagged source:'demo' are placeholders, not market data, and are
-  // never shown. A 'supabase_cache' value is a real earlier reading and says so.
-  const fmtTime = iso => new Date(iso).toLocaleString('en-IN',
+/**
+ * Nifty, Sensex and India VIX as the client sees them: level, day change, and
+ * when the number was true — with an honest label when it is not live
+ * ("as of <date>"), unverified (sanity check failed), or missing.
+ */
+function buildMarketFigures(snapshot) {
+  const fmtWhen = iso => new Date(iso).toLocaleString('en-IN',
     { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
-  const asOf = q => q?.source === 'supabase_cache' && q.as_of ? ` (last reading, ${fmtTime(q.as_of)})` : '';
-  const facts = [];
-  if (nifty?.price != null && nifty.source !== 'demo') {
-    const dir = (nifty.change_pct ?? 0) >= 0 ? 'up' : 'down';
-    facts.push(`Nifty 50 is ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${Number(nifty.price).toLocaleString('en-IN')}${asOf(nifty)}`);
-  }
-  if (vix != null && snapshot?.vixSource && snapshot.vixSource !== 'demo') {
-    facts.push(`India VIX is at ${Number(vix).toFixed(1)} (${regime?.regime || 'normal'})${asOf({ source: snapshot.vixSource, as_of: snapshot.vixAsOf })}`);
-  }
-  if (snapshot?.sensex?.price != null && snapshot.sensex.source !== 'demo') {
-    facts.push(`Sensex at ${Number(snapshot.sensex.price).toLocaleString('en-IN')}`);
-  }
+  const fmtDay = iso => new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' });
+  const legacy = {
+    nifty: snapshot?.nifty && { label: 'Nifty 50', price: snapshot.nifty.price, change_pct: snapshot.nifty.change_pct, as_of: snapshot.nifty.as_of,
+                                status: snapshot.nifty.source === 'demo' || snapshot.nifty.price == null ? 'missing' : (snapshot.nifty.status || 'live'), unverified: !!snapshot.nifty.unverified },
+    sensex: snapshot?.sensex && { label: 'Sensex', price: snapshot.sensex.price, change_pct: snapshot.sensex.change_pct, as_of: snapshot.sensex.as_of,
+                                  status: snapshot.sensex.source === 'demo' || snapshot.sensex.price == null ? 'missing' : (snapshot.sensex.status || 'live'), unverified: !!snapshot.sensex.unverified },
+    vix: { label: 'India VIX', price: snapshot?.vix ?? null, change_pct: null, as_of: snapshot?.vixAsOf || null,
+           status: snapshot?.vix == null || snapshot?.vixSource === 'demo' ? 'missing' : (snapshot?.vixStatus || 'live'), unverified: false },
+  };
+  const src = snapshot?.indices || legacy;
+  return ['nifty', 'sensex', 'vix'].map(k => {
+    const x = src[k] || { label: legacy[k]?.label || k, price: null, status: 'missing' };
+    const missing = x.status === 'missing' || x.price == null;
+    const level = missing ? null : Number(x.price).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    const chg = x.change_pct == null || missing ? null : `${x.change_pct >= 0 ? '▲' : '▼'} ${Math.abs(x.change_pct).toFixed(2)}%`;
+    let note = '';
+    if (missing) note = 'not available today';
+    else if (x.status === 'stale') note = `not live — as of ${fmtDay(x.as_of)}`;
+    else if (x.as_of) note = `as of ${fmtWhen(x.as_of)} IST`;
+    if (!missing && x.unverified) note += `${note ? ' · ' : ''}unverified`;
+    const line = missing ? `${x.label}: not available today` : `${x.label} ${level}${chg ? ` ${chg}` : ''} (${note})`;
+    return { key: k, label: x.label, level, change: chg, change_pct: missing ? null : x.change_pct, as_of: x.as_of || null,
+             status: missing ? 'missing' : x.status, unverified: !missing && !!x.unverified, note, line };
+  });
+}
+
+async function buildMarketSnapshot(snapshot, aiEvents) {
+  // Deterministic facts — always accurate, never AI-invented. Only figures that
+  // passed the trust checks go to the AI, labelled with when they were true.
+  const figures = buildMarketFigures(snapshot);
+  const facts = figures.filter(f => f.status !== 'missing' && !f.unverified).map(f => f.line);
   if (!facts.length) {
     return 'Live market data could not be fetched this morning, so we are not quoting index levels rather than show numbers that may be wrong.';
   }
@@ -96,6 +113,7 @@ ${eventLine ? `\nAI-detected events: ${aiEvents.map(e => `${e.title} (${e.severi
 
 Write 2-3 plain sentences summarising where the market stands today. Be factual and calm.
 Do not give investment advice. Do not use jargon. Do not invent any numbers not listed above.
+If a figure says "not live", say it is an earlier reading, not today's.
 
 Return JSON: {"snapshot": "your text here"}`;
 
@@ -371,7 +389,8 @@ function getSharedSections({ force = false } = {}) {
     const snapshot = await refreshAllMarketData();
     const news = await buildNews();
     const marketSnapshot = await buildMarketSnapshot(snapshot, news);
-    return { marketSnapshot, news, educationPoint: await buildEducationPoint(), dataNotes: [] };
+    const marketFigures = buildMarketFigures(snapshot);
+    return { marketSnapshot, marketFigures, news, educationPoint: await buildEducationPoint(), dataNotes: [] };
   })();
   _shared = { key, at: Date.now(), promise };
   promise.catch(() => { if (_shared && _shared.promise === promise) _shared = null; });
@@ -465,6 +484,7 @@ async function buildBriefForClient(client, shared) {
 
   const brief = {
     market_snapshot: shared.marketSnapshot,
+    market_figures:  shared.marketFigures || [],
     news:            shared.news,
     today_action:    todayAction,
     portfolio_note:  portfolioNote,
@@ -483,7 +503,7 @@ async function buildBriefForClient(client, shared) {
     '',
     `TODAY: ${todayAction}`,
     '',
-    'MARKET SNAPSHOT', shared.marketSnapshot,
+    'MARKET SNAPSHOT', ...(shared.marketFigures || []).map(f => `• ${f.line}`), shared.marketSnapshot,
     shared.news.length ? `\nIN THE NEWS\n${shared.news.map(n => `• ${n.title}${n.severity ? ` (${n.severity})` : ''}`).join('\n')}` : '',
     `\nYOUR PORTFOLIO\n${portfolioNote}`,
     plan ? `\nYOUR STARTING PLAN\n${startingPlan.planToText(plan)}` : '',
@@ -553,4 +573,4 @@ async function generateAndSendMorningBrief(opts = {}) {
   return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildMarketSnapshot } };
+module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildMarketSnapshot, buildMarketFigures } };

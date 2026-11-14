@@ -73,7 +73,7 @@ const ck = (name, ok) => { ok ? pass++ : fail++; console.log(`  ${ok ? 'PASS' : 
   t = await buildMarketSnapshot({ nifty: { price: 25100, change_pct: -0.4, source: 'yahoo_live' }, vix: 13.42, vixSource: 'demo', vixRegime: regime, sensex: { price: 82361.72, source: 'yahoo_live' } }, []);
   ck('placeholder VIX is hidden while live Nifty and Sensex show', !/VIX/.test(t) && /25,100/.test(t) && /82,361/.test(t));
   t = await buildMarketSnapshot({ nifty: { price: 25100, change_pct: 0.2, source: 'yahoo_live' }, vix: 15.1, vixSource: 'supabase_cache', vixAsOf: '2026-11-11T09:55:00Z', vixRegime: regime }, []);
-  ck('an earlier real VIX reading is shown and labelled as such', /India VIX is at 15\.1/.test(t) && /last reading/.test(t));
+  ck('an earlier real VIX reading is shown with the time it was measured', /India VIX 15\.1/.test(t) && /as of 11 Nov/.test(t));
 
   console.log(`  ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

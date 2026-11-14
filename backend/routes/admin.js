@@ -210,6 +210,36 @@ router.get('/brief-preview', async (req, res) => {
   }
 });
 
+/**
+ * Admin access for the in-app admin panel: either the admin key (scripts,
+ * curl) or a logged-in session whose client row has is_admin = true.
+ */
+async function checkAdmin(req, res) {
+  if (req.get('x-admin-key') || req.query.key) return checkKey(req, res);
+  const { verify } = require('../lib/session');
+  const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
+  const p = m && verify(m[1]);
+  if (!p || p.scope !== 'session') { res.status(401).json({ error: 'Admin login required.' }); return false; }
+  const { supabaseAdmin } = require('../../config/supabase');
+  const { data } = await supabaseAdmin.from('clients').select('is_admin').eq('id', p.sub).maybeSingle();
+  if (!data?.is_admin) { res.status(403).json({ error: 'Admins only.' }); return false; }
+  return true;
+}
+
+/**
+ * Where each market figure came from and how old it is.
+ *   GET /api/admin/data-freshness   (admin key, or admin session)
+ */
+router.get('/data-freshness', async (req, res) => {
+  if (!(await checkAdmin(req, res))) return;
+  try {
+    const indices = await require('../services/indexData').getIndexSnapshot();
+    res.json({ checked_at: new Date().toISOString(), indices: Object.values(indices) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/health', async (req, res) => {
   if (!checkKey(req, res)) return;
   try {
@@ -280,3 +310,4 @@ router.get('/trigger-all', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.checkAdmin = checkAdmin;
