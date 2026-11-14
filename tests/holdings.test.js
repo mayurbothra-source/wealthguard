@@ -89,9 +89,11 @@ function seed() {
   console.log('── CRITICAL AI override ──');
   DB.seed('ai_instrument_flags', [{ id: 'f9', instrument_id: 'i2', risk_level: 'CRITICAL', is_active: true }]);
   r = await quiet(() => H.runHoldingAlertScan({ clientId: 'c1', priceOverride: { TCS: 2380 } }));
-  ck('a CRITICAL flag on a held instrument → one alert to its holder', sent.filter(x => x.key === 'ai:f9').length === 1);
+  ck('a CRITICAL flag on a held instrument → shown in-app, NOT emailed', sent.filter(x => x.key === 'ai:f9').length === 0
+     && DB.rows('client_notifications').filter(n => n.type === 'ai_critical').length === 1
+     && DB.rows('alert_deliveries').find(x => x.event_key === 'ai:f9')?.status === 'in_app');
   await quiet(() => H.runHoldingAlertScan({ clientId: 'c1', priceOverride: { TCS: 2380 } }));
-  ck('…not repeated next hour', sent.filter(x => x.key === 'ai:f9').length === 1);
+  ck('…and not repeated next hour', DB.rows('client_notifications').filter(n => n.type === 'ai_critical').length === 1);
 
   console.log('── demo holdings never email the demo account ──');
   r = await quiet(() => H.runHoldingAlertScan({ clientId: 'd1', priceOverride: { INFY: 1130 } }));
@@ -106,12 +108,14 @@ function seed() {
   console.log('── flash alerts are deduplicated too ──');
   seed();
   const flash = require('../backend/services/flashAlertEngine')._test.notifyClientsForAlert;
-  const alert = { id: 'fa1', move_pct: -3.4, context_note: 'Stock-specific move.' };
-  await quiet(() => flash(alert, { id: 'i1', symbol: 'TCS', name: 'Tata Consultancy' }));
-  await new Promise(r2 => setTimeout(r2, 20));
-  await quiet(() => flash(alert, { id: 'i1', symbol: 'TCS', name: 'Tata Consultancy' }));
-  await new Promise(r2 => setTimeout(r2, 20));
-  ck('the same flash alert reaches a client once', sent.filter(x => x.key === 'flash:fa1').length === 1);
+  const fallKey = `fall:TCS:${require('../backend/lib/istTime').istDate()}`;
+  await quiet(() => flash({ id: 'fa1', move_pct: -3.4, context_note: 'Stock-specific move.' }, { id: 'i1', symbol: 'TCS', name: 'Tata Consultancy' }));
+  await quiet(() => flash({ id: 'fa2', move_pct: -3.9, context_note: 'Stock-specific move.' }, { id: 'i1', symbol: 'TCS', name: 'Tata Consultancy' }));
+  ck('a holding falling 3%+ → its holder is emailed once that day (a second hourly fall adds no email)',
+     sent.filter(x => x.key === fallKey).length === 1 && /fell 3\.4% in the last hour/.test(sent.find(x => x.key === fallKey).title));
+  const before = sent.length;
+  await quiet(() => flash({ id: 'fa3', move_pct: 3.6, context_note: 'Stock-specific move.' }, { id: 'i2', symbol: 'ITC', name: 'ITC Ltd' }));
+  ck('a sharp RISE is not emailed (in-app only)', sent.length === before && DB.rows('client_notifications').some(n => n.alert_id === 'fa3'));
 
   console.log('── the brief\'s portfolio section ──');
   seed();
