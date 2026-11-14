@@ -12,8 +12,9 @@
  * Alert events (each emailed at most once per client — alert_deliveries has a
  * unique (client_id, event_key)):
  *   stop:<holding id>:<stop>   price at/below the stop-loss
- *   ai:<flag id>               CRITICAL AI flag on an instrument they hold
- *   flash:<flash alert id>     sharp hourly move (flashAlertEngine)
+ *   ai:<flag id>               CRITICAL AI flag on an instrument they hold (in-app only, no email)
+ *   fall:<symbol>:<IST date>   holding fell ≥3% in an hour (flashAlertEngine; once a day)
+ *   index_fall:<index>:<date>  Nifty 50 / Sensex fell ≥1% in an hour (every subscriber; once a day)
  *
  * Demo-seeded holdings (entry_source 'demo_seed') alert the ADMIN address, not
  * the demo account, unless DEMO_ALERTS_TO_CLIENTS=true.
@@ -65,7 +66,7 @@ async function deliverAlert(client, ev, opts = {}) {
   }
 
   // In-app notification for the client (never for admin-only test sends).
-  if (!opts.forceAdmin) {
+  if (!opts.forceAdmin && !opts.noInApp) {
     await supabaseAdmin.from('client_notifications').insert({
       client_id: client.id, type: ev.type, title: ev.title, body: ev.body,
       instrument_id: ev.instrumentId || null, is_read: false, created_at: new Date().toISOString(),
@@ -73,7 +74,11 @@ async function deliverAlert(client, ev, opts = {}) {
   }
 
   let res;
-  if (toAdmin) {
+  if (ev.email === false && !opts.forceAdmin) {
+    // In-app only (e.g. a CRITICAL AI flag): subscribers asked for email only for the brief and for falls.
+    await supabaseAdmin.from('alert_deliveries').update({ status: 'in_app', sent_at: new Date().toISOString() }).eq('id', row.id);
+    return { sent: false, in_app: true, deduped: false, recipient };
+  } else if (toAdmin) {
     const ok = await email.sendAdminAlert(`[${opts.forceAdmin ? 'TEST' : 'DEMO'} alert for ${client.full_name || client.id}] ${ev.title}`, ev.body);
     res = { ok, error: ok ? null : 'admin email not sent (ADMIN_EMAIL / RESEND_API_KEY?)' };
   } else if (!client.email || client.email_alerts_enabled === false) {
@@ -147,7 +152,7 @@ async function runHoldingAlertScan(opts = {}) {
               'This is the level you set to limit losses. Review the holding today. Not investment advice.' });
     }
     if (flag) {
-      evs.push({ key: `ai:${flag.id}`, type: 'ai_critical', instrumentId: i.id, demo,
+      evs.push({ key: `ai:${flag.id}`, type: 'ai_critical', instrumentId: i.id, demo, email: false,
         title: `Critical risk flagged: ${name}`,
         body: `Our AI scan has flagged a critical risk that may affect ${name}, which you hold. ` +
               'Open WealthGuard to see what this means for your holding. Not investment advice.' });

@@ -21,6 +21,8 @@ const { supabaseAdmin } = require('../../config/supabase');
 // Tracks which anomalies we've already alerted on today, so a broken
 // engine running hourly doesn't send 8 identical emails.
 const alertedToday = new Set();
+// Engines whose anomaly is emailed to the admin straight away. Others wait for the daily summary.
+const URGENT_ENGINES = ['morningBriefDelivery'];
 let alertDateKey = null;
 
 function todayKey() {
@@ -102,7 +104,13 @@ async function reportRun({
   }
 
   // Alert on anomaly — once per engine per day
-  if (anomaly && !alreadyAlertedToday) {
+  // Immediate emails only for problems that need action today (a morning brief
+  // that did not go out). Everything else is recorded here and appears in the
+  // 08:30 IST daily summary instead of a separate email per anomaly.
+  // ADMIN_ALERTS_IMMEDIATE=all restores an email for every anomaly.
+  const immediate = String(process.env.ADMIN_ALERTS_IMMEDIATE || 'urgent').toLowerCase() === 'all'
+    || URGENT_ENGINES.includes(engineName);
+  if (anomaly && !alreadyAlertedToday && immediate) {
     alertedToday.add(engineName);
     await sendAnomalyAlert(engineName, {
       itemsProcessed, itemsExpected, itemsFailed, detail, durationMs,
