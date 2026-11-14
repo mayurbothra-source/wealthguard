@@ -243,102 +243,188 @@ function buildPortfolioNote(holdings, actions) {
  * BUYs first. If there are none, say so plainly — "no trade" is a valid, honest
  * answer for a capital-preservation product — and show what is closest.
  */
-async function buildIdeas(riskScore, heldSymbols) {
+const ASSET_CLASS = {
+  large_cap_equity: 'equity', mid_cap_equity: 'equity', small_cap_equity: 'equity',
+  large_cap_fund: 'equity', flexi_mid_fund: 'equity',
+  index_etf: 'etf', gold: 'gold', debt_fund: 'debt', bond_gsec: 'debt',
+};
+const LEVERS = ['technical', 'fundamental', 'management', 'sentiment', 'institutional', 'sector_timing', 'macro_pestle', 'competitive', 'risk_adjusted'];
+
+/** Confidence band from the risk-adjusted lever (0–10). Client-safe: no number shown. */
+const confidenceBand = s => (s == null ? null : s >= 7 ? 'High' : s >= 5 ? 'Medium' : 'Low');
+
+/** One plain-English line from the strongest of the 9 levers, no jargon. */
+function whyLine(score) {
+  if (!score) return null;
+  const best = LEVERS.filter(k => score[k] != null).sort((x, y) => score[y] - score[x])[0];
+  if (!best) return null;
+  const phrase = require('./instrumentEngine').leverPhrase(best, Number(score[best]));
+  return phrase ? `Why now: ${phrase}.` : null;
+}
+
+/** Pick up to n ideas, best of each asset class first, so one class cannot crowd out the rest. */
+function pickAcrossClasses(sorted, n) {
+  const picked = [], seenClass = new Set();
+  for (const s of sorted) {
+    const c = ASSET_CLASS[s._category] || 'other';
+    if (!seenClass.has(c)) { picked.push(s); seenClass.add(c); }
+    if (picked.length === n) return picked;
+  }
+  for (const s of sorted) { if (!picked.includes(s)) picked.push(s); if (picked.length === n) break; }
+  return picked;
+}
+
+/**
+ * New ideas that fit the client's risk band and that they do not already hold.
+ * BUYs first, drawn across equity, ETFs, gold and debt. If none qualify, says
+ * why in counts ("N screened, 0 passed, main reason …") and shows the closest
+ * WATCH items, clearly labelled as not a buy.
+ */
+async function buildIdeas(riskScore, heldSymbols, now = new Date()) {
   try {
     const allowedCats = RISK_CATEGORY_MAP[riskBand(riskScore)];
     const { data: instruments } = await supabaseAdmin
       .from('instrument_universe')
       .select('*')
       .in('category', allowedCats).eq('status', 'active');
+    const { priceModeOf, priceIsFresh } = require('./signalLevels');
+    const screened = instruments || [];
     // A statically-priced instrument (e.g. RBI Floating Rate Bond) has no market
     // price and cannot be bought or sold on an exchange, so it is never an "idea".
-    const tradeable = (instruments || []).filter(i => !['static', 'static_reference'].includes(i.price_source));
-    if (!tradeable.length) return { ideas: [], note: 'Our instrument list is being refreshed.' };
+    const tradeable = screened.filter(i => priceModeOf(i) !== 'static');
+    if (!screened.length) return { ideas: [], note: 'Our instrument list is being refreshed.', no_ideas: null };
 
     const meta = Object.fromEntries(tradeable.map(i => [i.symbol, i]));
-    const since = new Date(Date.now() - 10 * 86400000).toISOString();
-    const { data: sigs } = await supabaseAdmin
+    const since = new Date(now.getTime() - 10 * 86400000).toISOString();
+    const { data: sigs } = tradeable.length ? await supabaseAdmin
       .from('recommendations')
       // '*' so the brief keeps working whether or not migration 012's columns exist yet.
       .select('*')
       .in('instrument_name', Object.keys(meta))
-      .is('client_id', null).eq('is_active', true).eq('risk_gate_passed', true)
+      .is('client_id', null).eq('is_active', true)
       // Only FRESH signals. Without this, a signal from an old scoring run stayed "active"
       // forever and kept being sold as a new idea (three month-old bond BUYs were).
       .gte('generated_at', since)
-      .order('generated_at', { ascending: false }).limit(300);
+      .order('generated_at', { ascending: false }).limit(300) : { data: [] };
 
-    // Only signals whose score was measured from the instrument's own price
-    // history. A run where Yahoo refused most requests scores everything on
-    // category defaults — those numbers say nothing about the instrument.
-    const measured = new Set();
+    // Latest score per instrument: was it measured on real prices, and its levers.
+    const scoreOf = {};
     try {
-      const ids = tradeable.map(i => i.id);
       const { data: scores } = await supabaseAdmin
-        .from('instrument_scores')
-        .select('instrument_id, scored_at, price_data_points, data_complete')
-        .in('instrument_id', ids).gte('scored_at', since)
+        .from('instrument_scores').select('*')
+        .in('instrument_id', tradeable.map(i => i.id)).gte('scored_at', since)
         .order('scored_at', { ascending: false }).limit(2000);
-      const seen = new Set();
-      for (const sc of scores || []) {
-        if (seen.has(sc.instrument_id)) continue;          // newest score per instrument
-        seen.add(sc.instrument_id);
-        if ((sc.price_data_points || 0) > 0 || sc.data_complete === true) measured.add(sc.instrument_id);
-      }
+      for (const sc of scores || []) if (!scoreOf[sc.instrument_id]) scoreOf[sc.instrument_id] = sc;
     } catch (e) {
-      console.warn(`   ⚠ buildIdeas: could not check score quality — ${e.message}`);
+      console.warn(`   ⚠ buildIdeas: could not read scores — ${e.message}`);
     }
+    const measured = id => { const sc = scoreOf[id]; return !!sc && ((sc.price_data_points || 0) > 0 || sc.data_complete === true); };
+
+    // AI lever: instruments with an active flag carry the client-safe label only.
+    const aiLabel = {};
+    try {
+      const { data: flags } = await supabaseAdmin.from('ai_instrument_flags')
+        .select('instrument_id, horizon_label, is_active').eq('is_active', true)
+        .in('instrument_id', tradeable.map(i => i.id));
+      for (const f of flags || []) aiLabel[f.instrument_id] = `🤖 AI Influenced — ${f.horizon_label || 'Mid-Term'}`;
+    } catch { /* table absent → no labels */ }
 
     const newest = {};
-    for (const s of sigs || []) {
-      const inst = meta[s.instrument_name];
-      if (!inst || !measured.has(inst.id)) continue;
-      if (!newest[s.instrument_name]) newest[s.instrument_name] = s;   // one per instrument
-    }
-    const usable = Object.values(newest)
-      .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0));
-
-    if (!usable.length) {
-      return {
-        ideas: [],
-        note: 'No ideas today. Our weekly analysis has not completed with live price data, and we would rather say nothing than suggest something we have not properly measured.',
-      };
-    }
-
+    for (const s of sigs || []) if (!newest[s.instrument_name]) newest[s.instrument_name] = s;   // one per instrument
     const held = new Set(heldSymbols);
-    // A target or stop is shown ONLY when the signal was sized on a trusted,
-    // fresh price (WS3). Otherwise the idea carries no numbers at all.
-    const { priceModeOf, priceIsFresh } = require('./signalLevels');
+
+    // ── Why nothing passed: client-safe counts only ──────────────────────
+    const blockers = { 'price not live or not recent': screened.length - tradeable.length,
+                       'not enough price history to measure': 0, 'held back by our risk checks': 0,
+                       'possible gain too small for the risk': 0, 'score below our buy level': 0 };
+    for (const i of tradeable) {
+      const s = newest[i.symbol];
+      if (!measured(i.id)) { blockers['not enough price history to measure']++; continue; }
+      if (!s) { blockers['not enough price history to measure']++; continue; }
+      if (s.action === 'BUY' && s.risk_gate_passed) continue;
+      if (/reward:risk/.test(s.downgrade_reason || '')) blockers['possible gain too small for the risk']++;
+      else if (/stale|static|unknown|no current price/.test(s.downgrade_reason || '')) blockers['price not live or not recent']++;
+      else if (s.risk_gate_passed === false) blockers['held back by our risk checks']++;
+      else blockers['score below our buy level']++;
+    }
+
     const levelsTrusted = s => s.target_price_inr != null && s.stop_loss_inr != null
       && priceModeOf(meta[s.instrument_name]) !== 'static'
       && priceIsFresh(s.price_as_of, new Date(s.generated_at));
-    const toIdea = s => ({
-      levels_ok: levelsTrusted(s),
-      reward_risk: levelsTrusted(s) && s.reward_risk != null ? Number(s.reward_risk) : null,
-      symbol: s.instrument_name,
-      name: meta[s.instrument_name]?.name || s.instrument_name,
-      action: s.action,
-      high_conviction: s.signal_tier === 'high_conviction',
-      rationale: short(s.rationale_text || s.rationale_short || '', 220),
-      entry: s.entry_price_inr,
-      target: levelsTrusted(s) ? s.target_price_inr : null,
-      stop: levelsTrusted(s) ? s.stop_loss_inr : null,
-      horizon_days: s.horizon_days,
-    });
+    const toIdea = s => {
+      const inst = meta[s.instrument_name] || {};
+      const sc = scoreOf[inst.id];
+      const ok = levelsTrusted(s);
+      const entry = Number(s.entry_price_inr) || null;
+      const mode = priceModeOf(inst);
+      return {
+        symbol: s.instrument_name,
+        name: inst.name || s.instrument_name,
+        asset_class: ASSET_CLASS[inst.category] || 'other',
+        action: s.action,
+        high_conviction: s.signal_tier === 'high_conviction',
+        why: whyLine(sc),
+        rationale: short(s.rationale_text || s.rationale_short || '', 220),
+        confidence: confidenceBand(sc?.risk_adjusted),
+        ai_label: aiLabel[inst.id] || null,
+        entry,
+        // Entry zone: ±1% around the last traded price; a fund simply buys at the day's NAV.
+        entry_zone: !ok || !entry ? null : mode === 'daily_nav' ? "at the day's NAV"
+          : `₹${(entry * 0.99).toFixed(2)}–₹${(entry * 1.01).toFixed(2)}`,
+        levels_ok: ok,
+        target: ok ? s.target_price_inr : null,
+        stop: ok ? s.stop_loss_inr : null,
+        reward_risk: ok && s.reward_risk != null ? Number(s.reward_risk) : null,
+        horizon_days: s.horizon_days,
+      };
+    };
 
-    const buys = usable.filter(s => s.action === 'BUY' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
-    if (buys.length) return { ideas: buys, note: null };
+    const usable = Object.values(newest)
+      .filter(s => meta[s.instrument_name] && measured(meta[s.instrument_name].id) && !held.has(s.instrument_name))
+      .map(s => ({ ...s, _category: meta[s.instrument_name].category }))
+      .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0));
 
-    const radar = usable.filter(s => s.action === 'WATCH' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
+    const buys = pickAcrossClasses(usable.filter(s => s.action === 'BUY' && s.risk_gate_passed), 3).map(toIdea);
+    if (buys.length) return { ideas: buys, note: null, no_ideas: null };
+
+    const top = Object.entries(blockers).sort((x, y) => y[1] - x[1])[0];
+    const no_ideas = {
+      screened: screened.length, passed: 0,
+      top_blocker: top && top[1] > 0 ? top[0] : null, top_blocker_count: top ? top[1] : 0,
+      blockers,
+      text: `${screened.length} instruments screened for your profile, 0 passed all our checks today.` +
+            (top && top[1] > 0 ? ` Main reason: ${top[0]} (${top[1]}).` : ''),
+    };
+    if (!usable.length) {
+      return { ideas: [], no_ideas,
+        note: 'No ideas today. Our weekly analysis has not completed with live price data, and we would rather say nothing than suggest something we have not properly measured.' };
+    }
+    const radar = pickAcrossClasses(usable.filter(s => s.action === 'WATCH'), 3).map(toIdea);
     return {
-      ideas: radar,
+      ideas: radar, no_ideas,
       note: 'No new BUY signals pass our risk checks for your profile today. Waiting is a valid position — we only ask you to act when the evidence is strong.' +
             (radar.length ? ' These are on our watchlist — not a recommendation to buy yet:' : ''),
     };
   } catch (e) {
     console.warn(`   ⚠ buildIdeas: ${e.message}`);
-    return { ideas: [], note: null };
+    return { ideas: [], note: null, no_ideas: null };
   }
+}
+
+/** Builder and Wealth Builder include opportunities (min_tier in the opportunities table). */
+const TIER_RANK = { starter: 1, builder: 2, wealth_builder: 3 };
+async function buildOpportunities(plan) {
+  try {
+    const { data } = await supabaseAdmin.from('opportunities')
+      .select('symbol, instrument_name, headline, detail, min_tier, expires_at')
+      .eq('is_active', true).order('generated_at', { ascending: false }).limit(10);
+    const rank = TIER_RANK[plan] || 0;
+    return (data || [])
+      .filter(o => rank >= (TIER_RANK[o.min_tier] || 2))
+      .filter(o => !o.expires_at || new Date(o.expires_at) > new Date())
+      .slice(0, 3)
+      .map(o => ({ symbol: o.symbol, name: o.instrument_name, headline: short(o.headline, 140), detail: short(o.detail, 200) }));
+  } catch { return []; }
 }
 
 async function buildNews() {
@@ -401,7 +487,9 @@ function getSharedSections({ force = false } = {}) {
     const news = await buildNews();
     const marketSnapshot = await buildMarketSnapshot(snapshot, news);
     const marketFigures = buildMarketFigures(snapshot);
-    return { marketSnapshot, marketFigures, news, educationPoint: await buildEducationPoint(), dataNotes: [] };
+    let trackRecord = null;
+    try { trackRecord = await require('./trackRecordSummary').getTrackRecordSummary(); } catch (e) { console.warn(`   ⚠ track record summary: ${e.message}`); }
+    return { marketSnapshot, marketFigures, news, trackRecord, educationPoint: await buildEducationPoint(), dataNotes: [] };
   })();
   _shared = { key, at: Date.now(), promise };
   promise.catch(() => { if (_shared && _shared.promise === promise) _shared = null; });
@@ -485,7 +573,10 @@ async function buildBriefForClient(client, shared) {
     getRiskScore(client.id), getHoldings(client.id), buildGoalNote(client.id),
   ]);
   const actions = await buildHoldingActions(holdings);
-  const { ideas, note: ideasNote } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
+  const { ideas, note: ideasNote, no_ideas: noIdeas } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
+  // Tier: only what the code already defines — opportunities carry min_tier 'builder'.
+  const tierPlan = require('../lib/entitlements').entitlementFromRow(client).plan;
+  const opportunities = await buildOpportunities(tierPlan);
   const portfolioNote = buildPortfolioNote(holdings, actions);
   // A client with nothing logged gets a starting plan built from their profile and goals.
   const plan = holdings.length ? null : await buildStartingPlanForClient(client.id, riskScore);
@@ -502,6 +593,9 @@ async function buildBriefForClient(client, shared) {
     holding_actions: actions,
     ideas,
     ideas_note:      ideasNote,
+    no_ideas:        noIdeas,
+    opportunities,
+    track_record:    shared.trackRecord || null,
     top_signals:     ideas.map(i => ({ symbol: i.symbol, action: i.action, rationale: i.rationale })),
     goal_note:       goalNote,
     starting_plan:   plan,
@@ -520,7 +614,14 @@ async function buildBriefForClient(client, shared) {
     plan ? `\nYOUR STARTING PLAN\n${startingPlan.planToText(plan)}` : '',
     actions.length ? actions.map(a => `• ${a.symbol} — ${a.action || 'no signal'}: ${a.advice}`).join('\n') : '',
     ideas.length || ideasNote ? `\nIDEAS WORTH A LOOK${ideasNote ? `\n${ideasNote}` : ''}` : '',
-    ideas.length ? ideas.map(i => `• ${i.symbol} (${i.action})${i.entry ? ` entry ~₹${i.entry}` : ''}${i.target ? `, target ₹${i.target}` : ''}${i.stop ? `, stop-loss ₹${i.stop}` : ''}`).join('\n') : '',
+    ideas.length ? ideas.map(i => [
+      `• ${i.symbol} (${i.action === 'WATCH' ? 'watching — not a buy yet' : i.action})${i.ai_label ? ` ${i.ai_label}` : ''}${i.confidence ? ` · confidence ${i.confidence}` : ''}`,
+      i.why ? `  ${i.why}` : '',
+      i.levels_ok ? `  Entry ${i.entry_zone || `~₹${i.entry}`}, target ₹${i.target}, stop-loss ₹${i.stop}, reward:risk ${Number(i.reward_risk).toFixed(1)}, ${i.horizon_days}-day view` : '',
+    ].filter(Boolean).join('\n')).join('\n') : '',
+    noIdeas ? `WHY NO NEW IDEAS TODAY\n${noIdeas.text}` : '',
+    opportunities.length ? `\nOPPORTUNITIES\n${opportunities.map(o => `• ${o.headline}`).join('\n')}` : '',
+    shared.trackRecord ? `\nOUR TRACK RECORD\n${shared.trackRecord.text}` : '',
     goalNote ? `\nYOUR GOALS\n${goalNote}` : '',
     `\nLEARN SOMETHING TODAY\n${shared.educationPoint}`,
     '\nNot investment advice. WealthGuard is not a SEBI-registered investment adviser.',
@@ -584,4 +685,4 @@ async function generateAndSendMorningBrief(opts = {}) {
   return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildMarketSnapshot, buildMarketFigures } };
+module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, confidenceBand } };
