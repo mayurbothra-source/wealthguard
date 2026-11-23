@@ -57,11 +57,15 @@ const fp = require('../backend/services/fundamentalsProvider');
 (async () => {
   const { checkpointDue } = require('../backend/services/trackRecordEngine');
   console.log('\n── checkpoint timing ──');
-  ck('weekly check does NOT fire on day 0 (this stored fake 0.0% results)', !checkpointDue(0, 7));
-  ck('weekly check does not fire on day 3', !checkpointDue(3, 7));
-  ck('weekly fires from day 7', checkpointDue(7, 7) && checkpointDue(7.2, 7));
-  ck('weekly still catches up a few days late (sleeping server)', checkpointDue(12, 7));
-  ck('weekly stops after the catch-up window', !checkpointDue(25, 7));
-  ck('monthly not due on day 20, due on day 31', !checkpointDue(20, 30) && checkpointDue(31, 30));
-  ck('quarterly due around day 90', !checkpointDue(75, 90) && checkpointDue(91, 90));
+  // Windows are now in trading days around the checkpoint date, and a late run
+  // is priced at the checkpoint-date close, so there is no catch-up cut-off.
+  const cal = require('../backend/lib/tradingCalendar');
+  const sig = '2026-11-02T04:00:00Z';                       // Monday
+  const wk = cal.checkpointWindow(sig, 7, 1), mo = cal.checkpointWindow(sig, 30, 2), qt = cal.checkpointWindow(sig, 90, 3);
+  ck('weekly check does NOT fire on day 0 (this stored fake 0.0% results)', !checkpointDue(wk, '2026-11-02'));
+  ck('weekly check does not fire on day 3', !checkpointDue(wk, '2026-11-05'));
+  ck('weekly not due until its ±1 trading-day window closes (Tue 10 Nov)', !checkpointDue(wk, '2026-11-10') && checkpointDue(wk, '2026-11-11'));
+  ck('weekly still scored weeks late (priced at the checkpoint date)', checkpointDue(wk, '2026-12-20'));
+  ck('monthly not due on day 20, due after day 30 + 2 trading days', !checkpointDue(mo, '2026-11-22') && checkpointDue(mo, '2026-12-07'));
+  ck('quarterly due around day 90', !checkpointDue(qt, '2027-01-20') && checkpointDue(qt, '2027-02-05'));
 })();

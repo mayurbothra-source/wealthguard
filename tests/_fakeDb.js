@@ -36,6 +36,10 @@ function makeDb() {
           for (const r of list) if (rows(table).some(x => x.client_id === r.client_id && x.event_key === r.event_key))
             return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
         }
+        if (table === 'recommendation_outcomes') {
+          for (const r of list) if (r.checkpoint_label && rows(table).some(x => x.recommendation_id === r.recommendation_id && x.checkpoint_label === r.checkpoint_label))
+            return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+        }
         if (table === 'payment_events') {
           for (const r of list) if (rows(table).some(x => x.event_id === r.event_id))
             return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
@@ -63,6 +67,7 @@ function makeDb() {
       let out = rows(table).filter(match);
       if (q.order) out = [...out].sort((a, b) => (a[q.order.k] > b[q.order.k] ? 1 : -1) * (q.order.asc ? 1 : -1));
       if (q.lim != null) out = out.slice(0, q.lim);
+      if (q.rng) out = out.slice(q.rng[0], q.rng[1] + 1);
       if (q.head) return { data: null, count: out.length, error: null };
       if (q.single === 'single') return out.length ? { data: out[0], error: null } : { data: null, error: { message: 'no rows' } };
       if (q.single === 'maybe') return { data: out[0] || null, error: null };
@@ -90,6 +95,8 @@ function makeDb() {
       },
       order(k, o) { q.order = { k, asc: o?.ascending !== false }; return api; },
       limit(n) { q.lim = n; return api; },
+      range(a, b) { q.rng = [a, b]; return api; },
+      lte(k, v) { q.filters.push(r => r[k] <= v); return api; },
       single() { q.single = 'single'; return api; },
       maybeSingle() { q.single = 'maybe'; return api; },
       then(res, rej) { return Promise.resolve(run()).then(res, rej); },

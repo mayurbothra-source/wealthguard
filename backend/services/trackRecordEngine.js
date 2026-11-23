@@ -1,119 +1,51 @@
 /**
  * WealthGuard Track Record Engine
- * Runs daily at 4:30 PM IST (after market close).
- * Automatically checks all pending predictions at their 7/30/90-day
- * checkpoints, fetches current prices, and logs results to Supabase.
- * Replaces the entire manual v8 Tab 2 workflow.
+ * Runs daily after market close, and on demand for a backfill.
+ *
+ * For every house signal (active or superseded) it scores each checkpoint
+ * whose window has closed, at the close ON THE CHECKPOINT DATE taken from the
+ * instrument's daily history, and records signals that cannot be measured as
+ * `not_measurable` with the reason — never as a guess.
+ *
+ * WHY IT WAS REWRITTEN (Nov 2026 audit, docs/AUDIT-SCORING-2026-11.md)
+ * The old query loaded only the 500 NEWEST signals. At ~114 signals a day those
+ * were 4-5 days old, younger than the first (7-day) checkpoint, so from
+ * 17 Nov every run found "0 checkpoints in window". It also priced every
+ * checkpoint at the price on the day it ran (up to 14 days late), and gave up
+ * for good on any checkpoint more than 14 days overdue.
  */
+
+'use strict';
 
 const { supabaseAdmin } = require('../../config/supabase');
-const db = require('../lib/db');
 const { reportRun } = require('./healthEngine');
-const { getNSEQuote, getYahooQuote, getNiftyReturnForPeriod } = require('./marketData');
+const cal = require('../lib/tradingCalendar');
+const { makeSeriesCache } = require('./checkpointPricing');
 
-// Checkpoint definitions in days
+// Checkpoints: calendar days after the signal, with a tolerance in TRADING days
+// either side of the target date.
 const CHECKPOINTS = [
-  { days: 7,  field: 'return_1w_pct',  label: 'Weekly'    },
-  { days: 30, field: 'return_1m_pct',  label: 'Monthly'   },
-  { days: 90, field: 'return_3m_pct',  label: 'Quarterly' },
+  { days: 7,  tol: 1, field: 'return_1w_pct',  label: 'Weekly'    },
+  { days: 14, tol: 1, field: 'return_14d_pct', label: '14-Day'    },   // the horizon standard signals claim
+  { days: 30, tol: 2, field: 'return_1m_pct',  label: 'Monthly'   },
+  { days: 90, tol: 3, field: 'return_3m_pct',  label: 'Quarterly' },
 ];
 
-// Tolerance window — check fires if within ±2 days of the target day.
-// For the first run we use a wider window (±14 days) to catch any checkpoints
-// that were missed while the engine was being set up. Once the first batch
-// of outcomes is logged, reduce this back to 2 for precision going forward.
-const CHECKPOINT_TOLERANCE_DAYS = 14;
+// First house signal in the database; a backfill starts here.
+const BACKFILL_SINCE = '2026-08-28';
+// A not_measurable row caused by a failed fetch (not by the instrument itself)
+// is retried on later runs for this many days after its window closed.
+const RETRY_FETCH_FAILURES_FOR_DAYS = 30;
+// Columns added by migration 016. Writes drop them if the migration has not run.
+const NEW_COLUMNS = ['return_14d_pct', 'checkpoint_date', 'price_as_of', 'outcome_status', 'not_measurable_reason', 'run_label'];
+const PAGE = 1000;
 
 /**
- * Is a prediction old enough for this checkpoint to be measured?
- *
- * The window used to OPEN `tolerance` days BEFORE the checkpoint, so the 7-day
- * "weekly" check fired on a signal's first day and stored a fake 0.0% result
- * (entry price == current price). A checkpoint can only be measured once its
- * day has actually arrived; the tolerance now applies only AFTER it, to catch up
- * when the server was asleep (the free Render plan sleeps and misses cron jobs).
+ * Is a checkpoint ready to score? Only once its whole window has closed in IST,
+ * so every close inside the window has been published and the pick is final.
  */
-function checkpointDue(daysOld, checkpointDays, lateToleranceDays = CHECKPOINT_TOLERANCE_DAYS) {
-  return daysOld >= checkpointDays - 0.5 && daysOld <= checkpointDays + lateToleranceDays;
-}
-
-/**
- * Fetches the current price for a prediction, using the SAME source routing
- * as the scoring engine.
- *
- * This is critical for data integrity. Previously this function guessed at a
- * Yahoo ticker from the instrument name, which produced two failure modes:
- *
- *   1. Gold: entry price was Rs.158,660 (Indian retail per 10g) but the
- *      checkpoint fetched GC=F — gold futures in USD per troy ounce (~$4,300).
- *      Result: a reported -97% "return" that never happened.
- *
- *   2. Bonds: tried SGB.NS, GSEC10Y.NS etc. on Yahoo. These do not exist as
- *      exchange tickers, so every bond checkpoint was skipped.
- *
- * The fix is to look the instrument up in instrument_universe and use its
- * declared price_source, exactly as the scoring engine does. If the units of
- * the entry price and the current price cannot be reconciled, we skip the
- * checkpoint rather than publish a meaningless number.
- */
-async function fetchCurrentPrice(rec) {
-  const symbol = rec.instrument_name;
-  if (!supabaseAdmin) return null;
-
-  // Look up the instrument's declared price source
-  let instrument = null;
-  try {
-    const { data } = await supabaseAdmin
-      .from('instrument_universe')
-      .select('symbol, name, instrument_type, exchange, yahoo_ticker, amfi_code, static_price, price_source')
-      .or(`symbol.eq.${symbol},name.eq.${symbol}`)
-      .limit(1);
-    instrument = data?.[0] || null;
-  } catch {}
-
-  if (instrument) {
-    // Use the scoring engine's router — single source of truth for pricing
-    try {
-      const { fetchInstrumentPrice } = require('./instrumentEngine');
-      const priceData = await fetchInstrumentPrice(instrument);
-
-      if (priceData) {
-        // A static reference price never changes, so a "return" computed
-        // against it is always 0% and tells the client nothing. Skip it.
-        // It is a fact about the instrument, not a failure (see notMeasurable below).
-        if (priceData.source === 'static_reference') return { notMeasurable: true };
-        return priceData;
-      }
-    } catch (e) {
-      console.warn(`   ⚠ ${symbol}: price router failed — ${e.message}`);
-    }
-    return null;
-  }
-
-  // Not in our universe — this is a legacy manually-logged prediction.
-  // Only proceed for plain NSE equity symbols where units are unambiguous.
-  const looksLikeNSESymbol = /^[A-Z][A-Z0-9&-]{1,19}$/.test(symbol);
-  if (!looksLikeNSESymbol) {
-    console.warn(`   ⚠ ${symbol}: not in instrument universe and not a recognisable NSE symbol — skipped`);
-    return null;
-  }
-
-  try {
-    const nseData = await getNSEQuote(symbol);
-    if (nseData?.source === 'nse_live' && nseData.price) {
-      return { price: nseData.price, source: 'nse_live' };
-    }
-  } catch {}
-
-  try {
-    const yahooData = await getYahooQuote(symbol + '.NS');
-    if (yahooData?.source === 'yahoo_live' && yahooData.price) {
-      return { price: yahooData.price, source: 'yahoo_live' };
-    }
-  } catch {}
-
-  console.warn(`   ⚠ No live price available for ${symbol} — checkpoint skipped`);
-  return null;
+function checkpointDue(win, todayIst) {
+  return todayIst > win.end;
 }
 
 /**
@@ -170,185 +102,252 @@ function isDirectionalAction(action) {
   return ['BUY', 'HOLD', 'SELL', 'REDUCE'].includes(String(action || '').toUpperCase());
 }
 
-/**
- * Check whether a specific checkpoint has already been logged for a prediction.
- */
-async function checkpointAlreadyLogged(recommendationId, checkpointField) {
-  const { data } = await supabaseAdmin
-    .from('recommendation_outcomes')
-    .select('id')
-    .eq('recommendation_id', recommendationId)
-    .not(checkpointField, 'is', null)
-    .limit(1);
-  return (data && data.length > 0);
+/** Every row of a select, paged (PostgREST caps a response at 1,000 rows). */
+async function selectAll(build) {
+  const out = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build().range(from, from + PAGE - 1);
+    if (error) throw new Error(error.message);
+    out.push(...(data || []));
+    if (!data || data.length < PAGE) return out;
+  }
 }
 
 /**
- * Main engine function — called by the daily cron job at 4:30 PM IST.
- * Scans all unresolved predictions and auto-files checkpoints.
+ * Insert outcome rows in chunks. If migration 016 has not run, PostgREST
+ * rejects unknown columns; the chunk is retried without them, so a checkpoint
+ * is never lost to a pending migration. A unique-key clash (another run got
+ * there first) falls back to row-by-row inserts and skips the clashing rows.
  */
-async function runTrackRecordCheckpoints() {
+async function insertOutcomes(rows, state) {
+  let written = 0;
+  for (let i = 0; i < rows.length; i += 100) {
+    let chunk = rows.slice(i, i + 100);
+    if (state.dropNewColumns) chunk = chunk.map(stripNew);
+    let { error } = await supabaseAdmin.from('recommendation_outcomes').insert(chunk);
+    if (error && !state.dropNewColumns && isMissingColumn(error)) {
+      state.dropNewColumns = true;
+      console.warn(`   ⚠ recommendation_outcomes: migration 016 not applied — writing without [${NEW_COLUMNS.join(', ')}]`);
+      chunk = chunk.map(stripNew);
+      ({ error } = await supabaseAdmin.from('recommendation_outcomes').insert(chunk));
+    }
+    if (!error) { written += chunk.length; continue; }
+    if (error.code === '23505') {
+      for (const r of chunk) {
+        const one = await supabaseAdmin.from('recommendation_outcomes').insert(r);
+        if (!one.error) written++;
+        else if (one.error.code !== '23505') console.error(`   ❌ outcome insert failed: ${one.error.message}`);
+      }
+      continue;
+    }
+    console.error(`   ❌ outcome insert failed for ${chunk.length} rows: ${error.message}`);
+  }
+  return written;
+}
+
+function stripNew(r) {
+  const c = { ...r };
+  for (const k of NEW_COLUMNS) delete c[k];
+  return c;
+}
+function isMissingColumn(error) {
+  const m = String(error.message || '').toLowerCase();
+  return error.code === 'PGRST204' || error.code === '42703' || m.includes('column') && (m.includes('does not exist') || m.includes('could not find'));
+}
+
+/**
+ * Score one checkpoint. Pure apart from the series lookups.
+ * Returns { row } to write, or { wait: true } when the window has not closed.
+ */
+async function scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel }) {
+  const win = cal.checkpointWindow(pred.generated_at, cp.days, cp.tol);
+  if (!checkpointDue(win, todayIst)) return { wait: true };
+
+  const base = {
+    recommendation_id: pred.id,
+    client_id:         null,
+    checkpoint_label:  cp.label,
+    checkpoint_date:   win.target,
+    measured_at:       now.toISOString(),
+    run_label:         runLabel,
+  };
+  const notMeasurable = (reason, extra = {}) => ({
+    row: { ...base, outcome_status: 'not_measurable', not_measurable_reason: reason, direction_correct: null, ...extra },
+  });
+
+  if (!inst) return notMeasurable('instrument not in the universe');
+  const entry = Number(pred.monday_open_price_inr || pred.entry_price_inr);
+  if (!(entry > 0)) return notMeasurable('no entry price');
+
+  const s = await cache.get(inst);
+  if (s.kind === 'static') return notMeasurable('static reference price — no market return');
+  if (s.kind === 'error') return { ...notMeasurable(s.reason), retryable: s.retryable };
+
+  const hit = cal.pickCheckpointClose(s.series, win);
+  if (!hit) {
+    const last = s.series.length ? s.series[s.series.length - 1].date : null;
+    return notMeasurable(last && last < win.start
+      ? `price history stops at ${last} — no close in ${win.start}..${win.end}`
+      : `no close in ${win.start}..${win.end}`);
+  }
+
+  const returnPct = ((hit.close - entry) / entry) * 100;
+  // A move this large over the period means the entry and checkpoint prices are
+  // in different units (how Gold once showed -97% in a week). Refuse to score it.
+  const IMPLAUSIBLE = { 7: 50, 14: 60, 30: 70, 90: 90 };
+  if (Math.abs(returnPct) > IMPLAUSIBLE[cp.days]) {
+    return notMeasurable(`implausible ${returnPct.toFixed(1)}% move (entry ₹${entry}, checkpoint ₹${hit.close}) — likely a unit mismatch`);
+  }
+
+  const correct = isDirectionCorrect(pred.action, returnPct);
+  const watchOutcome = correct === null && String(pred.action).toUpperCase() === 'WATCH'
+    ? classifyWatchOutcome(returnPct) : null;
+
+  // Nifty over the same dates, for honest alpha.
+  let niftyReturn = null;
+  const n = await cache.nifty();
+  if (n.kind === 'series') {
+    const a = cal.closeOnOrBefore(n.series, win.signalDate), b = cal.closeOnOrBefore(n.series, hit.date);
+    if (a && b && a.date < b.date) niftyReturn = parseFloat((((b.close - a.close) / a.close) * 100).toFixed(2));
+  }
+  const ret = parseFloat(returnPct.toFixed(2));
+
+  return {
+    row: {
+      ...base,
+      outcome_status:           'measured',
+      not_measurable_reason:    null,
+      direction_correct:        correct,
+      watch_outcome:            watchOutcome,
+      actual_price_inr:         hit.close,
+      price_as_of:              hit.date,
+      price_source:             s.source,
+      nifty_return_same_period: niftyReturn,
+      alpha_generated:          niftyReturn === null ? null : parseFloat((ret - niftyReturn).toFixed(2)),
+      [cp.field]:               ret,
+    },
+  };
+}
+
+/**
+ * Main engine. Options:
+ *   since     — only signals generated on/after this IST date (default: all)
+ *   runLabel  — recorded on each row ('daily', or 'backfill_2026_11')
+ *   now       — for tests
+ */
+async function runTrackRecordCheckpoints(opts = {}) {
   if (!supabaseAdmin) {
     console.log('📋 Track record engine: Supabase not configured, skipping.');
-    return;
+    return null;
   }
   const engineStart = Date.now();
-  console.log('📋 Running automated track record checkpoints...');
+  const now = opts.now ? new Date(opts.now) : new Date();
+  const runLabel = opts.runLabel || 'daily';
+  const since = opts.since || BACKFILL_SINCE;
+  const todayIst = cal.istDateOf(now);
+  console.log(`📋 Track record (${runLabel}): scoring checkpoints for signals since ${since}...`);
 
-  const now = new Date();
-
-  // Fetch all house predictions that need checkpoint resolution.
-  // Critically: we do NOT filter by is_active here.
-  // The scoring engine deactivates old signals when it generates new ones,
-  // but a prediction that has been deactivated still needs its 7/30/90-day
-  // checkpoints resolved — deactivation means "superseded by a newer signal",
-  // not "this prediction never happened."
-  // We identify predictions that still need resolution by checking whether
-  // recommendation_outcomes rows exist for them at each checkpoint.
-  const { data: predictions, error } = await supabaseAdmin
-    .from('recommendations')
-    .select('id, instrument_name, action, entry_price_inr, monday_open_price_inr, generated_at, confidence_score')
-    .is('client_id', null)
-    .not('entry_price_inr', 'is', null)  // must have an entry price to calculate return
-    .order('generated_at', { ascending: false })
-    .limit(500);
-
-  if (error) {
-    console.error('📋 Failed to fetch predictions:', error.message);
-    return;
+  let preds, instruments, existing;
+  try {
+    // Every house signal old enough for its first checkpoint, active or not —
+    // a superseded signal still happened and still gets scored.
+    const oldest = new Date(now.getTime() - 7 * 86400000).toISOString();
+    preds = await selectAll(() => supabaseAdmin.from('recommendations')
+      .select('id, instrument_name, action, entry_price_inr, monday_open_price_inr, generated_at')
+      .is('client_id', null)
+      .not('entry_price_inr', 'is', null)
+      .gte('generated_at', `${since}T00:00:00+05:30`)
+      .lt('generated_at', oldest)
+      .order('generated_at', { ascending: true }));
+    instruments = await selectAll(() => supabaseAdmin.from('instrument_universe')
+      .select('symbol, name, instrument_type, exchange, yahoo_ticker, amfi_code, static_price, price_source')
+      .order('symbol', { ascending: true }));
+    existing = await selectAll(() => supabaseAdmin.from('recommendation_outcomes')
+      .select('*')
+      .is('client_id', null)
+      .order('measured_at', { ascending: true }));
+  } catch (e) {
+    console.error(`📋 Track record: could not load signals — ${e.message}`);
+    await reportRun({ engineName: 'trackRecordEngine', durationMs: Date.now() - engineStart,
+      itemsProcessed: 0, itemsExpected: null, itemsFailed: 1, detail: `load failed: ${e.message}` });
+    return null;
   }
-  if (!predictions || !predictions.length) {
-    console.log('📋 No predictions to check.');
-    return;
-  }
 
-  let checked = 0, logged = 0, skipped = 0, alreadyLogged = 0, notMeasurable = 0;
-  const staticSymbols = new Set();
+  const bySymbol = new Map();
+  for (const i of instruments) { bySymbol.set(i.symbol, i); if (i.name && !bySymbol.has(i.name)) bySymbol.set(i.name, i); }
+  const done = new Map();   // `${rec}|${label}` -> existing row
+  for (const o of existing) done.set(`${o.recommendation_id}|${o.checkpoint_label}`, o);
 
-  for (const pred of predictions) {
-    const generatedAt = new Date(pred.generated_at);
-    const daysOld = (now - generatedAt) / (1000 * 60 * 60 * 24);
+  const cache = makeSeriesCache({ fromYmd: since, toYmd: todayIst });
+  const toInsert = [], toRetry = [];
+  const c = { due: 0, already: 0, measured: 0, notMeasurable: 0, retried: 0, waiting: 0 };
+  const reasons = {};
 
-    for (const checkpoint of CHECKPOINTS) {
-      if (!checkpointDue(daysOld, checkpoint.days)) continue;
+  for (const pred of preds) {
+    const inst = bySymbol.get(pred.instrument_name) || null;
+    for (const cp of CHECKPOINTS) {
+      const prior = done.get(`${pred.id}|${cp.label}`);
+      // A prior row is final unless it is a not_measurable caused by a fetch
+      // failure whose window closed recently — then try again.
+      if (prior && !isRetryable(prior, now)) { c.already++; continue; }
 
-      checked++;
-
-      // Skip if this checkpoint was already logged
-      const alreadyDone = await checkpointAlreadyLogged(pred.id, checkpoint.field);
-      if (alreadyDone) { alreadyLogged++; continue; }
-
-      // Skip if no entry price (can't calculate return)
-      if (!pred.entry_price_inr) {
-        console.log(`   ⚠ ${pred.instrument_name}: no entry price — ${checkpoint.label} skipped`);
-        skipped++; continue;
+      const r = await scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel });
+      if (r.wait) { c.waiting++; continue; }
+      c.due++;
+      const row = r.row;
+      if (row.outcome_status === 'measured') c.measured++;
+      else {
+        c.notMeasurable++;
+        const key = row.not_measurable_reason.replace(/\d{4}-\d{2}-\d{2}/g, 'DATE').replace(/-?\d+(\.\d+)?%.*/, '…');
+        reasons[key] = (reasons[key] || 0) + 1;
       }
-
-      // Fetch current price
-      const priceData = await fetchCurrentPrice(pred);
-      if (priceData && priceData.notMeasurable) { notMeasurable++; staticSymbols.add(pred.instrument_name); continue; }
-      if (!priceData) { skipped++; continue; }
-
-      const returnPct = ((priceData.price - pred.entry_price_inr) / pred.entry_price_inr) * 100;
-
-      // SANITY GATE — a last line of defence against unit mismatches.
-      // No real instrument moves +/-50% in a week or +/-90% in a quarter.
-      // A number outside these bounds means the entry price and the current
-      // price are in different units (this is exactly how Gold produced a
-      // "-97.2%" week). Publishing that would destroy client trust and
-      // corrupt every aggregate accuracy figure, so we refuse to store it.
-      const IMPLAUSIBLE = { 7: 50, 30: 70, 90: 90 };
-      const bound = IMPLAUSIBLE[checkpoint.days] || 70;
-      if (Math.abs(returnPct) > bound) {
-        console.warn(`   🚫 ${pred.instrument_name} ${checkpoint.label}: computed ${returnPct.toFixed(1)}% ` +
-                     `exceeds plausible bound of ±${bound}%. Entry ₹${pred.entry_price_inr}, ` +
-                     `current ₹${priceData.price} [${priceData.source}]. ` +
-                     `Likely a unit mismatch — checkpoint rejected, not stored.`);
-        skipped++;
-        continue;
-      }
-
-      const correct = isDirectionCorrect(pred.action, returnPct);
-      // WATCH returns null above, on purpose. Band it separately so the
-      // outcome is still recorded and can be reported honestly — just not
-      // folded into a directional hit rate.
-      const watchOutcome = correct === null && String(pred.action).toUpperCase() === 'WATCH'
-        ? classifyWatchOutcome(returnPct)
-        : null;
-
-      // Fetch the passive baseline so we can compute honest alpha.
-      // A BUY that returned +2% in a week the Nifty rose 3% actually
-      // underperformed — the track record must show that.
-      const niftyReturn = await getNiftyReturnForPeriod(pred.generated_at, now);
-      const alpha = niftyReturn !== null
-        ? parseFloat((returnPct - niftyReturn).toFixed(2))
-        : null;
-
-      // Prefer the Monday-open price as the entry reference where we have it.
-      // Signals are generated Sunday evening; the earliest a client could
-      // actually act is Monday's open. Using Sunday's close would flatter
-      // the track record with a price nobody could have traded at.
-      const effectiveEntry = pred.monday_open_price_inr || pred.entry_price_inr;
-      const effectiveReturn = effectiveEntry
-        ? ((priceData.price - effectiveEntry) / effectiveEntry) * 100
-        : returnPct;
-
-      const outcomeRow = {
-        recommendation_id:       pred.id,
-        client_id:               null,
-        direction_correct:       correct,       // null for WATCH — no claim made
-        watch_outcome:           watchOutcome,  // 'held' | 'rose_beyond_band' | 'fell_beyond_band'
-        actual_price_inr:        priceData.price,
-        price_source:            priceData.source,
-        checkpoint_label:        checkpoint.label,
-        nifty_return_same_period: niftyReturn,
-        alpha_generated:         alpha,
-        measured_at:             now.toISOString(),
-        [checkpoint.field]:      parseFloat(effectiveReturn.toFixed(2)),
-      };
-
-      // watch_outcome arrives with migration 005. Naming it in a plain insert
-      // before that migration runs would have PostgREST reject the whole row,
-      // silently stopping the track record — the one thing this engine exists
-      // to protect. Tolerant write: the checkpoint always lands.
-      const outcomeWrite = await db.writeTolerant(
-        'recommendation_outcomes', 'insert', outcomeRow, ['watch_outcome']);
-
-      if (!outcomeWrite.ok) {
-        console.error(`   ❌ ${pred.instrument_name} ${checkpoint.label}: not stored — see the error above`);
+      if (prior) {
+        // Only a better answer replaces a failed fetch; another failure leaves it be.
+        if (row.outcome_status === 'measured') { toRetry.push({ id: prior.id, row }); c.retried++; }
       } else {
-        logged++;
-        // A WATCH has no direction, so it is neither correct nor incorrect.
-        // Printing '✗ Incorrect' for one was misleading in the logs.
-        const verdict = correct === null
-          ? `no directional claim${watchOutcome ? ` — ${watchOutcome.replace(/_/g, ' ')}` : ''}`
-          : (correct ? 'Correct' : 'Incorrect');
-        const icon = correct === null ? 'ⓘ' : (correct ? '✓' : '✗');
-        console.log(`   ${icon} ${pred.instrument_name} ${checkpoint.label}: ${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}% (${verdict}) [${priceData.source}]`);
+        toInsert.push(row);
+        done.set(`${pred.id}|${cp.label}`, row);
       }
     }
   }
 
-  if (staticSymbols.size) console.log(`   ⓘ No market price, so no return to measure (not a failure): ${[...staticSymbols].join(', ')}`);
-  console.log(`📋 Track record engine complete: ${checked} checkpoints in window, ${alreadyLogged} already recorded, ${notMeasurable} not measurable (static price), ${logged} logged, ${skipped} skipped.`);
+  const state = { dropNewColumns: false };
+  const written = await insertOutcomes(toInsert, state);
+  let updated = 0;
+  for (const { id, row } of toRetry) {
+    const { error } = await supabaseAdmin.from('recommendation_outcomes')
+      .update(state.dropNewColumns ? stripNew(row) : row).eq('id', id);
+    if (!error) updated++;
+  }
 
-  // Health reporting — if predictions exist but nothing was checked,
-  // that is an anomaly worth an immediate alert. This is exactly the
-  // silent failure that went undetected for weeks previously.
+  const measuredWritten = toInsert.filter(r => r.outcome_status === 'measured').length;
+  const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${v}× ${k}`).join('; ');
+  const detail = `[${runLabel}] ${preds.length} signals, ${c.due} checkpoints due: ${c.measured} measured, ` +
+    `${c.notMeasurable} not measurable${reasonText ? ` (${reasonText})` : ''}; ${c.already} already recorded, ` +
+    `${c.waiting} not yet due; ${written} rows written, ${updated} retried rows now measured`;
+  console.log(`📋 Track record complete: ${detail}`);
+
   await reportRun({
     engineName:     'trackRecordEngine',
     durationMs:     Date.now() - engineStart,
-    // "Already recorded" is not a failure: every wake-up re-runs this job, and a
-    // checkpoint logged earlier today is simply done. Counting those as failed
-    // made 500/500 look like a total failure and emailed a false alarm.
-    itemsProcessed: logged,
-    // Statically-priced bonds/SGBs have no market price, so their checkpoints can
-    // never be measured — also not a failure.
-    itemsExpected:  checked - alreadyLogged - notMeasurable > 0 ? checked - alreadyLogged - notMeasurable : null,
-    itemsFailed:    skipped,
-    detail:         `${checked} checkpoints in window: ${alreadyLogged} already recorded, ${notMeasurable} not measurable (static price), ${logged} written, ${skipped} failed (no live price or implausible)`,
+    // Rows actually written this run (measured or honestly not measurable).
+    itemsProcessed: written + updated,
+    itemsExpected:  c.due || null,
+    itemsFailed:    toInsert.length - written,
+    detail,
   });
+  return { ...c, written, updated, measuredWritten, signals: preds.length, reasons };
+}
+
+function isRetryable(prior, now) {
+  if (prior.outcome_status !== 'not_measurable') return false;
+  if (!/fetch failed/.test(prior.not_measurable_reason || '')) return false;
+  if (!prior.checkpoint_date) return false;
+  return (now - new Date(`${prior.checkpoint_date}T00:00:00Z`)) / 86400000 <= RETRY_FETCH_FAILURES_FOR_DAYS;
 }
 
 module.exports = {
-  checkpointDue, classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT, runTrackRecordCheckpoints };
+  CHECKPOINTS, BACKFILL_SINCE, checkpointDue, scoreCheckpoint,
+  classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT,
+  runTrackRecordCheckpoints,
+};
