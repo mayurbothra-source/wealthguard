@@ -45,7 +45,9 @@ function seedMarket() {
     rec('MF-KOT-STB', 'BUY', 0.90), rec('MF-HDFC-LQ', 'BUY', 0.89),         // two debt funds score highest…
     rec('TCS', 'BUY', 0.75), rec('NIFTYBEES', 'BUY', 0.74), rec('GOLDBEES', 'BUY', 0.72), rec('ASTRAL', 'BUY', 0.80),
   ]);
-  DB.seed('ai_instrument_flags', [{ instrument_id: 'u0', horizon_label: 'Mid-Term', is_active: true }]);
+  DB.seed('ai_instrument_flags', [{ instrument_id: 'u0', horizon_label: 'Mid-Term', is_active: true, ai_lever_score: 6 },
+    // a flag with no AI score (the AI call did not complete) must not earn the label
+    { instrument_id: 'u1', horizon_label: 'Mid-Term', is_active: true, ai_lever_score: null }]);
   DB.seed('opportunities', [{ symbol: 'ITBEES', instrument_name: 'IT BeES', headline: 'IT is gaining ground on the wider market', detail: 'Sector rotation into IT over four weeks.', min_tier: 'builder', is_active: true, generated_at: iso(0) }]);
 }
 
@@ -61,6 +63,8 @@ function seedMarket() {
   ck('every idea has a rationale line', r.ideas.every(i => /^Why now: /.test(i.why || '')));
   const tcs = (await quiet(() => T.buildIdeas(3, [], now))).ideas.find(i => i.symbol === 'TCS');
   ck('AI lever contribution shows the client-safe label only', tcs?.ai_label === '🤖 AI Influenced — Mid-Term');
+  const astral = (await quiet(() => T.buildIdeas(9, [], now))).ideas.find(i => i.symbol === 'ASTRAL');
+  ck('no AI label where the AI lever did not actually run (flag without an AI score)', astral && !astral.ai_label);
   ck('entry zone, target, stop, reward:risk and horizon on a qualifying BUY', tcs.entry_zone === '₹99.00–₹101.00' && tcs.target === 115 && tcs.stop === 91 && tcs.reward_risk === 1.67 && tcs.horizon_days === 14);
   const fund = r.ideas.find(i => i.asset_class === 'debt');
   ck('a fund\'s entry zone is the day\'s NAV', fund?.entry_zone === "at the day's NAV");

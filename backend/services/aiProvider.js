@@ -73,6 +73,15 @@ const MIN_CALL_GAP_MS      = 4500;   // ~13 calls/min, safely under the limit
 const BREAKER_THRESHOLD    = 3;      // consecutive 429s before opening
 const BREAKER_COOLDOWN_MS  = 60000;  // wait a full minute before retrying
 
+// SA4: retries. A Gemini 503 ("model overloaded") or 429 is usually gone
+// seconds later, but every one used to count as a failure. Each call now gets
+// up to GOOGLE_ATTEMPTS tries with exponential backoff before it falls back.
+const GOOGLE_ATTEMPTS = 3;
+let BACKOFF_BASE_MS   = 2000;    // 2 s, 4 s … (429: ×4 — the quota window needs longer)
+let MIN_GAP_MS        = MIN_CALL_GAP_MS;
+let _anthropicWarned  = false;
+const lastErrors = [];           // the last few full errors, for the health log
+
 let _lastCallAt        = 0;
 let _consecutive429s   = 0;
 let _breakerOpenUntil  = 0;
@@ -82,8 +91,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 /** Enforces the minimum gap between calls. */
 async function throttle() {
   const since = Date.now() - _lastCallAt;
-  if (since < MIN_CALL_GAP_MS) {
-    await sleep(MIN_CALL_GAP_MS - since);
+  if (since < MIN_GAP_MS) {
+    usage.throttleWaits++;
+    await sleep(MIN_GAP_MS - since);
   }
   _lastCallAt = Date.now();
 }
@@ -107,7 +117,7 @@ function recordSuccess() {
 }
 
 // Usage counters — surfaced in health logs
-const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0, rateLimited: 0, throttleWaits: 0 };
+const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0, rateLimited: 0, throttleWaits: 0, retries: 0, googleFailures: 0 };
 
 // ─────────────────────────────────────────────────────────────────────
 // GOOGLE MODEL AUTO-DISCOVERY
@@ -122,8 +132,10 @@ const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0, rateLimited:
  */
 async function discoverGoogleModel() {
   if (_googleModel) return _googleModel;
-  if (_googleModelTried && !_googleModel) return null; // already failed once
-  _googleModelTried = true;
+  // A failed discovery is retried after 5 minutes (it used to give up for the
+  // life of the process, so one bad minute disabled Gemini until a restart).
+  if (_googleModelTried && Date.now() - _googleModelTried < 5 * 60000) return null;
+  _googleModelTried = Date.now();
 
   if (!GOOGLE_KEY) return null;
 
@@ -164,9 +176,64 @@ async function discoverGoogleModel() {
     return _googleModel;
 
   } catch (e) {
-    console.warn(`   ⚠ AI provider: Google model discovery failed — ${e.message}`);
+    console.warn(`   ⚠ AI provider: Google model discovery failed — ${describeError(e)}`);
+    noteError('google', e);
     return null;
   }
+}
+
+/**
+ * The full reason a call failed: HTTP status plus the provider's own error
+ * message (e.g. "503 UNAVAILABLE: The model is overloaded"). Never includes the
+ * request URL or headers, which carry the API key.
+ */
+function describeError(e) {
+  const st = e?.response?.status;
+  const body = e?.response?.data;
+  const apiMsg = body?.error?.message || body?.error?.status || (typeof body === 'string' ? body : '');
+  const base = st ? `HTTP ${st}${body?.error?.status ? ` ${body.error.status}` : ''}` : (e?.code || 'error');
+  const msg = String(apiMsg || e?.message || '').replace(/key=[^&\s]+/g, 'key=***').slice(0, 300);
+  return `${base}: ${msg}`;
+}
+
+function noteError(provider, e) {
+  lastErrors.push({ at: new Date().toISOString(), provider, error: describeError(e) });
+  if (lastErrors.length > 5) lastErrors.shift();
+}
+
+/** Worth another try: rate limits, server errors, timeouts, network drops. */
+function isRetryable(e) {
+  const st = e?.response?.status;
+  if (st === 429 || st === 500 || st === 502 || st === 503 || st === 504) return true;
+  if (!st && ['ECONNABORTED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND'].includes(e?.code)) return true;
+  return /Empty response from Google/.test(e?.message || '');
+}
+
+/**
+ * Gemini with up to GOOGLE_ATTEMPTS tries. Backoff doubles each time; a 429
+ * waits four times longer. A non-retryable error (bad key, bad request) stops
+ * at once — retrying it cannot help.
+ */
+async function callGoogleWithRetry(prompt, expectJSON) {
+  let lastErr;
+  for (let attempt = 1; attempt <= GOOGLE_ATTEMPTS; attempt++) {
+    try {
+      return await callGoogle(prompt, expectJSON);
+    } catch (e) {
+      lastErr = e;
+      usage.googleFailures++;
+      noteError('google', e);
+      const is429 = e.response?.status === 429;
+      if (is429) { usage.rateLimited++; recordRateLimit(); }
+      if (!isRetryable(e) || attempt === GOOGLE_ATTEMPTS || breakerOpen()) break;
+      usage.retries++;
+      const wait = BACKOFF_BASE_MS * 2 ** (attempt - 1) * (is429 ? 4 : 1);
+      console.warn(`   ↻ Gemini attempt ${attempt}/${GOOGLE_ATTEMPTS} failed (${describeError(e)}) — retrying in ${Math.round(wait / 1000)}s`);
+      await sleep(wait);
+    }
+  }
+  lastErr.attempts = GOOGLE_ATTEMPTS;
+  throw lastErr;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -300,21 +367,29 @@ async function ask(prompt, expectJSON = true) {
     ? ['anthropic', 'google']
     : ['google', 'anthropic'];
 
-  let lastError = null;
+  let lastError = null, tried = 0;
 
   for (let i = 0; i < order.length; i++) {
     const provider = order[i];
 
-    // Skip providers with no key configured
-    if (provider === 'google'    && !GOOGLE_KEY)    continue;
-    if (provider === 'anthropic' && !ANTHROPIC_KEY) continue;
+    // A provider with no key is skipped. Anthropic is the optional fallback:
+    // without its key the AI lever simply runs without one (warned once).
+    if (provider === 'google' && !GOOGLE_KEY) continue;
+    if (provider === 'anthropic' && !ANTHROPIC_KEY) {
+      if (tried && !_anthropicWarned) {
+        _anthropicWarned = true;
+        console.warn('   ⚠ AI provider: Gemini failed and ANTHROPIC_API_KEY is not set — no fallback; continuing without the AI lever for this item');
+      }
+      continue;
+    }
+    tried++;
 
     try {
       const text = provider === 'google'
-        ? await callGoogle(prompt, expectJSON)
+        ? await callGoogleWithRetry(prompt, expectJSON)
         : await callAnthropic(prompt, expectJSON);
 
-      if (i > 0) {
+      if (tried > 1) {
         usage.fallbacks++;
         console.log(`   🤖 AI provider: fell back to ${provider} successfully`);
       }
@@ -325,33 +400,24 @@ async function ask(prompt, expectJSON = true) {
         // Show what came back so the next failure is diagnosable from the logs.
         const excerpt = text.replace(/\s+/g, ' ').slice(0, 200);
         pe.message = `${pe.message} from ${provider} (${text.length} chars): "${excerpt}"`;
+        noteError(provider, pe);
         throw pe;
       }
 
     } catch (e) {
       lastError = e;
-
-      // Track rate limiting specifically so the breaker can open
-      const is429 = e.response?.status === 429 || /429/.test(e.message);
-      if (is429 && provider === 'google') {
-        usage.rateLimited++;
-        recordRateLimit();
-      }
-
-      const isLast = i === order.length - 1;
-      // Only log the fallback attempt once per breaker cycle — otherwise a
-      // rate-limited run produces a hundred identical log lines
-      if (!isLast && !is429) {
-        console.warn(`   ⚠ AI provider ${provider} failed (${e.message}) — trying fallback`);
+      if (provider === 'anthropic') noteError('anthropic', e);
+      if (i < order.length - 1) {
+        console.warn(`   ⚠ AI provider ${provider} failed${e.attempts ? ` ${e.attempts}×` : ''} (${describeError(e)}) — trying fallback`);
       }
     }
   }
 
   usage.failures++;
-  // Log the first few failures then go quiet — a rate-limited run should not
-  // produce hundreds of identical lines that bury the useful output
+  // Log the first few failures in full, then go quiet — the run summary and
+  // the health log carry the last five errors.
   if (usage.failures <= 3) {
-    console.warn(`   ⚠ AI provider: all providers failed — ${lastError?.message || 'unknown'}`);
+    console.warn(`   ⚠ AI provider: all providers failed — ${lastError ? describeError(lastError) : 'no provider configured'}`);
   } else if (usage.failures === 4) {
     console.warn(`   ⚠ AI provider: further failures suppressed (see summary at end of run)`);
   }
@@ -369,12 +435,13 @@ function isConfigured() {
  * Current usage counters — included in system_health_log entries.
  */
 function getUsage() {
-  return { ...usage, activeModel: _googleModel };
+  return { ...usage, activeModel: _googleModel, lastErrors: [...lastErrors] };
 }
 
 function resetUsage() {
   usage.google = 0; usage.anthropic = 0; usage.failures = 0;
   usage.fallbacks = 0; usage.rateLimited = 0; usage.throttleWaits = 0;
+  usage.retries = 0; usage.googleFailures = 0; lastErrors.length = 0; _anthropicWarned = false;
   _consecutive429s = 0; _breakerOpenUntil = 0;
 }
 
@@ -384,5 +451,10 @@ module.exports = {
   getUsage,
   resetUsage,
   discoverGoogleModel,   // exported for health checks
-  _test: { extractGoogleText, parseJSON },
+  _test: {
+    extractGoogleText, parseJSON, describeError, isRetryable,
+    /** Make backoff and throttling instant in tests. */
+    setTiming({ backoffMs, minGapMs }) { if (backoffMs != null) BACKOFF_BASE_MS = backoffMs; if (minGapMs != null) MIN_GAP_MS = minGapMs; },
+    resetDiscovery() { _googleModel = null; _googleModelTried = false; },
+  },
 };

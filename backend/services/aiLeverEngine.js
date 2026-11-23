@@ -47,7 +47,12 @@ function classifyHorizon(days) {
 // ── GEMINI HELPER ─────────────────────────────────────────────
 async function askGemini(prompt, expectJSON = true) {
   const result = await aiProvider.ask(prompt, expectJSON);
-  if (result === null) throw new Error('All AI providers unavailable');
+  if (result === null) {
+    // Carry the real cause (e.g. "HTTP 503 UNAVAILABLE: The model is overloaded")
+    // into the scan's error list, not just a count.
+    const last = (aiProvider.getUsage().lastErrors || []).slice(-1)[0];
+    throw new Error(`All AI providers unavailable${last ? ` — ${last.provider}: ${last.error}` : ''}`);
+  }
   return result;
 }
 
@@ -582,7 +587,8 @@ async function runAILeverScan() {
     itemsProcessed: aiUsage.google + aiUsage.anthropic,
     itemsExpected:  null,   // zero events on a quiet news day is valid
     itemsFailed:    aiUsage.failures + (errors.some(e => e.startsWith('Main scan')) ? 1 : 0),
-    detail:         `${flagsGenerated} flags, ${criticalFires} critical, AI: ${JSON.stringify(aiUsage)}`,
+    detail:         `${flagsGenerated} flags, ${criticalFires} critical, ${errors.length} errors` +
+                    `${errors.length ? ` (first: ${errors[0].slice(0, 200)})` : ''}, AI: ${JSON.stringify(aiUsage)}`,
   });
 }
 
