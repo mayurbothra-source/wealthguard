@@ -1,0 +1,20 @@
+# SA5: dry-run the nine-lever engine over Oct–Nov 2026 price history.
+# Read-only — fetches public prices (Yahoo, MFAPI), writes no database.
+# Runs on pushes that change the simulation, or by hand.
+name: sa5-simulation
+on:
+  workflow_dispatch: {}
+  push:
+    paths: ['scripts/sa5/**', 'backend/services/leverEngine.js', '.github/workflows/sa5-simulation.yml']
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci --omit=dev || npm install --omit=dev
+      - run: node scripts/sa5/simulate.js scripts/sa5/simulation-oct-nov-2026.log
+      - uses: actions/upload-artifact@v4
+        with: { name: sa5-simulation-log, path: scripts/sa5/simulation-oct-nov-2026.log }

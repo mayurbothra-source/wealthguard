@@ -910,12 +910,12 @@ async function _runInstrumentScoringEngineInner() {
         // published as a BUY in every market condition. Publishing a direction
         // on something never measured is the claim this platform's track
         // record exists to rule out.
-        const proposedAction = audit.insufficient_data
-          ? 'WATCH'
-          : (composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL');
+        const decision = require('./leverEngine').decideAction({
+          composite, insufficient_data: audit.insufficient_data, price_source: instrument.price_source });
+        const proposedAction = decision.action;
 
-        if (audit.insufficient_data) {
-          console.log(`   ⓘ ${instrument.symbol}: no directional call — ${audit.insufficient_reason}`);
+        if (decision.reason) {
+          console.log(`   ⓘ ${instrument.symbol}: no directional call — ${instrument.price_source === 'static' ? decision.reason : audit.insufficient_reason}`);
         }
 
         // The gate can veto or downgrade any signal regardless of score.
