@@ -169,4 +169,23 @@ const eng = require('../backend/services/trackRecordEngine');
   const o2 = DB2.rows('recommendation_outcomes');
   ck('outcomes still written without the migration-016 columns', o2.length >= 3 && o2.every(o => o.outcome_status === undefined));
   ck('a SELL on a rising fund is wrong', o2.find(o => o.checkpoint_label === 'Monthly').direction_correct === false);
+  // ── SA2: outcome_correct on the recommendation ──
+  console.log('\nSA2 outcome_correct');
+  ck('rollup: any wrong checkpoint → false', eng.rollupOutcome([{ direction_correct: true }, { direction_correct: false }]) === false);
+  ck('rollup: all verdicts right → true', eng.rollupOutcome([{ direction_correct: true }, { direction_correct: true }, { direction_correct: null }]) === true);
+  ck('rollup: no verdict (WATCH / not measurable) → null', eng.rollupOutcome([{ direction_correct: null }]) === null && eng.rollupOutcome([]) === null);
+  const recRows = DB.rows('recommendations');
+  const ocOf = id => recRows.find(r => r.id === id).outcome_correct;
+  ck('a BUY scored right at every measured checkpoint → outcome_correct true', ocOf('buy2') === true);
+  ck('a static G-Sec BUY with no verdict stays null', (ocOf('buy1') ?? null) === null);
+  ck('a WATCH never gets a verdict', (ocOf('watchBlocked') ?? null) === null);
+  const outsNow = DB.rows('recommendation_outcomes');
+  const withVerdict = new Set(outsNow.filter(o => o.direction_correct === true || o.direction_correct === false).map(o => o.recommendation_id));
+  ck('acceptance: no recommendation with a verdict has outcome_correct null',
+    recRows.filter(r => withVerdict.has(r.id) && (r.outcome_correct ?? null) === null).length === 0);
+  // A later wrong checkpoint flips an earlier true.
+  outsNow.filter(o => o.recommendation_id === 'buy2' && o.checkpoint_label === 'Weekly').forEach(o => { o.direction_correct = false; });
+  await eng.runTrackRecordCheckpoints({ now });
+  ck('a later wrong checkpoint flips outcome_correct to false', ocOf('buy2') === false);
 })();
+
