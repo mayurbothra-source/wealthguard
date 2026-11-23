@@ -92,7 +92,7 @@ function summaryText(h) {
       `${b.first_sent_at ? ` (first at ${new Date(b.first_sent_at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })} IST)` : ''}`;
   const idx = (h.freshness.indices || []).map(x => `${x.label} ${x.status}${x.unverified ? '/unverified' : ''}`).join(', ') || 'not checked';
   const inst = h.freshness.instruments || {};
-  const failures = (h.errors || []).filter(e => e.at && new Date(e.at) > new Date(Date.now() - 24 * 3600e3));
+  const failures = (h.errors || []).filter(e => e.at && new Date(e.at) > new Date(new Date(h.checked_at || Date.now()).getTime() - 24 * 3600e3));
   const ok = b.sent != null && b.sent === b.eligible && h.freshness.indices_ok;
   const subject = `WealthGuard daily summary ${h.date}: ${ok ? 'OK' : 'ATTENTION'}`;
   const lines = [
