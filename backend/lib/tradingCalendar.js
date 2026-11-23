@@ -81,18 +81,19 @@ function checkpointWindow(generatedAt, days, tol) {
 }
 
 /**
- * The close a checkpoint is measured at: of the closes inside [start, end],
- * the one nearest the target; on a tie, the earlier one (no look-ahead favoured).
+ * The close a checkpoint is measured at: the close ON the target date, or the
+ * nearest one before it inside the window (no look-ahead). Only when the window
+ * has nothing on or before the target is the earliest close after it used.
  * `series` is [{ date: 'YYYY-MM-DD', close }] in any order. Null when none.
  */
 function pickCheckpointClose(series, win) {
-  const tgt = parse(win.target).getTime();
-  let best = null;
+  let before = null, after = null;
   for (const p of series || []) {
     if (p.date < win.start || p.date > win.end || !(p.close > 0)) continue;
-    const dist = Math.abs(parse(p.date).getTime() - tgt);
-    if (!best || dist < best.dist || (dist === best.dist && p.date < best.date)) best = { ...p, dist };
+    if (p.date <= win.target) { if (!before || p.date > before.date) before = p; }
+    else if (!after || p.date < after.date) after = p;
   }
+  const best = before || after;
   return best ? { date: best.date, close: best.close } : null;
 }
 

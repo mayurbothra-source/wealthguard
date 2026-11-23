@@ -41,8 +41,10 @@ const eng = require('../backend/services/trackRecordEngine');
   ck('14-Day checkpoint: Mon 2 Nov → Mon 16 Nov, window 13–17 Nov', w.target === '2026-11-16' && w.start === '2026-11-13' && w.end === '2026-11-17');
 
   const win = { target: '2026-11-08', start: '2026-11-06', end: '2026-11-09' };
-  ck('close nearest a weekend target is used (Mon 9 Nov over Fri 6 Nov)',
-    cal.pickCheckpointClose([{ date: '2026-11-06', close: 10 }, { date: '2026-11-09', close: 11 }], win).date === '2026-11-09');
+  ck('weekend target uses the nearest PRIOR close (Fri 6 Nov, not Mon 9 Nov)',
+    cal.pickCheckpointClose([{ date: '2026-11-06', close: 10 }, { date: '2026-11-09', close: 11 }], win).date === '2026-11-06');
+  ck('…and the next close only when nothing on/before the target is in the window',
+    cal.pickCheckpointClose([{ date: '2026-11-09', close: 11 }], win).date === '2026-11-09');
   ck('on an equal distance the earlier close wins',
     cal.pickCheckpointClose([{ date: '2026-11-05', close: 9 }, { date: '2026-11-11', close: 12 }],
       { target: '2026-11-08', start: '2026-11-05', end: '2026-11-11' }).date === '2026-11-05');
