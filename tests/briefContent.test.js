@@ -84,19 +84,36 @@ function seedMarket() {
   ck('…static and unmeasured instruments are counted, not hidden', r.no_ideas.blockers['price not live or not recent'] >= 1 && r.no_ideas.blockers['not enough price history to measure'] >= 1);
   ck('…and no scores or probabilities leak into it', !/\d+\/100|0\.\d{2}|%/.test(r.no_ideas.text));
 
-  console.log('── track record ──');
-  const mk = (id, action, entry, target, stop, daysAgo, horizon = 14) => ({ id, action, entry_price_inr: entry, target_price_inr: target, stop_loss_inr: stop, generated_at: iso(daysAgo), horizon_days: horizon });
-  const recs = [mk('a', 'BUY', 100, 110, 95, 40), mk('b', 'BUY', 100, 110, 95, 40), mk('c', 'SELL', 100, 90, 105, 40), mk('d', 'BUY', 100, 110, 95, 3)];
-  const outs = { a: [{ actual_price_inr: 111, measured_at: iso(30) }], b: [{ actual_price_inr: 94, measured_at: iso(33) }], c: [{ actual_price_inr: 97, measured_at: iso(10) }] };
+  console.log('── track record (SA6) ──');
+  const mk = (id, action, entry, target, stop, daysAgo, sym = id) => ({ id, instrument_name: sym, action, entry_price_inr: entry, target_price_inr: target, stop_loss_inr: stop, generated_at: iso(daysAgo), horizon_days: 14 });
+  const oc = (label, ok, price, ret, nifty, extra = {}) => ({ checkpoint_label: label, direction_correct: ok, actual_price_inr: price, price_at_checkpoint: price,
+    [label === 'Weekly' ? 'return_1w_pct' : 'return_14d_pct']: ret, nifty_return_same_period: nifty, checkpoint_date: label === 'Weekly' ? '2026-10-08' : '2026-10-15', ...extra });
+  const recs = [mk('a', 'BUY', 100, 110, 95, 40), mk('b', 'BUY', 100, 110, 95, 40), mk('c', 'SELL', 100, 90, 105, 40), mk('d', 'BUY', 100, 110, 95, 3),
+                mk('e', 'SELL', 100, 90, 105, 40), mk('a2', 'BUY', 100, 110, 95, 40, 'a')];   // a2: same call, same day, second run
+  const outs = { a: [oc('14-Day', true, 111, 11, 3)], b: [oc('14-Day', false, 94, -6, 3)], c: [oc('14-Day', false, 103, 3, 3)],
+                 e: [oc('14-Day', null, 100, 0, 3, { outcome_status: 'price_suspect' })], a2: [oc('14-Day', true, 111, 11, 3)] };
   let sm = trs.summarise(recs, outs, now);
-  ck('hit target, hit stop, closed at horizon, open are counted', sm.hit_target === 1 && sm.hit_stop === 1 && sm.expired === 1 && sm.open === 1);
-  ck('fewer than 10 closed: "Track record building (N closed so far)", no percentage', sm.building && /^Track record building \(3 closed so far\)/.test(sm.text) && !/Average result/.test(sm.text));
-  ck('misses (stop-loss hits) are shown', /1 hit stop-loss/.test(sm.text));
-  const many = Array.from({ length: 12 }, (_, k) => mk(`m${k}`, 'BUY', 100, 110, 95, 40));
-  const manyOuts = Object.fromEntries(many.map((m, k) => [m.id, [{ actual_price_inr: k < 8 ? 111 : 94, measured_at: iso(30) }]]));
+  ck('same call twice on one day counts once', sm.issued === 5);
+  ck('closed = real verdicts at 14-Day; suspect price not counted as a win', sm.closed === 3 && sm.correct === 1 && sm.wrong === 2 && sm.not_measurable === 1 && sm.open === 1);
+  ck('hit target / hit stop from the checkpoint price', sm.hit_target === 1 && sm.hit_stop === 1);
+  ck('fewer than 10 closed: "📊 Track record building (N signals closed so far)", no percentage',
+     sm.building && /^📊 Track record building \(3 signals closed so far\)/.test(sm.text) && !/%/.test(sm.text), sm.text);
+  ck('disclaimer with the methodology link', /^Past signals are not guarantees\. See full methodology at https?:\/\/\S+\/methodology\.html$/.test(sm.disclaimer));
+
+  // ≥10 closed, underperforming the Nifty
+  const many = Array.from({ length: 12 }, (_, k) => mk(`m${k}`, k < 10 ? 'BUY' : 'SELL', 100, k < 10 ? 110 : 90, k < 10 ? 95 : 105, 30 + k));
+  const manyOuts = Object.fromEntries(many.map((m, k) => [m.id, [k < 3 ? oc('14-Day', true, 111, 11, 6) : k < 10 ? oc('14-Day', false, 94, -6, 6) : oc('14-Day', false, 106, 6, 6)]]));
   sm = trs.summarise(many, manyOuts, now);
-  ck('10+ closed: average result shown, misses counted alongside wins', !sm.building && sm.hit_target === 8 && sm.hit_stop === 4 && /Average result on closed calls: \+5\.33%/.test(sm.text) && /Misses are counted/.test(sm.text), sm.text);
-  ck('a good SELL counts as a gain', trs.classify(mk('s', 'SELL', 100, 90, 105, 40), [{ actual_price_inr: 89, measured_at: iso(30) }], now).result === 11);
+  ck('10+ closed: the full line, misses alongside wins', !sm.building && /^📊 Last 90 days: 12 signals issued, 3 hit target, 9 hit stop, 0 closed .* without either, 0 open\./.test(sm.text), sm.text);
+  ck('…avg return (a SELL that rose counts as a loss) and Nifty same period', sm.avg_return_pct === -1.75 && /Avg return: −1\.75%\. Nifty same period: \+6\.00%\./.test(sm.text), sm.text);
+  ck('…underperformance stated, not hidden', /7\.75 points behind the Nifty/.test(sm.text));
+  ck('…right-direction count shown', /Right direction 3 of 12/.test(sm.text));
+
+  // fallback to Weekly while 14-Day is thin
+  const wk = Array.from({ length: 4 }, (_, k) => mk(`w${k}`, 'BUY', 100, 110, 95, 20));
+  sm = trs.summarise(wk, Object.fromEntries(wk.map(m => [m.id, [oc('Weekly', true, 102, 2, 1)]])), now);
+  ck('falls back to Weekly when 14-Day data is insufficient', sm.checkpoint === 'Weekly' && sm.closed === 4);
+  ck('a good SELL counts as a gain', trs.summarise([mk('s', 'SELL', 100, 90, 105, 40)], { s: [oc('14-Day', true, 89, -11, 2)] }, now).avg_return_pct === 11);
 
   console.log('── greeting ──');
   ck('first name when known', /Good morning, Asha</.test(email.renderMorningBrief({ full_name: 'Asha Rao' }, {}).html));
@@ -118,7 +135,10 @@ function seedMarket() {
   ck('…only Builder+ tiers get Opportunities (min_tier from code)', bBeg.opportunities.length === 0 && bWb.opportunities.length === 1);
   ck('…every idea in both briefs has a rationale line', [...bBeg.ideas, ...bWb.ideas].every(i => /^Why now: /.test(i.why || '')));
   ck('…both show the track record block', /Track record building/.test(bBeg.full_text) && /Track record building/.test(bWb.full_text));
+  ck('…placed after the market snapshot and before the ideas (text)', bBeg.full_text.indexOf('MARKET SNAPSHOT') < bBeg.full_text.indexOf('OUR TRACK RECORD') && bBeg.full_text.indexOf('OUR TRACK RECORD') < bBeg.full_text.indexOf('IDEAS WORTH A LOOK'));
   const hBeg = email.renderMorningBrief({ full_name: 'Demo Beginner 1' }, bBeg).html, hWb = email.renderMorningBrief({ full_name: 'Demo Wealth Builder 1' }, bWb).html;
+  ck('…placed after the market snapshot and before the ideas (email), with the disclaimer',
+     hBeg.indexOf('Our track record') < hBeg.indexOf('Ideas worth a look') && /Past signals are not guarantees/.test(hBeg) && /methodology\.html/.test(hBeg));
   ck('…and the emails differ visibly', /Opportunities/.test(hWb) && !/Opportunities/.test(hBeg) && /Our track record/.test(hBeg));
   ck('…every email keeps the not-advice disclaimer', [hBeg, hWb].every(h => /do not constitute financial advice/i.test(h)));
   ck('…and never shows admin-only detail (scores, probabilities, source links)', [hBeg, hWb].every(h => !/\/100|P\(30d\)|probability|https?:\/\/(?!.*wealthguard)/i.test(h.replace(/<a [^>]*>/g, ''))));
