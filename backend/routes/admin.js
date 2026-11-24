@@ -300,6 +300,37 @@ router.get('/verify-instruments', async (req, res) => {
   }
 });
 
+/**
+ * End-to-end alert test. Runs the real stop-loss / critical-risk scan for ONE
+ * client and sends whatever it finds to the ADMIN address only (never the client).
+ *   POST /api/admin/test-alert   { "client_id": "<id>", "symbol": "TCS", "price": 3450 }
+ * symbol + price are optional: without them, a holding with a stop-loss is
+ * priced 0.5% below its stop so the breach path is exercised. Each event is
+ * sent once — calling again shows it as already sent.
+ */
+router.post('/test-alert', async (req, res) => {
+  if (!(await checkAdmin(req, res))) return;
+  const clientId = String(req.body?.client_id || '').trim();
+  if (!clientId) return res.status(400).json({ error: 'Pass client_id.' });
+  try {
+    const { supabaseAdmin } = require('../../config/supabase');
+    const { runHoldingAlertScan } = require('../services/holdingAlerts');
+    let priceOverride = null;
+    if (req.body?.symbol && req.body?.price != null) {
+      priceOverride = { [String(req.body.symbol)]: Number(req.body.price) };
+    } else {
+      const { data: hs } = await supabaseAdmin.from('portfolios').select('instrument_name, stop_loss_price')
+        .eq('client_id', clientId).eq('is_active', true);
+      const h = (hs || []).find(x => Number(x.stop_loss_price) > 0);
+      if (h) priceOverride = { [h.instrument_name]: Math.round(Number(h.stop_loss_price) * 0.995 * 100) / 100 };
+    }
+    const result = await runHoldingAlertScan({ clientId, priceOverride, forceAdmin: true });
+    res.json({ client_id: clientId, price_override: priceOverride, ...result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/health', async (req, res) => {
   if (!checkKey(req, res)) return;
   try {

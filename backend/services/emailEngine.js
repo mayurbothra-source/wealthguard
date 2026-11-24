@@ -201,7 +201,21 @@ function renderMorningBrief(client, brief, now = new Date()) {
   if (brief.portfolio_note) {
     sections.push(`${H3('Your Portfolio')}
       <p style="margin:0 0 8px;">${esc(brief.portfolio_note)}</p>${
-      brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
+      brief.portfolio?.holdings?.length ? (() => {
+        const p = brief.portfolio;
+        const inr = n => `₹${Math.abs(n).toLocaleString('en-IN')}`;
+        const sc = { EXIT: '#A23B2E', REVIEW: '#B7791F', HOLD: '#2E7D52' };
+        const head = p.value != null
+          ? `<p style="margin:0 0 6px;font-size:13px;">Value <strong>${inr(p.value)}</strong>${p.day_change != null ? ` · today ${p.day_change >= 0 ? '+' : '−'}${inr(p.day_change)}` : ''}${p.pnl != null ? ` · gain/loss ${p.pnl >= 0 ? '+' : '−'}${inr(p.pnl)} (${p.pnl_pct}%)` : ''}</p>`
+          : '<p style="margin:0 0 6px;font-size:13px;">Prices for your holdings could not be fetched this morning.</p>';
+        const rows = p.holdings.map(r => `<tr>
+          <td style="padding:4px 8px 4px 0;font-weight:700;color:${sc[r.status]};">${r.status}</td>
+          <td style="padding:4px 8px 4px 0;"><strong>${esc(r.symbol)}</strong></td>
+          <td style="padding:4px 8px 4px 0;">${r.price != null ? `₹${esc(r.price)}` : '—'}</td>
+          <td style="padding:4px 8px 4px 0;color:${(r.pnl ?? 0) >= 0 ? '#2E7D52' : '#A23B2E'};">${r.pnl != null ? `${r.pnl >= 0 ? '+' : '−'}${inr(r.pnl)} (${r.pnl_pct}%)` : ''}</td>
+          <td style="padding:4px 0;font-size:11px;color:#6E7A71;">${esc(r.reasons.join('; '))}</td></tr>`).join('');
+        return `${head}<table role="presentation" style="margin:0 0 18px;font-size:13px;border-collapse:collapse;">${rows}</table>`;
+      })() : brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
   }
   if (brief.starting_plan?.goals?.length) {
     const { fmtINR } = require('./startingPlan');
@@ -296,6 +310,17 @@ async function sendFlashAlert(client, alert) {
   });
 }
 
+/** Stop-loss / critical-risk alert about a holding. Returns { ok, id, error }. */
+async function sendHoldingAlert(client, ev) {
+  const html = wrapHTML(
+    ev.title,
+    `<h2 style="margin:0 0 10px;font-family:Georgia,serif;font-size:19px;color:#A23B2E;">${esc(ev.title)}</h2>
+     <p style="margin:0 0 12px;">${esc(ev.body)}</p>`,
+    'You are receiving this because you hold this instrument and have alerts enabled.'
+  );
+  return sendDetailed({ to: client.email, subject: `🔔 ${ev.title} — WealthGuard`, html, text: ev.body, clientId: client.id, type: ev.type || 'holding_alert' });
+}
+
 async function sendPaymentGraceNotice(client, stage, daysRemaining) {
   if (!client.email) return false;
 
@@ -387,6 +412,7 @@ module.exports = {
   sendMorningBrief,
   renderMorningBrief,
   sendDetailed,
+  sendHoldingAlert,
   sendAuthCode,
   sendFlashAlert,
   sendPaymentGraceNotice,
