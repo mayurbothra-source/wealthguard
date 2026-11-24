@@ -34,6 +34,7 @@ const { getYahooQuote, getNSEQuote, getMacroIndicators, getMFNav } = require('./
 const { runRiskGate, createGateSession } = require('./riskGateEngine');
 const leverEngine          = require('./leverEngine');
 const fundamentalsProvider = require('./fundamentalsProvider');
+const { computeLevels } = require('./signalLevels');
 const db                   = require('../lib/db');
 const { reportRun } = require('./healthEngine');
 const emailEngine = require('./emailEngine');
@@ -106,32 +107,8 @@ const LEVER_LABELS = {
   risk_adjusted: 'Risk-adjusted return',
 };
 
-// Expected return by category over the signal horizon.
-// Used to derive a concrete target price so a signal is a full thesis,
-// not just a direction. Conservative figures — based on long-run category
-// averages, deliberately not optimistic.
-const EXPECTED_RETURN_PCT = {
-  large_cap_equity: { weekly: 2.0, monthly: 6.0 },
-  mid_cap_equity:   { weekly: 3.0, monthly: 9.0 },
-  small_cap_equity: { weekly: 4.0, monthly: 12.0 },
-  large_cap_fund:   { weekly: 1.5, monthly: 5.0 },
-  flexi_mid_fund:   { weekly: 2.0, monthly: 6.5 },
-  index_etf:        { weekly: 1.5, monthly: 5.0 },
-  gold:             { weekly: 1.0, monthly: 3.0 },
-  bond_gsec:        { weekly: 0.5, monthly: 1.5 },
-  debt_fund:        { weekly: 0.5, monthly: 1.5 },
-  watchlist:        { weekly: 2.0, monthly: 6.0 },
-};
-
-// Stop-loss distance by risk level. Wider bands for more volatile
-// instruments so normal fluctuation doesn't trigger an unnecessary exit.
-const STOP_LOSS_PCT = {
-  low:           3.0,
-  low_moderate:  4.0,
-  moderate:      5.0,
-  moderate_high: 7.0,
-  high:          10.0,
-};
+// Target and stop-loss are no longer fixed percentages: see signalLevels.js
+// (volatility- or yield-based, reward:risk ≥ 1.5, trusted live price only).
 
 // Signal horizon in days, by tier. High-conviction calls get a longer
 // runway because they rest on structural rather than momentary factors.
@@ -231,7 +208,7 @@ async function fetchInstrumentPrice(instrument) {
     try {
       const nav = await getMFNav(instrument.amfi_code);
       if (nav && nav.nav && !isNaN(nav.nav) && nav.nav > 0) {
-        return { price: nav.nav, change_pct: 0, source: 'mfapi_live' };
+        return { price: nav.nav, change_pct: 0, source: 'mfapi_live', as_of: nav.as_of || null };
       }
     } catch (e) {
       console.warn(`   ⚠ MFAPI failed for ${instrument.symbol} (AMFI ${instrument.amfi_code}): ${e.message}`);
@@ -414,30 +391,32 @@ async function scoreInstrumentLegacy(instrument, macroData, priceData) {
  * Manually-logged signals (from v8 Tab 1) are identified by a non-null
  * instrument_id and are never touched by this function.
  */
-async function convertScoreToRecommendation(instrument, composite, levers, entryPrice, gateResult) {
+async function convertScoreToRecommendation(instrument, composite, levers, entryPrice, gateResult, ctx = {}) {
   // Risk gate may have overridden the action (e.g. BUY vetoed to WATCH)
   const rawAction = composite >= 70 ? 'BUY' : composite >= 50 ? 'WATCH' : 'SELL';
-  const action     = gateResult?.action || rawAction;
+  let action       = gateResult?.action || rawAction;
   const wasVetoed  = gateResult?.vetoed || false;
   const confidence = parseFloat(Math.min(0.95, Math.max(0.30, composite / 100)).toFixed(2));
-  const tier       = composite >= 75 && !wasVetoed ? 'high_conviction' : 'standard';
+  let tier         = composite >= 75 && !wasVetoed ? 'high_conviction' : 'standard';
   const horizonDays = HORIZON_DAYS[tier] || 14;
 
-  // ── Derive target price and stop-loss so the signal is a full thesis ──
-  const returns = EXPECTED_RETURN_PCT[instrument.category] || EXPECTED_RETURN_PCT.watchlist;
-  const expectedPct = horizonDays >= 30 ? returns.monthly : returns.weekly;
-  const stopPct = STOP_LOSS_PCT[instrument.risk_level] || 5.0;
-
-  let targetPrice = null, stopLoss = null;
-  if (entryPrice && !isNaN(entryPrice) && entryPrice > 0) {
-    if (action === 'BUY') {
-      targetPrice = parseFloat((entryPrice * (1 + expectedPct / 100)).toFixed(2));
-      stopLoss    = parseFloat((entryPrice * (1 - stopPct / 100)).toFixed(2));
-    } else if (action === 'SELL') {
-      targetPrice = parseFloat((entryPrice * (1 - expectedPct / 100)).toFixed(2));
-      stopLoss    = parseFloat((entryPrice * (1 + stopPct / 100)).toFixed(2));
+  // ── Target, stop and reward:risk (signalLevels.js) ─────────────────────
+  // Only on a trusted, fresh price; derived from volatility (or yield for debt);
+  // a BUY whose reward:risk is below 1.5 — or whose price is not live — is
+  // downgraded to WATCH with the reason recorded. No fixed percentages.
+  let targetPrice = null, stopLoss = null, rewardRisk = null, downgradeReason = null, expectedPct = null;
+  if (action === 'BUY' || action === 'SELL') {
+    const lv = computeLevels({ action, entry: entryPrice, horizonDays, instrument,
+                               priceAsOf: ctx.priceAsOf || null, stats: ctx.stats || null });
+    rewardRisk = lv.rewardRisk ?? null;
+    if (lv.ok) {
+      targetPrice = lv.target; stopLoss = lv.stop;
+      expectedPct = parseFloat(((Math.abs(lv.target - entryPrice) / entryPrice) * 100).toFixed(2));
+    } else if (action === 'BUY') {
+      action = 'WATCH'; tier = 'standard'; downgradeReason = lv.reason;
+      console.log(`   ↓ ${instrument.symbol}: BUY → WATCH (${lv.reason})`);
     }
-    // WATCH signals get no target/stop — there is no position to manage
+    // A SELL stays a SELL (it is a caution), but carries no levels without a trusted price.
   }
 
   // ── Build plain-English rationale ────────────────────────────────────
@@ -469,6 +448,12 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
   }
   if (gateResult?.caution && gateResult?.reason) {
     rationale += `${gateResult.reason} `;
+  }
+  if (downgradeReason) {
+    const plain = /reward:risk/.test(downgradeReason)
+      ? 'at today\'s price the possible gain is not large enough for the risk, so this is not a buy call yet.'
+      : 'we could not confirm a live price, so we are not putting a target or stop-loss on it.';
+    rationale += `The score is strong, but ${plain} `;
   }
   if (targetPrice && action !== 'WATCH') {
     rationale += `Our ${horizonDays}-day view sees fair value around ₹${targetPrice.toLocaleString('en-IN')}, ` +
@@ -511,7 +496,7 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
     console.warn(`   ⚠ Could not deactivate old signals for ${instrument.symbol}: ${e.message}`);
   }
 
-  const { error } = await supabaseAdmin.from('recommendations').insert({
+  const recRow = {
     client_id:            null,
     instrument_id:        null,
     instrument_name:      instrument.symbol,
@@ -532,10 +517,14 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
     risk_gate_veto_reason: wasVetoed ? gateResult.reason : null,
     is_active:            true,
     generated_at:         new Date().toISOString(),
-  });
-
-  if (error) {
-    console.warn(`   ⚠ Signal insert failed for ${instrument.symbol}: ${error.message}`);
+    reward_risk:          rewardRisk,
+    downgrade_reason:     downgradeReason,
+    price_as_of:          ctx.priceAsOf || null,
+  };
+  // The last three columns arrive with migration 012; before it, they are dropped and the signal still lands.
+  const w = await db.writeTolerant('recommendations', 'insert', recRow, ['reward_risk', 'downgrade_reason', 'price_as_of']);
+  if (!w.ok) {
+    console.warn(`   ⚠ Signal insert failed for ${instrument.symbol}`);
     return false;
   }
   return true;
@@ -773,6 +762,10 @@ async function _runInstrumentScoringEngineInner() {
     try {
       // 1. Fetch price via the correct source for this instrument type
       const priceData = await fetchInstrumentPrice(instrument);
+      if (priceData?.as_of) {
+        await db.tryWrite('instrument_universe', 'update', c => c.from('instrument_universe')
+          .update({ last_price_success_at: priceData.as_of }).eq('id', instrument.id));
+      }
       const srcKey = priceData?.source?.startsWith('yahoo')  ? 'yahoo'
                    : priceData?.source?.startsWith('mfapi')  ? 'mfapi'
                    : priceData?.source === 'static_reference' ? 'static_reference'
@@ -938,7 +931,8 @@ async function _runInstrumentScoringEngineInner() {
         }
 
         const ok = await convertScoreToRecommendation(
-          instrument, composite, scores, priceData?.price ?? null, gateResult
+          instrument, composite, scores, priceData?.price ?? null, gateResult,
+          { priceAsOf: priceData?.as_of || null, stats: metrics?.price_stats || null }
         );
         if (ok) signalsCreated++;
       }

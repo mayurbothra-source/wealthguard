@@ -248,7 +248,7 @@ async function buildIdeas(riskScore, heldSymbols) {
     const allowedCats = RISK_CATEGORY_MAP[riskBand(riskScore)];
     const { data: instruments } = await supabaseAdmin
       .from('instrument_universe')
-      .select('id, symbol, name, category, price_source')
+      .select('*')
       .in('category', allowedCats).eq('status', 'active');
     // A statically-priced instrument (e.g. RBI Floating Rate Bond) has no market
     // price and cannot be bought or sold on an exchange, so it is never an "idea".
@@ -259,7 +259,8 @@ async function buildIdeas(riskScore, heldSymbols) {
     const since = new Date(Date.now() - 10 * 86400000).toISOString();
     const { data: sigs } = await supabaseAdmin
       .from('recommendations')
-      .select('instrument_name, action, confidence_score, signal_tier, rationale_short, rationale_text, entry_price_inr, target_price_inr, stop_loss_inr, horizon_days, generated_at')
+      // '*' so the brief keeps working whether or not migration 012's columns exist yet.
+      .select('*')
       .in('instrument_name', Object.keys(meta))
       .is('client_id', null).eq('is_active', true).eq('risk_gate_passed', true)
       // Only FRESH signals. Without this, a signal from an old scoring run stayed "active"
@@ -305,13 +306,23 @@ async function buildIdeas(riskScore, heldSymbols) {
     }
 
     const held = new Set(heldSymbols);
+    // A target or stop is shown ONLY when the signal was sized on a trusted,
+    // fresh price (WS3). Otherwise the idea carries no numbers at all.
+    const { priceModeOf, priceIsFresh } = require('./signalLevels');
+    const levelsTrusted = s => s.target_price_inr != null && s.stop_loss_inr != null
+      && priceModeOf(meta[s.instrument_name]) !== 'static'
+      && priceIsFresh(s.price_as_of, new Date(s.generated_at));
     const toIdea = s => ({
+      levels_ok: levelsTrusted(s),
+      reward_risk: levelsTrusted(s) && s.reward_risk != null ? Number(s.reward_risk) : null,
       symbol: s.instrument_name,
       name: meta[s.instrument_name]?.name || s.instrument_name,
       action: s.action,
       high_conviction: s.signal_tier === 'high_conviction',
       rationale: short(s.rationale_text || s.rationale_short || '', 220),
-      entry: s.entry_price_inr, target: s.target_price_inr, stop: s.stop_loss_inr,
+      entry: s.entry_price_inr,
+      target: levelsTrusted(s) ? s.target_price_inr : null,
+      stop: levelsTrusted(s) ? s.stop_loss_inr : null,
       horizon_days: s.horizon_days,
     });
 
