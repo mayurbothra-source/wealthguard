@@ -74,6 +74,27 @@ function seedMarket() {
   const high = (await quiet(() => T.buildIdeas(9, [], now))).ideas.map(i => i.symbol);
   ck('low risk never sees mid-cap; high risk can', !low.includes('ASTRAL') && high.includes('ASTRAL'));
 
+  console.log('── SELL calls are shown (FIX-7) ──');
+  seedMarket();
+  // ASTRAL: measured, fresh price, newest signal SELL → shown. TCS SELL with a price that stopped updating → not shown.
+  // INFY: SELL but never measured on real prices → not shown.
+  DB.rows('recommendations').push(
+    { instrument_name: 'ASTRAL', client_id: null, is_active: true, risk_gate_passed: true, action: 'SELL', confidence_score: 0.42, entry_price_inr: 1500,
+      price_as_of: iso(0.5), generated_at: iso(0.5), horizon_days: 14, rationale_short: 'SELL — 42/100 confidence score' },
+    { instrument_name: 'INFY', client_id: null, is_active: true, risk_gate_passed: true, action: 'SELL', confidence_score: 0.40, entry_price_inr: 1500,
+      price_as_of: iso(0.5), generated_at: iso(0.5), horizon_days: 14 });
+  DB.rows('recommendations').filter(x => x.instrument_name === 'TCS').forEach(x => { x.action = 'SELL'; x.price_as_of = '2018-06-01T10:00:00Z'; });
+  let sr = await quiet(() => T.buildIdeas(6, [], now));
+  ck('a fresh SELL on an instrument the client does not hold is shown, framed "Consider avoiding or exiting"',
+     sr.cautions.length === 1 && sr.cautions[0].symbol === 'ASTRAL' && sr.cautions[0].label === 'Consider avoiding or exiting', JSON.stringify(sr.cautions));
+  ck('…with a plain reason line and no score (no "/100")', /^Why: /.test(sr.cautions[0].why || '') && !/\/100|0\.42/.test(JSON.stringify(sr.cautions)));
+  ck('a SELL whose price feed stopped updating is not shown (we cannot stand behind it)', !sr.cautions.some(c => c.symbol === 'TCS'));
+  ck('a SELL on an instrument never measured on real prices is not shown', !sr.cautions.some(c => c.symbol === 'INFY'));
+  sr = await quiet(() => T.buildIdeas(6, ['ASTRAL'], now));
+  ck('a SELL on a holding is left to Your Portfolio (EXIT/REVIEW), not repeated here', !sr.cautions.some(c => c.symbol === 'ASTRAL'));
+  const cHtml = email.renderMorningBrief({ full_name: 'Asha' }, { cautions: [{ symbol: 'INFY', name: 'Infosys', action: 'SELL', label: 'Consider avoiding or exiting', why: 'Why: the price trend is weak.' }] }).html;
+  ck('the email shows the "Consider avoiding or exiting" section', /Consider avoiding or exiting/.test(cHtml) && /INFY/.test(cHtml));
+
   console.log('── why no ideas ──');
   DB.rows('recommendations').forEach(x => { x.action = 'WATCH'; x.target_price_inr = null; x.stop_loss_inr = null; });
   DB.rows('recommendations')[0].downgrade_reason = 'reward:risk 0.40 is below 1.5';
