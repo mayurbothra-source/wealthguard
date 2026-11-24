@@ -136,6 +136,13 @@ router.get('/trigger-track-record', makeTrigger(
   'trackRecordEngine', '📋',
   () => require('../services/trackRecordEngine').runTrackRecordCheckpoints));
 
+// One-time SA1 backfill: scores every signal since 28 Aug at its own checkpoint
+// dates. Safe to re-run — checkpoints already recorded are skipped.
+router.get('/trigger-track-record-backfill', makeTrigger(
+  'trackRecordEngine', '📋',
+  () => () => require('../lib/keepAwake').during('trackRecordBackfill', () =>
+    require('../services/trackRecordEngine').runTrackRecordCheckpoints({ runLabel: 'backfill_2026_11' }))));
+
 router.get('/trigger-morning-brief', makeTrigger(
   'morningBriefEngine', '📰',
   () => () => require('../services/morningBriefEngine').generateAndSendMorningBrief({ trigger: 'admin' })));
