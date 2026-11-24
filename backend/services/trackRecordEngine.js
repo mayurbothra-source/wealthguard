@@ -230,6 +230,40 @@ async function scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel 
 }
 
 /**
+ * SA2 — the verdict on a recommendation as a whole, from its checkpoints.
+ * Strictest wins: any checkpoint wrong → false; otherwise, if at least one
+ * checkpoint has a verdict and all verdicts are right → true; no verdict → null.
+ * Checkpoints without a verdict (WATCH, not_measurable, inconclusive) are
+ * ignored. It is recomputed every run, so a later wrong checkpoint flips an
+ * earlier true to false.
+ */
+function rollupOutcome(outcomes) {
+  const verdicts = (outcomes || []).map(o => o.direction_correct).filter(v => v === true || v === false);
+  if (!verdicts.length) return null;
+  return verdicts.includes(false) ? false : true;
+}
+
+/** Write recommendations.outcome_correct for the given ids; only rows whose value changes. */
+async function syncOutcomeCorrect(recIds, outcomesByRec, currentByRec) {
+  const groups = { true: [], false: [], null: [] };
+  for (const id of recIds) {
+    const v = rollupOutcome(outcomesByRec.get(id));
+    if ((currentByRec.get(id) ?? null) !== v) groups[String(v)].push(id);
+  }
+  let updated = 0;
+  for (const [k, ids] of Object.entries(groups)) {
+    const value = k === 'null' ? null : k === 'true';
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      const { error } = await supabaseAdmin.from('recommendations').update({ outcome_correct: value }).in('id', chunk);
+      if (error) console.error(`   ❌ outcome_correct update failed: ${error.message}`);
+      else updated += chunk.length;
+    }
+  }
+  return updated;
+}
+
+/**
  * Main engine. Options:
  *   since     — only signals generated on/after this IST date (default: all)
  *   runLabel  — recorded on each row ('daily', or 'backfill_2026_11')
@@ -253,7 +287,7 @@ async function runTrackRecordCheckpoints(opts = {}) {
     // a superseded signal still happened and still gets scored.
     const oldest = new Date(now.getTime() - 7 * 86400000).toISOString();
     preds = await selectAll(() => supabaseAdmin.from('recommendations')
-      .select('id, instrument_name, action, entry_price_inr, monday_open_price_inr, generated_at')
+      .select('id, instrument_name, action, entry_price_inr, monday_open_price_inr, generated_at, outcome_correct')
       .is('client_id', null)
       .not('entry_price_inr', 'is', null)
       .gte('generated_at', `${since}T00:00:00+05:30`)
@@ -320,11 +354,23 @@ async function runTrackRecordCheckpoints(opts = {}) {
     if (!error) updated++;
   }
 
+  // SA2: keep recommendations.outcome_correct in step with the checkpoints.
+  const outcomesByRec = new Map();
+  for (const o of existing) (outcomesByRec.get(o.recommendation_id) || outcomesByRec.set(o.recommendation_id, []).get(o.recommendation_id)).push(o);
+  for (const { id, row } of toRetry) {
+    const list = outcomesByRec.get(row.recommendation_id) || [];
+    const i = list.findIndex(o => o.id === id);
+    if (i >= 0) list[i] = { ...list[i], ...row };
+  }
+  for (const r of toInsert) (outcomesByRec.get(r.recommendation_id) || outcomesByRec.set(r.recommendation_id, []).get(r.recommendation_id)).push(r);
+  const currentByRec = new Map(preds.map(p => [p.id, p.outcome_correct ?? null]));
+  const outcomeCorrectUpdated = await syncOutcomeCorrect(preds.map(p => p.id), outcomesByRec, currentByRec);
+
   const measuredWritten = toInsert.filter(r => r.outcome_status === 'measured').length;
   const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${v}× ${k}`).join('; ');
   const detail = `[${runLabel}] ${preds.length} signals, ${c.due} checkpoints due: ${c.measured} measured, ` +
     `${c.notMeasurable} not measurable${reasonText ? ` (${reasonText})` : ''}; ${c.already} already recorded, ` +
-    `${c.waiting} not yet due; ${written} rows written, ${updated} retried rows now measured`;
+    `${c.waiting} not yet due; ${written} rows written, ${updated} retried rows now measured, ${outcomeCorrectUpdated} outcome_correct updated`;
   console.log(`📋 Track record complete: ${detail}`);
 
   await reportRun({
@@ -336,7 +382,7 @@ async function runTrackRecordCheckpoints(opts = {}) {
     itemsFailed:    toInsert.length - written,
     detail,
   });
-  return { ...c, written, updated, measuredWritten, signals: preds.length, reasons };
+  return { ...c, written, updated, outcomeCorrectUpdated, measuredWritten, signals: preds.length, reasons };
 }
 
 function isRetryable(prior, now) {
@@ -347,7 +393,7 @@ function isRetryable(prior, now) {
 }
 
 module.exports = {
-  CHECKPOINTS, BACKFILL_SINCE, checkpointDue, scoreCheckpoint,
+  CHECKPOINTS, BACKFILL_SINCE, checkpointDue, scoreCheckpoint, rollupOutcome,
   classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT,
   runTrackRecordCheckpoints,
 };
