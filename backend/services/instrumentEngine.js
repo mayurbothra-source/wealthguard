@@ -518,11 +518,13 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
     is_active:            true,
     generated_at:         new Date().toISOString(),
     reward_risk:          rewardRisk,
+    // The column schema.sql always had (and nothing ever wrote): same value.
+    risk_reward_ratio:    rewardRisk,
     downgrade_reason:     downgradeReason,
     price_as_of:          ctx.priceAsOf || null,
   };
   // The last three columns arrive with migration 012; before it, they are dropped and the signal still lands.
-  const w = await db.writeTolerant('recommendations', 'insert', recRow, ['reward_risk', 'downgrade_reason', 'price_as_of']);
+  const w = await db.writeTolerant('recommendations', 'insert', recRow, ['reward_risk', 'risk_reward_ratio', 'downgrade_reason', 'price_as_of']);
   if (!w.ok) {
     console.warn(`   ⚠ Signal insert failed for ${instrument.symbol}`);
     return false;
