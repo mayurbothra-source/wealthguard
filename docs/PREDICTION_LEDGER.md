@@ -48,13 +48,13 @@ these show "no verdict" and stay uncoloured.
 
 ## Setup (about 5 minutes, once)
 
-1. **Render** → wealthguard-backend → Environment → add `LEDGER_TOKEN` = any long random
-   string (e.g. from a password generator). Save (Render redeploys).
+1. Token: the ledger accepts `LEDGER_TOKEN` if set in Render, otherwise the existing
+   `JOB_SECRET` or `ADMIN_TRIGGER_KEY`. Using the existing `ADMIN_TRIGGER_KEY` needs no Render change.
 2. Open the sheet → **Extensions → Apps Script**. Replace the editor contents with
    `scripts/google-sheets/PredictionLedger.gs` → Save.
 3. In Apps Script: **Project Settings → Script properties → Add**:
    - `LEDGER_URL` = `https://wealthguard-backend.onrender.com/api/ledger/predictions`
-   - `LEDGER_TOKEN` = the same value as in Render
+   - `LEDGER_TOKEN` = that same value (e.g. your `ADMIN_TRIGGER_KEY`)
 4. Back in the editor, choose `installDailyTrigger` → **Run** → approve the permissions.
 5. Choose `syncLedger` → **Run**. The first run may take up to 4 minutes while the
    free-plan server wakes up. Both tabs fill in.

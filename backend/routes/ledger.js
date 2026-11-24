@@ -3,7 +3,7 @@
  *
  * Read-only JSON for the Google Sheet prediction ledger
  * (scripts/google-sheets/PredictionLedger.gs). The token is LEDGER_TOKEN, or
- * JOB_SECRET when that is not set; compared in constant time. Returns
+ * JOB_SECRET, then ADMIN_TRIGGER_KEY, when that is not set; compared in constant time. Returns
  * { rows, summary, engine, generated_at }. No client data — house predictions only.
  */
 'use strict';
@@ -15,7 +15,7 @@ const { limit } = require('../lib/rateLimit');
 const router = express.Router();
 router.use(limit({ windowMs: 10 * 60e3, max: 30, message: 'Too many ledger requests.' }));
 
-const token = () => String(process.env.LEDGER_TOKEN || process.env.JOB_SECRET || '').trim();
+const token = () => String(process.env.LEDGER_TOKEN || process.env.JOB_SECRET || process.env.ADMIN_TRIGGER_KEY || '').trim();
 function tokenMatches(given) {
   const want = token();
   if (!want || !given) return false;
