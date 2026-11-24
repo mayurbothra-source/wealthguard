@@ -54,6 +54,7 @@ app.use('/api/goals',        require('./routes/goals'));
 app.use('/api/whatsapp',     require('./routes/whatsapp'));
 app.use('/api/payments',     require('./routes/payments'));
 app.use('/api/admin',        require('./routes/admin'));
+app.use('/api/ledger',       require('./routes/ledger'));
 app.use('/api/jobs',         require('./routes/jobs'));
 
 // ── FRONTEND SPA fallback ─────────────────────────

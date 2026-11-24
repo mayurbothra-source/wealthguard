@@ -29,6 +29,7 @@ const CHECKPOINTS = [
   { days: 14, tol: 1, field: 'return_14d_pct', label: '14-Day'    },   // the horizon standard signals claim
   { days: 30, tol: 2, field: 'return_1m_pct',  label: 'Monthly'   },
   { days: 90, tol: 3, field: 'return_3m_pct',  label: 'Quarterly' },
+  { days: 365, tol: 5, field: 'return_1y_pct', label: 'Annual'    },   // prediction ledger (migration 020)
 ];
 
 // First house signal in the database; a backfill starts here.
@@ -37,7 +38,7 @@ const BACKFILL_SINCE = '2026-08-28';
 // is retried on later runs for this many days after its window closed.
 const RETRY_FETCH_FAILURES_FOR_DAYS = 30;
 // Columns added by migration 016. Writes drop them if the migration has not run.
-const NEW_COLUMNS = ['return_14d_pct', 'checkpoint_date', 'price_as_of', 'outcome_status', 'not_measurable_reason', 'run_label', 'price_at_checkpoint'];
+const NEW_COLUMNS = ['return_14d_pct', 'checkpoint_date', 'price_as_of', 'outcome_status', 'not_measurable_reason', 'run_label', 'price_at_checkpoint', 'return_1y_pct'];
 // SA3: a close used for scoring must be no more than this many trading days before the checkpoint date.
 const MAX_STALE_TRADING_DAYS = 3;
 const PAGE = 1000;
@@ -214,7 +215,7 @@ async function scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel 
   const returnPct = ((hit.close - entry) / entry) * 100;
   // A move this large over the period means the entry and checkpoint prices are
   // in different units (how Gold once showed -97% in a week). Refuse to score it.
-  const IMPLAUSIBLE = { 7: 50, 14: 60, 30: 70, 90: 90 };
+  const IMPLAUSIBLE = { 7: 50, 14: 60, 30: 70, 90: 90, 365: 150 };
   if (Math.abs(returnPct) > IMPLAUSIBLE[cp.days]) {
     return notMeasurable(`implausible ${returnPct.toFixed(1)}% move (entry ₹${entry}, checkpoint ₹${hit.close}) — likely a unit mismatch`);
   }
