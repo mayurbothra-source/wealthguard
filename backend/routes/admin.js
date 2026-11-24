@@ -331,6 +331,20 @@ router.post('/test-alert', async (req, res) => {
   }
 });
 
+/**
+ * Everything on one screen: job runs, today's brief deliveries, data freshness,
+ * instruments by price_mode, last 20 errors.
+ *   GET /api/admin/system-health   (admin key or admin session)
+ */
+router.get('/system-health', async (req, res) => {
+  if (!(await checkAdmin(req, res))) return;
+  try {
+    res.json(await require('../services/systemHealth').getSystemHealth());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/health', async (req, res) => {
   if (!checkKey(req, res)) return;
   try {

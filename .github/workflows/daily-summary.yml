@@ -1,0 +1,29 @@
+# 08:30 IST admin summary email: "Brief sent to N of M clients, data freshness, failures".
+# Idempotent per IST date, so the two runs (and the server's own 08:30 cron) send it once.
+# Secret: JOB_SECRET (falls back to ADMIN_TRIGGER_KEY).
+name: daily-summary
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 3 * * 1-5'    # 08:30 IST
+    - cron: '30 3 * * 1-5'   # 09:00 IST — backup
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Warm the server and send the summary
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL || 'https://wealthguard-backend.onrender.com' }}
+          JOB_SECRET: ${{ secrets.JOB_SECRET || secrets.ADMIN_TRIGGER_KEY }}
+        run: |
+          BACKEND_URL="$(printf '%s' "$BACKEND_URL" | tr -d '[:space:]')"; BACKEND_URL="${BACKEND_URL%/}"
+          JOB_SECRET="$(printf '%s' "$JOB_SECRET" | tr -d '[:space:]')"
+          if [ -z "$JOB_SECRET" ]; then echo "::error::JOB_SECRET (or ADMIN_TRIGGER_KEY) secret is not set"; exit 1; fi
+          for i in 1 2 3 4 5; do
+            curl -sS --max-time 90 -o /dev/null -w "%{http_code}\n" "$BACKEND_URL/healthz" | grep -q '^200$' && break
+            sleep $((i * 10))
+          done
+          code=$(curl -sS --max-time 180 -o body.json -w "%{http_code}" -X POST -H "x-job-secret: $JOB_SECRET" "$BACKEND_URL/api/jobs/daily-summary" || echo 000)
+          echo "HTTP $code: $(cat body.json 2>/dev/null)"
+          [ "$code" = "200" ] || { echo "::error::Daily summary was not sent"; exit 1; }

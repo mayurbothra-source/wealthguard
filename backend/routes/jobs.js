@@ -58,5 +58,16 @@ router.post('/morning-brief', requireJobSecret, async (req, res) => {
   }
 });
 
+/** 08:30 IST admin summary — once per IST date. */
+router.post('/daily-summary', requireJobSecret, async (req, res) => {
+  try {
+    const r = await require('../services/systemHealth').sendDailySummary();
+    res.status(r.status === 'failed' ? 502 : 200).json(r);
+  } catch (e) {
+    console.error('❌ /api/jobs/daily-summary:', e.message);
+    res.status(500).json({ status: 'error', error: e.message });
+  }
+});
+
 module.exports = router;
 module.exports._test = { secretMatches };
