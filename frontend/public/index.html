@@ -1236,6 +1236,13 @@ table.data-table{width:100%;border-collapse:collapse;}
     </div>
     <div style="max-width:1100px;margin:0 auto;padding:20px 24px 60px;">
 
+      <!-- Market data freshness (WS2) -->
+      <div class="sip-section">
+        <div class="sip-section-title">📊 Market data freshness</div>
+        <div class="sip-section-sub">Where each index figure in today's brief came from, when it was true, and whether it passed the checks (stale = older than the previous trading day; unverified = moved more than 4% or unchanged for more than 3 days).</div>
+        <div id="admin-data-freshness"><div class="empty-state"><p>Loading&hellip;</p></div></div>
+      </div>
+
       <!-- AI Events -->
       <div class="sip-section">
         <div class="sip-section-title">🤖 Active AI Events</div>
@@ -4014,7 +4021,33 @@ function updateMobileNav(activeView){
 /* ============================================================
    ADMIN VIEW — loads AI events, flags, scan log, instruments
 ============================================================ */
+async function loadAdminDataFreshness(){
+  const el = document.getElementById('admin-data-freshness');
+  if (!el) return;
+  try {
+    const r = await fetch(API.base + '/admin/data-freshness', { headers: API._headers() });
+    const j = await r.json();
+    if (!r.ok) { el.innerHTML = `<div class="empty-state"><p>${esc(j.error || 'Could not load')}</p></div>`; return; }
+    const badge = x => x.status === 'missing' ? '<span class="admin-badge badge-critical">missing</span>'
+      : x.status === 'stale' ? '<span class="admin-badge badge-high">stale</span>'
+      : x.unverified ? '<span class="admin-badge badge-high">unverified</span>' : '<span class="admin-badge badge-low">live</span>';
+    el.innerHTML = '<div>' + j.indices.map(x => `
+      <div class="admin-log-row">
+        <div><b>${esc(x.label)}</b> ${x.price != null ? Number(x.price).toLocaleString('en-IN') : '—'}
+          ${x.change_pct != null ? `(${x.change_pct >= 0 ? '+' : ''}${x.change_pct}%)` : ''} ${badge(x)}</div>
+        <div style="color:var(--muted);font-size:11px;">
+          source: ${esc(x.source)} &nbsp;|&nbsp; as of: ${x.as_of ? new Date(x.as_of).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}
+          &nbsp;|&nbsp; age: ${x.age_hours != null ? x.age_hours + ' h' : '—'}
+          ${x.warnings && x.warnings.length ? `<br>⚠ ${esc(x.warnings.join('; '))}` : ''}
+        </div>
+      </div>`).join('') + `</div><div style="font-size:11px;color:var(--muted);margin-top:6px;">Checked ${new Date(j.checked_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><p>Could not load: ${esc(e.message)}</p></div>`;
+  }
+}
+
 async function loadAdminView(){
+  loadAdminDataFreshness();
   if (!sb) return;
   await Promise.all([
     loadAdminEvents(),

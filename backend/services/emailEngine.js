@@ -173,9 +173,21 @@ function renderMorningBrief(client, brief, now = new Date()) {
   const dateStr = require('../lib/istTime').istLongDate(now);
 
   const sections = [];
-  if (brief.market_snapshot) {
+  if (brief.market_snapshot || brief.market_figures?.length) {
+    // Level, day change and as-of time for each index; stale, unverified and
+    // missing figures say so plainly.
+    const figs = (brief.market_figures || []).map(f => {
+      const col = f.change_pct == null ? '#6E7A71' : f.change_pct >= 0 ? '#2E7D52' : '#A23B2E';
+      const warn = f.status !== 'live' || f.unverified;
+      return `<tr>
+        <td style="padding:4px 10px 4px 0;font-weight:600;">${esc(f.label)}</td>
+        <td style="padding:4px 10px 4px 0;">${f.level ? esc(f.level) : '—'}</td>
+        <td style="padding:4px 10px 4px 0;color:${col};">${f.change ? esc(f.change) : ''}</td>
+        <td style="padding:4px 0;font-size:11px;color:${warn ? '#A23B2E' : '#6E7A71'};">${esc(f.note)}</td></tr>`;
+    }).join('');
     sections.push(`<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">Market Snapshot</h3>
-      <p style="margin:0 0 18px;">${brief.market_snapshot}</p>`);
+      ${figs ? `<table role="presentation" style="margin:0 0 8px;font-size:13px;border-collapse:collapse;">${figs}</table>` : ''}
+      ${brief.market_snapshot ? `<p style="margin:0 0 18px;">${esc(brief.market_snapshot)}</p>` : ''}`);
   }
   const H3 = t => `<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">${t}</h3>`;
   if (brief.today_action) {
