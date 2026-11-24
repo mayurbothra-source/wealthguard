@@ -23,7 +23,7 @@ const { supabaseAdmin } = require('../../config/supabase');
 const WINDOW_DAYS = 90;
 const MIN_CLOSED_FOR_RATE = 10;
 const DIRECTIONAL = ['BUY', 'SELL', 'REDUCE'];
-const RETURN_FIELD = { 'Weekly': 'return_1w_pct', '14-Day': 'return_14d_pct', 'Monthly': 'return_1m_pct', 'Quarterly': 'return_3m_pct' };
+const RETURN_FIELD = { 'Weekly': 'return_1w_pct', '14-Day': 'return_14d_pct', 'Monthly': 'return_1m_pct', 'Quarterly': 'return_3m_pct', 'Annual': 'return_1y_pct' };
 const DISCLAIMER_BASE = 'Past signals are not guarantees. See full methodology at';
 
 function methodologyUrl() {
