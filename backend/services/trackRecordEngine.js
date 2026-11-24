@@ -37,7 +37,9 @@ const BACKFILL_SINCE = '2026-08-28';
 // is retried on later runs for this many days after its window closed.
 const RETRY_FETCH_FAILURES_FOR_DAYS = 30;
 // Columns added by migration 016. Writes drop them if the migration has not run.
-const NEW_COLUMNS = ['return_14d_pct', 'checkpoint_date', 'price_as_of', 'outcome_status', 'not_measurable_reason', 'run_label'];
+const NEW_COLUMNS = ['return_14d_pct', 'checkpoint_date', 'price_as_of', 'outcome_status', 'not_measurable_reason', 'run_label', 'price_at_checkpoint'];
+// SA3: a close used for scoring must be no more than this many trading days before the checkpoint date.
+const MAX_STALE_TRADING_DAYS = 3;
 const PAGE = 1000;
 
 /**
@@ -73,14 +75,20 @@ function checkpointDue(win, todayIst) {
  * honestly, without folding it into a directional hit rate.
  */
 function isDirectionCorrect(action, returnPct) {
-  if (!action || returnPct === null || returnPct === undefined) return null;
+  if (!action || returnPct === null || returnPct === undefined || isNaN(returnPct)) return null;
   const a = action.toUpperCase();
-  const bullish = ['BUY', 'HOLD'].includes(a);
-  const bearish = ['SELL', 'REDUCE'].includes(a);
-  if (bullish) return returnPct >= 0;
-  if (bearish) return returnPct <= 0;
+  // SA3: a move that rounds to 0.00% proves nothing either way — inconclusive.
+  if (['BUY', 'SELL', 'REDUCE'].includes(a) && isFlat(returnPct)) return null;
+  if (a === 'BUY') return returnPct > 0;
+  if (a === 'SELL' || a === 'REDUCE') return returnPct < 0;
+  // HOLD claims the price will hold steady, not that it will rise.
+  if (a === 'HOLD') return Math.abs(returnPct) <= HOLD_BAND_PCT;
   return null;   // WATCH and anything unrecognised: no direction was claimed
 }
+
+/** A return that rounds to 0.00%. */
+function isFlat(returnPct) { return Math.abs(returnPct) < 0.005; }
+const HOLD_BAND_PCT = 2;
 
 /**
  * Band a WATCH outcome without pretending it was a directional call.
@@ -191,6 +199,18 @@ async function scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel 
       : `no close in ${win.start}..${win.end}`);
   }
 
+  // Stale: the close used is too far before the checkpoint date.
+  if (hit.date < cal.shiftTradingDays(win.target, -MAX_STALE_TRADING_DAYS)) {
+    return notMeasurable(`stale price: close of ${hit.date} is more than ${MAX_STALE_TRADING_DAYS} trading days before ${win.target}`);
+  }
+  // Suspect: exactly the entry price. Seen on dead AMFI codes that keep
+  // returning their last NAV — a 0.00% "move" that is really no data.
+  if (Math.abs(hit.close - Number(pred.entry_price_inr)) <= 0.01) {
+    return { row: { ...base, outcome_status: 'price_suspect', direction_correct: null,
+      not_measurable_reason: `checkpoint price ₹${hit.close} on ${hit.date} equals the entry price — likely a feed that stopped updating`,
+      actual_price_inr: hit.close, price_at_checkpoint: hit.close, price_as_of: hit.date, price_source: s.source } };
+  }
+
   const returnPct = ((hit.close - entry) / entry) * 100;
   // A move this large over the period means the entry and checkpoint prices are
   // in different units (how Gold once showed -97% in a week). Refuse to score it.
@@ -215,8 +235,9 @@ async function scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel 
   return {
     row: {
       ...base,
-      outcome_status:           'measured',
+      outcome_status:           correct === null && isDirectionalAction(pred.action) ? 'inconclusive' : 'measured',
       not_measurable_reason:    null,
+      price_at_checkpoint:      hit.close,
       direction_correct:        correct,
       watch_outcome:            watchOutcome,
       actual_price_inr:         hit.close,
@@ -323,21 +344,24 @@ async function runTrackRecordCheckpoints(opts = {}) {
       const prior = done.get(`${pred.id}|${cp.label}`);
       // A prior row is final unless it is a not_measurable caused by a fetch
       // failure whose window closed recently — then try again.
-      if (prior && !isRetryable(prior, now)) { c.already++; continue; }
+      if (prior && !isRetryable(prior, now) && !isLegacy(prior)) { c.already++; continue; }
 
       const r = await scoreCheckpoint({ pred, inst, cp, todayIst, now, cache, runLabel });
       if (r.wait) { c.waiting++; continue; }
       c.due++;
       const row = r.row;
-      if (row.outcome_status === 'measured') c.measured++;
+      if (['measured', 'inconclusive'].includes(row.outcome_status)) c.measured++;
       else {
         c.notMeasurable++;
         const key = row.not_measurable_reason.replace(/\d{4}-\d{2}-\d{2}/g, 'DATE').replace(/-?\d+(\.\d+)?%.*/, '…');
         reasons[key] = (reasons[key] || 0) + 1;
       }
-      if (prior) {
+      if (prior && isLegacy(prior)) {
+        // Scored at the wrong date's price under the old rules: always replace.
+        toRetry.push({ id: prior.id, row }); c.rescored = (c.rescored || 0) + 1;
+      } else if (prior) {
         // Only a better answer replaces a failed fetch; another failure leaves it be.
-        if (row.outcome_status === 'measured') { toRetry.push({ id: prior.id, row }); c.retried++; }
+        if (['measured', 'inconclusive'].includes(row.outcome_status)) { toRetry.push({ id: prior.id, row }); c.retried++; }
       } else {
         toInsert.push(row);
         done.set(`${pred.id}|${cp.label}`, row);
@@ -370,7 +394,7 @@ async function runTrackRecordCheckpoints(opts = {}) {
   const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${v}× ${k}`).join('; ');
   const detail = `[${runLabel}] ${preds.length} signals, ${c.due} checkpoints due: ${c.measured} measured, ` +
     `${c.notMeasurable} not measurable${reasonText ? ` (${reasonText})` : ''}; ${c.already} already recorded, ` +
-    `${c.waiting} not yet due; ${written} rows written, ${updated} retried rows now measured, ${outcomeCorrectUpdated} outcome_correct updated`;
+    `${c.waiting} not yet due; ${c.rescored || 0} legacy rows re-scored; ${written} rows written, ${updated} existing rows re-scored, ${outcomeCorrectUpdated} outcome_correct updated`;
   console.log(`📋 Track record complete: ${detail}`);
 
   await reportRun({
@@ -385,6 +409,11 @@ async function runTrackRecordCheckpoints(opts = {}) {
   return { ...c, written, updated, outcomeCorrectUpdated, measuredWritten, signals: preds.length, reasons };
 }
 
+/** Written before SA1/SA3: priced on the run day, under the old 0.00%-is-correct rules. */
+function isLegacy(prior) {
+  return !prior.checkpoint_date || prior.run_label === 'legacy_live_price';
+}
+
 function isRetryable(prior, now) {
   if (prior.outcome_status !== 'not_measurable') return false;
   if (!/fetch failed/.test(prior.not_measurable_reason || '')) return false;
@@ -394,6 +423,6 @@ function isRetryable(prior, now) {
 
 module.exports = {
   CHECKPOINTS, BACKFILL_SINCE, checkpointDue, scoreCheckpoint, rollupOutcome,
-  classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, WATCH_QUIET_BAND_PCT,
+  classifyWatchOutcome, isDirectionalAction, isDirectionCorrect, isFlat, HOLD_BAND_PCT, WATCH_QUIET_BAND_PCT,
   runTrackRecordCheckpoints,
 };
