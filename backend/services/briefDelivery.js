@@ -28,7 +28,37 @@ const STALE_CLAIM_MS = 15 * 60 * 1000;
 
 const isMissingTable = e => !!e && (e.code === '42P01' || e.code === 'PGRST205' || /does not exist|Could not find the table/i.test(e.message || ''));
 
-const emailable = c => !!c.email && c.email_brief_enabled !== false && ['active', 'trial'].includes(c.subscription_status);
+/**
+ * Demo, house and test accounts get an in-app brief but no email: six demo
+ * accounts and the house account are aliases of one inbox, which received seven
+ * identical emails a day. Marked by clients.account_kind (migration 019); the
+ * admin receives one preview copy per day instead (sendAdminPreview).
+ */
+const INTERNAL_KINDS = ['demo', 'house', 'test'];
+const isInternal = c => INTERNAL_KINDS.includes(String(c.account_kind || '').toLowerCase());
+const emailable = c => !!c.email && c.email_brief_enabled !== false && !isInternal(c)
+  && ['active', 'trial'].includes(c.subscription_status);
+
+/**
+ * One copy a day of a demo account's brief to ADMIN_EMAIL, so the admin still
+ * sees what clients see. Idempotent per IST date via system_health_log.
+ */
+async function sendAdminPreview(all, date, shared, engine, emailEngine) {
+  const to = process.env.ADMIN_EMAIL;
+  const demo = all.find(c => String(c.account_kind || '').toLowerCase() === 'demo');
+  if (!to || !demo || !supabaseAdmin) return 'not_configured';
+  const { data: prior } = await supabaseAdmin.from('system_health_log').select('detail')
+    .eq('engine_name', 'briefAdminPreview').gte('run_at', new Date(Date.now() - 20 * 3600e3).toISOString());
+  if ((prior || []).some(r => String(r.detail || '').includes(date))) return 'already_sent';
+  const brief = await engine.buildBriefForClient(demo, shared);
+  const { subject, html, text } = emailEngine.renderMorningBrief(demo, brief);
+  const res = await emailEngine.sendDetailed({ to, subject: `[Preview: ${demo.full_name || 'demo'}] ${subject}`, html, text, type: 'admin_preview' });
+  try {
+    await require('./healthEngine').reportRun({ engineName: 'briefAdminPreview', itemsProcessed: res.ok ? 1 : 0, itemsExpected: 1,
+      itemsFailed: res.ok ? 0 : 1, detail: `${date}: preview of ${demo.full_name || demo.id} ${res.ok ? 'sent' : `failed (${res.error || '?'})`}` });
+  } catch { /* logging only */ }
+  return res.ok ? 'sent' : 'failed';
+}
 
 /** Is the delivery table there? (Migration 011.) */
 async function deliveriesTableReady() {
@@ -183,7 +213,10 @@ async function deliverMorningBriefs({ trigger = 'cron', now = new Date(), ignore
     }
   }
 
-  console.log(`📰 Morning brief delivery done: ${sent} sent, ${failed} failed, ${skippedClaim} already handled, ${built} briefs stored`);
+  let preview = 'skipped';
+  try { preview = await sendAdminPreview(all, date, shared, engine, emailEngine); } catch (e) { console.warn(`   ⚠ admin preview: ${e.message}`); }
+
+  console.log(`📰 Morning brief delivery done (admin preview: ${preview}): ${sent} sent, ${failed} failed, ${skippedClaim} already handled, ${built} briefs stored`);
   await reportRun({
     engineName: 'morningBriefEngine', durationMs: Date.now() - start,
     itemsProcessed: sent, itemsExpected: pending.length - skippedClaim || null, itemsFailed: failed,
@@ -193,4 +226,4 @@ async function deliverMorningBriefs({ trigger = 'cron', now = new Date(), ignore
   return { ...base, status, eligible: eligible.length, pending: pending.length, sent, failed, already: skippedClaim, stored: built };
 }
 
-module.exports = { deliverMorningBriefs, SEND_FROM_MIN, LATE_CUTOFF_MIN, MAX_ATTEMPTS, _test: { claim, emailable } };
+module.exports = { deliverMorningBriefs, SEND_FROM_MIN, LATE_CUTOFF_MIN, MAX_ATTEMPTS, isInternal, _test: { claim, emailable, sendAdminPreview } };

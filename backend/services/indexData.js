@@ -12,8 +12,9 @@
  * Every successful reading is stored in market_cache (key index_prices_v2) with
  * a short history, which drives the trust checks:
  *   stale      — as_of is older than the previous trading day (IST, Mon–Fri)
- *   unverified — the day's move is more than 4%, or the value has not changed
- *                over more than 3 days of readings
+ *   unverified — the day's move is more than 4%, or the same value was read on
+ *                two different trading days (a real index never closes at the
+ *                identical level two days running; a frozen feed does)
  * Stale and unverified figures are labelled in the brief and raise one admin
  * warning per day.
  */
@@ -30,8 +31,8 @@ const INDEXES = {
 };
 const CACHE_KEY = 'index_prices_v2';
 const MAX_DAILY_MOVE_PCT = 4;
-const UNCHANGED_DAYS = 3;
 const HISTORY_LEN = 10;
+const CACHE_TTL_MS = 4 * 3600 * 1000;   // a stored reading older than this is flagged
 
 const NSE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
@@ -126,13 +127,19 @@ function assess(entry, now = new Date()) {
     unverified = true; warnings.push(`daily move of ${entry.change_pct}% is above ${MAX_DAILY_MOVE_PCT}%`);
   }
   const hist = entry.history || [];
+  // History holds one reading per trading date (the as_of date), so two briefs
+  // showing the same close (evening, then next morning before the open) are one
+  // entry and do not trip this. Two different trading dates with an identical
+  // level do.
   if (hist.length >= 2) {
-    const last = hist[hist.length - 1];
-    let i = hist.length - 1;
-    while (i > 0 && hist[i - 1].price === last.price) i--;
-    const spanDays = (new Date(last.d) - new Date(hist[i].d)) / 86400000;
-    if (spanDays > UNCHANGED_DAYS) { unverified = true; warnings.push(`value ${last.price} unchanged since ${hist[i].d}`); }
+    const last = hist[hist.length - 1], prev = hist[hist.length - 2];
+    if (prev.price === last.price && prev.d !== last.d) {
+      unverified = true; warnings.push(`value ${last.price} unchanged from ${prev.d} to ${last.d}`);
+    }
   }
+  // A stored reading (every source failed this time) older than 4 hours is
+  // shown with its own as-of date and flagged to the admin.
+  if (entry.fetched_at && now - new Date(entry.fetched_at) > CACHE_TTL_MS) warnings.push(`last fetched ${entry.fetched_at} (older than 4 h)`);
   return { status, unverified, warnings };
 }
 

@@ -61,6 +61,19 @@ function fmtINR(n) {
  * when the number was true — with an honest label when it is not live
  * ("as of <date>"), unverified (sanity check failed), or missing.
  */
+/**
+ * The market regime stored with each brief, from India VIX:
+ * < 15 Low volatility · 15–20 Moderate · 20–30 Elevated · > 30 High.
+ * (A label for the record only; the risk gate keeps its own VIX bands.)
+ */
+function marketRegimeLabel(vix) {
+  if (vix == null || !isFinite(vix)) return null;
+  if (vix < 15) return 'Low volatility';
+  if (vix <= 20) return 'Moderate';
+  if (vix <= 30) return 'Elevated';
+  return 'High';
+}
+
 function buildMarketFigures(snapshot) {
   const fmtWhen = iso => new Date(iso).toLocaleString('en-IN',
     { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -85,7 +98,7 @@ function buildMarketFigures(snapshot) {
     else if (x.as_of) note = `as of ${fmtWhen(x.as_of)} IST`;
     if (!missing && x.unverified) note += `${note ? ' · ' : ''}unverified`;
     const line = missing ? `${x.label}: not available today` : `${x.label} ${level}${chg ? ` ${chg}` : ''} (${note})`;
-    return { key: k, label: x.label, level, change: chg, change_pct: missing ? null : x.change_pct, as_of: x.as_of || null,
+    return { key: k, label: x.label, price: missing ? null : Number(x.price), level, change: chg, change_pct: missing ? null : x.change_pct, as_of: x.as_of || null,
              status: missing ? 'missing' : x.status, unverified: !missing && !!x.unverified, note, line };
   });
 }
@@ -562,7 +575,11 @@ function getSharedSections({ force = false } = {}) {
     const marketFigures = buildMarketFigures(snapshot);
     let trackRecord = null;
     try { trackRecord = await require('./trackRecordSummary').getTrackRecordSummary(); } catch (e) { console.warn(`   ⚠ track record summary: ${e.message}`); }
-    return { marketSnapshot, marketFigures, news, trackRecord, educationPoint: await buildEducationPoint(), dataNotes: [] };
+    // VIX as shown in the email, stored on every brief row (vix_at_brief, market_regime).
+    const vixFig = marketFigures.find(f => f.key === 'vix');
+    const vixAtBrief = vixFig && vixFig.status !== 'missing' && vixFig.price != null ? Number(vixFig.price) : null;
+    return { marketSnapshot, marketFigures, news, trackRecord, vixAtBrief, marketRegime: marketRegimeLabel(vixAtBrief),
+             educationPoint: await buildEducationPoint(), dataNotes: [] };
   })();
   _shared = { key, at: Date.now(), promise };
   promise.catch(() => { if (_shared && _shared.promise === promise) _shared = null; });
@@ -671,6 +688,8 @@ async function buildBriefForClient(client, shared) {
     no_ideas:        noIdeas,
     opportunities,
     track_record:    shared.trackRecord || null,
+    vix_at_brief:    shared.vixAtBrief ?? null,
+    market_regime:   shared.marketRegime ?? null,
     top_signals:     ideas.map(i => ({ symbol: i.symbol, action: i.action, rationale: i.rationale })),
     goal_note:       goalNote,
     starting_plan:   plan,
@@ -723,9 +742,11 @@ async function persistBrief(client, brief, date = istDate()) {
     full_text:        brief.full_text,
     whatsapp_message: brief.full_text,     // the column the in-app tab already reads
     ai_provider:      aiProvider.isConfigured() ? 'ai' : 'template',
+    vix_at_brief:     brief.vix_at_brief ?? null,
+    market_regime:    brief.market_regime ?? null,
     brief_json:       { ...brief, generated_at: new Date().toISOString() },
   };
-  const r = await db.writeTolerant('morning_briefs', 'upsert', row, ['brief_json'],
+  const r = await db.writeTolerant('morning_briefs', 'upsert', row, ['brief_json', 'vix_at_brief', 'market_regime'],
     { onConflict: 'client_id,brief_date' });
   return { ok: r.ok, row };
 }
@@ -763,4 +784,4 @@ async function generateAndSendMorningBrief(opts = {}) {
   return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildPortfolio, resetPriceCache: () => _px.clear(), buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, confidenceBand } };
+module.exports = { marketRegimeLabel, generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildPortfolio, resetPriceCache: () => _px.clear(), buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, confidenceBand } };

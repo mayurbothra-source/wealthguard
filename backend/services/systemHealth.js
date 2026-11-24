@@ -33,8 +33,8 @@ async function getSystemHealth({ now = new Date(), fetchIndices = true } = {}) {
 
   // Brief deliveries today.
   const brief = await safe(async () => {
-    const { data: clients } = await supabaseAdmin.from('clients').select('id, email, email_brief_enabled, subscription_status').limit(5000);
-    const eligible = (clients || []).filter(c => !!c.email && c.email_brief_enabled !== false && ['active', 'trial'].includes(c.subscription_status)).length;
+    const { data: clients } = await supabaseAdmin.from('clients').select('*').limit(5000);
+    const eligible = (clients || []).filter(require('./briefDelivery')._test.emailable).length;
     const { data: rows, error } = await supabaseAdmin.from('brief_deliveries').select('status, sent_at').eq('ist_date', date);
     if (error) return { date, eligible, sent: null, failed: null, skipped_late: null, pending: null, note: 'brief_deliveries table missing (migration 011)' };
     const n = st => (rows || []).filter(r => r.status === st).length;
