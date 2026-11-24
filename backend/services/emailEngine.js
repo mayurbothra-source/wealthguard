@@ -189,7 +189,15 @@ function renderMorningBrief(client, brief, now = new Date()) {
       ${figs ? `<table role="presentation" style="margin:0 0 8px;font-size:13px;border-collapse:collapse;">${figs}</table>` : ''}
       ${brief.market_snapshot ? `<p style="margin:0 0 18px;">${esc(brief.market_snapshot)}</p>` : ''}`);
   }
+
   const H3 = t => `<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">${t}</h3>`;
+  // SA6: the honest track record sits right after the market snapshot, before any ideas.
+  if (brief.track_record?.text) {
+    const tr = brief.track_record;
+    sections.push(`${H3('Our track record')}<p style="margin:0 0 4px;font-size:13px;">${esc(tr.text)}</p>${tr.disclaimer
+      ? `<p style="margin:0 0 18px;font-size:11px;color:#6E7A71;">${esc(tr.disclaimer.replace(/ https?:\/\/\S+$/, ''))} <a href="${esc(tr.methodology_url)}" style="color:#1B5E3F;">methodology</a></p>`
+      : '<div style="margin:0 0 18px;"></div>'}`);
+  }
   if (brief.today_action) {
     sections.push(`<div style="background:#E8F5EE;border-radius:8px;padding:12px 14px;margin:0 0 18px;font-size:14px;"><strong>Today:</strong> ${esc(brief.today_action)}</div>`);
   }
@@ -243,9 +251,6 @@ function renderMorningBrief(client, brief, now = new Date()) {
   if (brief.opportunities?.length) {
     sections.push(`${H3('Opportunities')}<ul style="margin:0 0 18px;padding-left:18px;">${
       brief.opportunities.map(o => `<li style="margin:0 0 6px;"><strong>${esc(o.headline)}</strong>${o.detail ? `<div style="font-size:12px;color:#6E7A71;">${esc(o.detail)}</div>` : ''}</li>`).join('')}</ul>`);
-  }
-  if (brief.track_record?.text) {
-    sections.push(`${H3('Our track record')}<p style="margin:0 0 18px;font-size:13px;">${esc(brief.track_record.text)}</p>`);
   }
   if (!brief.ideas && brief.top_signals?.length) {
     const rows = brief.top_signals.map(s => `

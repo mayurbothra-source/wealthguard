@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Track record methodology — WealthGuard</title>
+<style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:720px;margin:0 auto;padding:24px 16px;color:#16211B;line-height:1.55;background:#fff}h1{font-size:22px}h2{font-size:16px;margin-top:24px;color:#1B5E3F}td,th{padding:4px 8px;border-bottom:1px solid #E1E4DD;text-align:left;font-size:14px}small{color:#6E7A71}</style></head>
+<body>
+<h1>How we measure our track record</h1>
+<p>Every buy or sell signal we issue is scored automatically, misses included. Nothing is removed or re-labelled after the fact.</p>
+<h2>What is scored</h2>
+<p>House BUY and SELL signals from the last 90 days. If two scoring runs produce the same call on the same day, it counts once. WATCH means "no directional view", so it is never counted as right or wrong.</p>
+<h2>When it is scored</h2>
+<table><tr><th>Checkpoint</th><th>Date</th><th>Tolerance</th></tr>
+<tr><td>Weekly</td><td>signal date + 7 days</td><td>±1 trading day</td></tr>
+<tr><td>14-Day (the signal's horizon)</td><td>+14 days</td><td>±1 trading day</td></tr>
+<tr><td>Monthly</td><td>+30 days</td><td>±2 trading days</td></tr>
+<tr><td>Quarterly</td><td>+90 days</td><td>±3 trading days</td></tr></table>
+<p>The price used is the closing price (or fund NAV) on the checkpoint date, or the nearest earlier trading day. It is never the price on the day we happened to check. The summary in the brief uses the 14-Day checkpoint, or the Weekly one while 14-Day results are still too few.</p>
+<h2>Right or wrong</h2>
+<ul><li>BUY is right if the price rose, and SELL is right if it fell.</li>
+<li>A move that rounds to 0.00% is <em>inconclusive</em>. It is not counted either way.</li>
+<li>A signal "hit target" or "hit stop" if a checkpoint price reached its target or stop-loss.</li>
+<li>Returns are compared with the Nifty 50 over the same dates. If we did worse than the Nifty, we say so.</li></ul>
+<h2>What is not counted</h2>
+<p>A signal is left out of the hit rate, and reported as "could not be measured", if any of these is true:</p>
+<ul><li>its price feed stopped updating (the checkpoint price exactly equals the entry price)</li>
+<li>the latest price was more than 3 trading days old</li>
+<li>the instrument has no market price (for example, G-Secs and capital-gain bonds)</li></ul>
+<p>Until at least 10 signals have closed, we show "Track record building" instead of a percentage.</p>
+<p><small>Past signals are not guarantees. WealthGuard is not a SEBI-registered investment adviser, and nothing here is investment advice.</small></p>
+</body></html>
