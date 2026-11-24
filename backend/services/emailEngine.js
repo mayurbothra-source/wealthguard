@@ -220,8 +220,18 @@ function renderMorningBrief(client, brief, now = new Date()) {
     const label = a => a === 'BUY' ? 'BUY' : a === 'WATCH' ? 'WATCHING — not a buy yet' : a;
     sections.push(`${H3('Ideas worth a look')}${brief.ideas_note ? `<p style="margin:0 0 8px;">${esc(brief.ideas_note)}</p>` : ''}${
       brief.ideas?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${
-      brief.ideas.map(i => `<li style="margin:0 0 8px;"><strong>${esc(i.symbol)}</strong>${i.name && i.name !== i.symbol ? ` <span style="color:#6E7A71;">${esc(i.name)}</span>` : ''} <span style="font-size:11px;color:${i.action === 'BUY' ? '#2E7D52' : '#6E7A71'};">${esc(label(i.action))}</span>${i.entry ? `<div style="font-size:12px;color:#6E7A71;">Price ~₹${esc(i.entry)}${i.levels_ok && i.target ? ` · Target ₹${esc(i.target)}` : ''}${i.levels_ok && i.stop ? ` · Stop-loss ₹${esc(i.stop)}` : ''}${i.levels_ok && i.reward_risk ? ` · Reward:risk ${esc(Number(i.reward_risk).toFixed(1))}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : ''}${i.rationale ? `<div style="font-size:12px;color:#3A463E;margin-top:2px;">${esc(i.rationale)}</div>` : ''}</li>`).join('')
+      brief.ideas.map(i => `<li style="margin:0 0 10px;"><strong>${esc(i.symbol)}</strong>${i.name && i.name !== i.symbol ? ` <span style="color:#6E7A71;">${esc(i.name)}</span>` : ''} <span style="font-size:11px;color:${i.action === 'BUY' ? '#2E7D52' : '#6E7A71'};">${esc(label(i.action))}</span>${i.ai_label ? ` <span style="font-size:11px;background:#EEF1FB;color:#3B4A8C;border-radius:8px;padding:1px 6px;">${esc(i.ai_label)}</span>` : ''}${i.confidence ? ` <span style="font-size:11px;color:#6E7A71;">· Confidence: ${esc(i.confidence)}</span>` : ''}${i.why ? `<div style="font-size:13px;color:#16211B;margin-top:2px;">${esc(i.why)}</div>` : ''}${i.levels_ok ? `<div style="font-size:12px;color:#3A463E;margin-top:2px;">Entry ${esc(i.entry_zone || `~₹${i.entry}`)} · Target ₹${esc(i.target)} · Stop-loss ₹${esc(i.stop)}${i.reward_risk ? ` · Reward:risk ${esc(Number(i.reward_risk).toFixed(1))}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : (i.horizon_days ? `<div style="font-size:12px;color:#6E7A71;margin-top:2px;">${esc(i.horizon_days)}-day view · no target or stop-loss until it qualifies</div>` : '')}${i.rationale ? `<div style="font-size:12px;color:#6E7A71;margin-top:2px;">${esc(i.rationale)}</div>` : ''}</li>`).join('')
       }</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
+  }
+  if (brief.no_ideas?.text) {
+    sections.push(`${H3('Why no new ideas today')}<p style="margin:0 0 18px;font-size:13px;">${esc(brief.no_ideas.text)}</p>`);
+  }
+  if (brief.opportunities?.length) {
+    sections.push(`${H3('Opportunities')}<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.opportunities.map(o => `<li style="margin:0 0 6px;"><strong>${esc(o.headline)}</strong>${o.detail ? `<div style="font-size:12px;color:#6E7A71;">${esc(o.detail)}</div>` : ''}</li>`).join('')}</ul>`);
+  }
+  if (brief.track_record?.text) {
+    sections.push(`${H3('Our track record')}<p style="margin:0 0 18px;font-size:13px;">${esc(brief.track_record.text)}</p>`);
   }
   if (!brief.ideas && brief.top_signals?.length) {
     const rows = brief.top_signals.map(s => `
@@ -250,7 +260,7 @@ function renderMorningBrief(client, brief, now = new Date()) {
   const html = wrapHTML(
     'Your Morning Brief',
     `<p style="margin:0 0 4px;font-size:12px;color:#6E7A71;">${dateStr}</p>
-     <h2 style="margin:0 0 18px;font-family:Georgia,serif;font-size:19px;color:#16211B;">Good morning, ${client.full_name?.split(' ')[0] || 'there'}</h2>
+     <h2 style="margin:0 0 18px;font-family:Georgia,serif;font-size:19px;color:#16211B;">${(() => { const f = String(client.full_name || '').trim().split(/\s+/)[0]; return f ? `Good morning, ${esc(f)}` : 'Hello'; })()}</h2>
      ${sections.join('')}`,
     'You are receiving this because you have morning briefs enabled. You can turn them off in your profile settings.'
   );

@@ -981,4 +981,5 @@ module.exports = {
   fetchInstrumentPrice,     // exported for use by trackRecordEngine
   scoreInstrumentLegacy,    // the old scorer — dry-run comparison only
   buildScoreNotes,
+  leverPhrase,              // plain-English lever wording, used by the morning brief
 };
