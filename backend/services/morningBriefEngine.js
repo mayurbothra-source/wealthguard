@@ -275,6 +275,15 @@ function whyLine(score) {
   return phrase ? `Why now: ${phrase}.` : null;
 }
 
+/** For a SELL: one plain line from the WEAKEST lever — why we would stay away. */
+function cautionLine(score) {
+  if (!score) return null;
+  const worst = LEVERS.filter(k => score[k] != null).sort((x, y) => score[x] - score[y])[0];
+  if (!worst) return null;
+  const phrase = require('./instrumentEngine').leverPhrase(worst, Number(score[worst]));
+  return phrase ? `Why: ${phrase}.` : null;
+}
+
 /** Pick up to n ideas, best of each asset class first, so one class cannot crowd out the rest. */
 function pickAcrossClasses(sorted, n) {
   const picked = [], seenClass = new Set();
@@ -404,8 +413,25 @@ async function buildIdeas(riskScore, heldSymbols, now = new Date()) {
       .map(s => ({ ...s, _category: meta[s.instrument_name].category }))
       .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0));
 
+    // SELL calls are shown, not hidden (FIX-7) — framed as "consider avoiding /
+    // exiting", for instruments the client does NOT hold (held ones already show
+    // EXIT / REVIEW under Your Portfolio). Only where the price is genuinely
+    // current: a SELL on a feed that stopped updating (dead AMFI codes) is not a
+    // call we can stand behind, so it is left out.
+    const cautions = Object.values(newest)
+      .filter(s => s.action === 'SELL' && meta[s.instrument_name] && measured(meta[s.instrument_name].id)
+        && !held.has(s.instrument_name) && priceModeOf(meta[s.instrument_name]) !== 'static'
+        && priceIsFresh(s.price_as_of, new Date(s.generated_at)))
+      .sort((a, b) => (a.confidence_score || 0) - (b.confidence_score || 0))
+      .slice(0, 3)
+      .map(s => {
+        const inst = meta[s.instrument_name];
+        return { symbol: s.instrument_name, name: inst.name || s.instrument_name, asset_class: ASSET_CLASS[inst.category] || 'other',
+                 action: 'SELL', label: 'Consider avoiding or exiting', why: cautionLine(scoreOf[inst.id]), horizon_days: s.horizon_days };
+      });
+
     const buys = pickAcrossClasses(usable.filter(s => s.action === 'BUY' && s.risk_gate_passed), 3).map(toIdea);
-    if (buys.length) return { ideas: buys, note: null, no_ideas: null };
+    if (buys.length) return { ideas: buys, note: null, no_ideas: null, cautions };
 
     const top = Object.entries(blockers).sort((x, y) => y[1] - x[1])[0];
     const no_ideas = {
@@ -416,12 +442,12 @@ async function buildIdeas(riskScore, heldSymbols, now = new Date()) {
             (top && top[1] > 0 ? ` Main reason: ${top[0]} (${top[1]}).` : ''),
     };
     if (!usable.length) {
-      return { ideas: [], no_ideas,
+      return { ideas: [], no_ideas, cautions,
         note: 'No ideas today. Our weekly analysis has not completed with live price data, and we would rather say nothing than suggest something we have not properly measured.' };
     }
     const radar = pickAcrossClasses(usable.filter(s => s.action === 'WATCH'), 3).map(toIdea);
     return {
-      ideas: radar, no_ideas,
+      ideas: radar, no_ideas, cautions,
       note: 'No new BUY signals pass our risk checks for your profile today. Waiting is a valid position — we only ask you to act when the evidence is strong.' +
             (radar.length ? ' These are on our watchlist — not a recommendation to buy yet:' : ''),
     };
@@ -663,7 +689,7 @@ async function buildBriefForClient(client, shared) {
     getRiskScore(client.id), getHoldings(client.id), buildGoalNote(client.id),
   ]);
   const actions = await buildHoldingActions(holdings);
-  const { ideas, note: ideasNote, no_ideas: noIdeas } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
+  const { ideas, note: ideasNote, no_ideas: noIdeas, cautions = [] } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
   // Tier: only what the code already defines — opportunities carry min_tier 'builder'.
   const tierPlan = require('../lib/entitlements').entitlementFromRow(client).plan;
   const opportunities = await buildOpportunities(tierPlan);
@@ -686,6 +712,7 @@ async function buildBriefForClient(client, shared) {
     ideas,
     ideas_note:      ideasNote,
     no_ideas:        noIdeas,
+    cautions,
     opportunities,
     track_record:    shared.trackRecord || null,
     vix_at_brief:    shared.vixAtBrief ?? null,
@@ -718,6 +745,7 @@ async function buildBriefForClient(client, shared) {
       i.levels_ok ? `  Entry ${i.entry_zone || `~₹${i.entry}`}, target ₹${i.target}, stop-loss ₹${i.stop}, reward:risk ${Number(i.reward_risk).toFixed(1)}, ${i.horizon_days}-day view` : '',
     ].filter(Boolean).join('\n')).join('\n') : '',
     noIdeas ? `WHY NO NEW IDEAS TODAY\n${noIdeas.text}` : '',
+    cautions.length ? `\nCONSIDER AVOIDING OR EXITING\n${cautions.map(c => `• ${c.symbol} — ${c.label}${c.why ? `. ${c.why}` : ''}`).join('\n')}` : '',
     opportunities.length ? `\nOPPORTUNITIES\n${opportunities.map(o => `• ${o.headline}`).join('\n')}` : '',
     goalNote ? `\nYOUR GOALS\n${goalNote}` : '',
     `\nLEARN SOMETHING TODAY\n${shared.educationPoint}`,
@@ -784,4 +812,4 @@ async function generateAndSendMorningBrief(opts = {}) {
   return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { marketRegimeLabel, generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildPortfolio, resetPriceCache: () => _px.clear(), buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, confidenceBand } };
+module.exports = { marketRegimeLabel, generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildPortfolio, resetPriceCache: () => _px.clear(), buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, cautionLine, confidenceBand } };

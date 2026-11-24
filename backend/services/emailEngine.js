@@ -245,6 +245,11 @@ function renderMorningBrief(client, brief, now = new Date()) {
       brief.ideas.map(i => `<li style="margin:0 0 10px;"><strong>${esc(i.symbol)}</strong>${i.name && i.name !== i.symbol ? ` <span style="color:#6E7A71;">${esc(i.name)}</span>` : ''} <span style="font-size:11px;color:${i.action === 'BUY' ? '#2E7D52' : '#6E7A71'};">${esc(label(i.action))}</span>${i.ai_label ? ` <span style="font-size:11px;background:#EEF1FB;color:#3B4A8C;border-radius:8px;padding:1px 6px;">${esc(i.ai_label)}</span>` : ''}${i.confidence ? ` <span style="font-size:11px;color:#6E7A71;">· Confidence: ${esc(i.confidence)}</span>` : ''}${i.why ? `<div style="font-size:13px;color:#16211B;margin-top:2px;">${esc(i.why)}</div>` : ''}${i.levels_ok ? `<div style="font-size:12px;color:#3A463E;margin-top:2px;">Entry ${esc(i.entry_zone || `~₹${i.entry}`)} · Target ₹${esc(i.target)} · Stop-loss ₹${esc(i.stop)}${i.reward_risk ? ` · Reward:risk ${esc(Number(i.reward_risk).toFixed(1))}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : (i.horizon_days ? `<div style="font-size:12px;color:#6E7A71;margin-top:2px;">${esc(i.horizon_days)}-day view · no target or stop-loss until it qualifies</div>` : '')}${i.rationale ? `<div style="font-size:12px;color:#6E7A71;margin-top:2px;">${esc(i.rationale)}</div>` : ''}</li>`).join('')
       }</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
   }
+  if (brief.cautions?.length) {
+    sections.push(`${H3('Consider avoiding or exiting')}<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.cautions.map(c => `<li style="margin:0 0 8px;"><strong>${esc(c.symbol)}</strong>${c.name && c.name !== c.symbol ? ` <span style="color:#6E7A71;">${esc(c.name)}</span>` : ''} <span style="font-size:11px;color:#A23B2E;">SELL</span>${c.why ? `<div style="font-size:13px;color:#16211B;margin-top:2px;">${esc(c.why)}</div>` : ''}</li>`).join('')
+    }</ul><p style="margin:-10px 0 18px;font-size:11px;color:#6E7A71;">If you hold one of these, it is shown under Your Portfolio with what to do.</p>`);
+  }
   if (brief.no_ideas?.text) {
     sections.push(`${H3('Why no new ideas today')}<p style="margin:0 0 18px;font-size:13px;">${esc(brief.no_ideas.text)}</p>`);
   }
