@@ -58,6 +58,52 @@ router.post('/morning-brief', requireJobSecret, async (req, res) => {
   }
 });
 
+/**
+ * Morning scoring — fresh market data, then the full 9-lever scoring pass, so
+ * the 07:30 brief is built from today's signals (FIX-4: data → scoring → brief).
+ * Called by .github/workflows/morning-scoring.yml from 05:45 IST.
+ *
+ * Scoring takes 10–40 minutes (Yahoo is paced), longer than any HTTP request
+ * should wait, so this answers at once and runs in the background with the
+ * server kept awake:
+ *   202 started       — a run began
+ *   200 running       — one is already in progress
+ *   200 fresh         — a scoring run finished in the last 6 hours; nothing to do
+ *   200 not_a_weekday — Saturday / Sunday (IST)
+ */
+const FRESH_SCORING_MS = 6 * 3600e3;
+let _scoring = null;
+router.post('/morning-scoring', requireJobSecret, async (req, res) => {
+  try {
+    const { isIstWeekday } = require('../lib/istTime');
+    if (!isIstWeekday(new Date()) && req.query.force !== '1') return res.json({ status: 'not_a_weekday' });
+    if (_scoring) return res.json({ status: 'running', since: _scoring.since });
+    const last = await lastScoringRun();
+    if (last && Date.now() - new Date(last).getTime() < FRESH_SCORING_MS && req.query.force !== '1') {
+      return res.json({ status: 'fresh', last_run: last });
+    }
+    const since = new Date().toISOString();
+    const run = require('../lib/keepAwake').during('morning-scoring', async () => {
+      await require('../services/marketData').refreshAllMarketData();
+      await require('../services/instrumentEngine').runInstrumentScoringEngine();
+    }).catch(e => console.error('❌ morning scoring:', e.message))
+      .finally(() => { _scoring = null; });
+    _scoring = { since, run };
+    res.status(202).json({ status: 'started', since, last_run: last || null });
+  } catch (e) {
+    console.error('❌ /api/jobs/morning-scoring:', e.message);
+    res.status(500).json({ status: 'error', error: e.message });
+  }
+});
+
+async function lastScoringRun() {
+  const { supabaseAdmin } = require('../../config/supabase');
+  if (!supabaseAdmin) return null;
+  const { data } = await supabaseAdmin.from('system_health_log').select('run_at')
+    .eq('engine_name', 'instrumentEngine').order('run_at', { ascending: false }).limit(1);
+  return data?.[0]?.run_at || null;
+}
+
 /** 08:30 IST admin summary — once per IST date. */
 router.post('/daily-summary', requireJobSecret, async (req, res) => {
   try {
@@ -70,4 +116,4 @@ router.post('/daily-summary', requireJobSecret, async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { secretMatches };
+module.exports._test = { secretMatches, lastScoringRun, waitForScoring: () => _scoring && _scoring.run };

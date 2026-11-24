@@ -82,7 +82,7 @@ const stats = (o = {}) => ({ volatility_pct: 25, pct_from_52w_high: -20, return_
   // 72 = standard tier (14-day horizon); 75+ is high conviction (30 days).
   await quiet(() => ie.convertScoreToRecommendation({ symbol: 'INFY', category: 'large_cap_equity', price_mode: 'live' },
     72, levers, 1000, pass, { priceAsOf: new Date().toISOString(), stats: stats() }));
-  ck('live, fresh, reward:risk ≥ 1.5 → BUY with volatility-based target and stop', last().action === 'BUY' && last().stop_loss_inr === 911.61 && last().target_price_inr === 1147.31 && last().reward_risk === 1.67);
+  ck('live, fresh, reward:risk ≥ 1.5 → BUY with volatility-based target and stop', last().action === 'BUY' && last().stop_loss_inr === 911.61 && last().target_price_inr === 1147.31 && last().reward_risk === 1.67 && last().risk_reward_ratio === 1.67);
 
   await quiet(() => ie.convertScoreToRecommendation({ symbol: 'ITC', category: 'large_cap_equity', price_mode: 'live' },
     80, levers, 400, pass, { priceAsOf: STALE, stats: stats() }));
