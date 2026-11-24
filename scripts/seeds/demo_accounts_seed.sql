@@ -83,3 +83,10 @@ SELECT c.full_name, count(*) AS holdings, count(x.stop_loss_price) AS near_stop,
        (SELECT stated_risk_score FROM public.client_behavioural_profiles b WHERE b.client_id = c.id ORDER BY assessed_at DESC LIMIT 1) AS risk
 FROM public.clients c JOIN public.portfolios x ON x.client_id = c.id AND x.entry_source = 'demo_seed'
 GROUP BY c.full_name ORDER BY c.full_name;
+
+-- Demo accounts are in-app only (no email). Needs migration 019; skipped quietly without it.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='clients' AND column_name='account_kind') THEN
+    UPDATE public.clients SET account_kind = 'demo' WHERE full_name LIKE 'Demo %' AND account_kind IS NULL;
+  END IF;
+END $$;

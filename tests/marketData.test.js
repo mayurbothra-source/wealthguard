@@ -1,7 +1,7 @@
 /**
  * WS2 — trustworthy market data.
  *   Source chain with fallbacks, as_of and previous close, staleness by trading
- *   day, the sanity guard (>4% move, unchanged >3 days), no hard-coded defaults,
+ *   day, the sanity guard (>4% move, same value on 2 trading days, stored reading > 4 h), no hard-coded defaults,
  *   unknown VIX handled conservatively, and how the brief and email show it.
  */
 'use strict';
@@ -59,7 +59,13 @@ const yahoo = (price, closes, whenIso) => ({ chart: { result: [{ meta: { regular
   const frozen = { price: 13.42, change_pct: 0, as_of: '2026-11-13T10:00:00Z',
     history: [{ d: '2026-11-06', price: 13.40 }, { d: '2026-11-09', price: 13.42 }, { d: '2026-11-10', price: 13.42 }, { d: '2026-11-12', price: 13.42 }, { d: '2026-11-13', price: 13.42 }] };
   const fz = idx.assess(frozen, MON_0730);
-  ck('a value unchanged for more than 3 days is unverified', fz.unverified && /unchanged since 2026-11-09/.test(fz.warnings.join()));
+  ck('the same value on two different trading days is unverified', fz.unverified && /unchanged from 2026-11-12 to 2026-11-13/.test(fz.warnings.join()));
+  const twoDays = { price: 25349.65, change_pct: -1.75, as_of: '2026-11-24T10:00:00Z', history: [{ d: '2026-11-23', price: 25349.65 }, { d: '2026-11-24', price: 25349.65 }] };
+  ck('…already after 2 consecutive trading days (not 3+)', idx.assess(twoDays, new Date('2026-11-25T02:00:00Z')).unverified);
+  const sameClose = { price: 25349.65, change_pct: -1.75, as_of: '2026-11-23T10:00:00Z', history: [{ d: '2026-11-20', price: 25514.3 }, { d: '2026-11-23', price: 25349.65 }] };
+  ck('the previous close shown again before the open (one trading date) is NOT unverified', !idx.assess(sameClose, new Date('2026-11-24T03:00:00Z')).unverified);
+  const oldFetch = { ...sameClose, fetched_at: '2026-11-23T15:52:00Z' };
+  ck('a stored reading fetched more than 4 h ago carries a warning', /older than 4 h/.test(idx.assess(oldFetch, new Date('2026-11-24T03:00:00Z')).warnings.join()));
   const moving = { ...frozen, history: frozen.history.map((h, i) => ({ ...h, price: 13 + i })) };
   ck('a value that moves is not flagged', !idx.assess(moving, MON_0730).unverified);
 

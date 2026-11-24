@@ -165,4 +165,29 @@ const quiet = async fn => { const l = console.log, w = console.warn; console.log
   ck('format=json returns the subject, text and structured brief', /Morning Brief/.test(pj.subject) && !!pj.brief?.market_snapshot);
   ck('unknown client → 404', (await quiet(() => get('?client=nope', 'admin-key-admin-key'))).status === 404);
   srv2.close();
+  // ── FIX-1: demo / house / test accounts are in-app only; one admin preview ──
+  console.log('── demo accounts: in-app only ──');
+  reset();
+  process.env.ADMIN_EMAIL = 'admin@x.in';
+  const previews = [];
+  email.sendDetailed = async (m) => { previews.push(m); return { ok: true, id: 'p' }; };
+  DB.seed('clients', ['Demo Beginner 1', 'Demo Builder 1', 'Demo Wealth Builder 1'].map((n, i) =>
+    ({ id: `d${i}`, full_name: n, email: `me+demo${i}@gmail.com`, subscription_status: 'active', account_kind: 'demo' })));
+  DB.seed('clients', [{ id: 'h1', full_name: 'WealthGuard House Track Record', email: 'me+house@gmail.com', subscription_status: 'trial', account_kind: 'house' }]);
+  let rd = await quiet(() => deliverMorningBriefs({ trigger: 'cron', now: FRI_0731 }));
+  ck('demo and house accounts get no email', !sends.some(id => /^d\d|^h1$/.test(id)));
+  ck('…but each still gets an in-app brief stored', ['d0', 'd1', 'd2', 'h1'].every(id => DB.rows('morning_briefs').some(b => b.client_id === id)));
+  ck('real subscribers still get exactly one each', count('c1') === 1 && count('c2') === 1 && rd.eligible === 2);
+  ck('the admin gets ONE preview copy of a demo brief', previews.length === 1 && previews[0].to === 'admin@x.in' && /^\[Preview: Demo/.test(previews[0].subject));
+  rd = await quiet(() => deliverMorningBriefs({ trigger: 'github', now: at('2026-11-13T02:45:00Z') }));
+  ck('a second trigger the same day: no second preview, no second client email', previews.length === 1 && count('c1') === 1);
+
+  console.log('── vix_at_brief and market_regime ──');
+  const eng = require('../backend/services/morningBriefEngine');
+  ck('regime bands: <15 Low, 15–20 Moderate, 20–30 Elevated, >30 High',
+    eng.marketRegimeLabel(12) === 'Low volatility' && eng.marketRegimeLabel(17.86) === 'Moderate' && eng.marketRegimeLabel(24) === 'Elevated' && eng.marketRegimeLabel(31) === 'High' && eng.marketRegimeLabel(null) === null);
+  const row = DB.rows('morning_briefs').find(b => b.client_id === 'c1');
+  ck('every stored brief carries the VIX shown in the email and its regime', row.vix_at_brief === 15 && row.market_regime === 'Moderate', `${row.vix_at_brief} ${row.market_regime}`);
+  delete process.env.ADMIN_EMAIL;
 })();
+
