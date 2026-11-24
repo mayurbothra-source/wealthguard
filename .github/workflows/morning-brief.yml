@@ -1,0 +1,65 @@
+# Sends the 07:30 IST morning brief. Runs three times each weekday morning because
+# GitHub's scheduler often starts jobs late (or skips one); the endpoint is idempotent,
+# so whichever run arrives first sends and the others get "already_sent".
+#
+# Needs repository secret JOB_SECRET (same value as JOB_SECRET in Render).
+# If JOB_SECRET is not set it falls back to ADMIN_TRIGGER_KEY, which already exists.
+#
+# The job FAILS (so GitHub emails the repo owner) if the endpoint never answers
+# with success, or answers skipped_late / failed.
+name: morning-brief
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '45 1 * * 1-5'   # 07:15 IST — warms the server, waits for 07:30, sends
+    - cron: '15 2 * * 1-5'   # 07:45 IST — backup
+    - cron: '45 2 * * 1-5'   # 08:15 IST — backup
+concurrency:
+  group: morning-brief
+  cancel-in-progress: false
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Warm the server, then send today's brief
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL || 'https://wealthguard-backend.onrender.com' }}
+          JOB_SECRET: ${{ secrets.JOB_SECRET || secrets.ADMIN_TRIGGER_KEY }}
+        run: |
+          set -u
+          BACKEND_URL="$(printf '%s' "$BACKEND_URL" | tr -d '[:space:]')"; BACKEND_URL="${BACKEND_URL%/}"
+          JOB_SECRET="$(printf '%s' "$JOB_SECRET" | tr -d '[:space:]')"
+          if [ -z "$JOB_SECRET" ]; then echo "::error::JOB_SECRET (or ADMIN_TRIGGER_KEY) secret is not set"; exit 1; fi
+
+          # 1. Warm: up to 5 tries, 90 s each (a cold start takes 1-2 minutes), with backoff.
+          warm=0
+          for i in 1 2 3 4 5; do
+            if curl -sS --max-time 90 -o /dev/null -w "%{http_code}\n" "$BACKEND_URL/healthz" | grep -q '^200$'; then warm=1; echo "Server awake (try $i)"; break; fi
+            echo "Not awake yet (try $i)"; sleep $((i * 10))
+          done
+          if [ "$warm" != 1 ]; then echo "::error::Server did not wake after 5 tries"; exit 1; fi
+
+          # 2. Never send before 07:30 IST: an early run waits (at most 20 minutes).
+          now_ist=$(TZ=Asia/Kolkata date +%H%M)
+          if [ "$now_ist" -lt 0730 ]; then
+            wait=$(( ( $(TZ=Asia/Kolkata date -d '07:30' +%s) - $(date +%s) ) ))
+            if [ "$wait" -gt 0 ] && [ "$wait" -le 1200 ]; then echo "Waiting ${wait}s until 07:30 IST"; sleep "$wait"; fi
+            curl -sS --max-time 30 -o /dev/null "$BACKEND_URL/healthz" || true   # keep it awake
+          fi
+
+          # 3. Send. The endpoint is idempotent; network errors are retried.
+          for i in 1 2 3; do
+            code=$(curl -sS --max-time 300 -o body.json -w "%{http_code}" -X POST \
+                   -H "x-job-secret: $JOB_SECRET" "$BACKEND_URL/api/jobs/morning-brief" || echo 000)
+            echo "HTTP $code: $(cat body.json 2>/dev/null)"
+            case "$code" in
+              200) status=$(sed -n 's/.*"status":"\([a-z_]*\)".*/\1/p' body.json)
+                   if [ "$status" = "too_early" ]; then echo "::warning::Endpoint says too early"; fi
+                   exit 0 ;;
+              409) echo "::error::Brief skipped_late — nothing was sent today"; exit 1 ;;
+              401|403|503) echo "::error::Endpoint refused the secret or is misconfigured"; exit 1 ;;
+            esac
+            sleep $((i * 20))
+          done
+          echo "::error::Morning brief endpoint never returned success"; exit 1

@@ -77,10 +77,10 @@ async function safeRun(label, fn) {
 
 /** Only one morning-brief run at a time (the 7:30 cron and a wake-up catch-up can overlap). */
 let _briefRunning = false;
-async function runBriefOnce(label) {
+async function runBriefOnce(label, trigger = 'cron') {
   if (_briefRunning) { console.log(`   ↺ ${label}: a brief run is already in progress — skipping`); return; }
   _briefRunning = true;
-  try { await safeRun(label, generateAndSendMorningBrief); } finally { _briefRunning = false; }
+  try { await safeRun(label, () => generateAndSendMorningBrief({ trigger })); } finally { _briefRunning = false; }
 }
 
 /** Did this engine report a run since midnight IST (today)? Used so wake-ups never repeat a daily job. */
@@ -108,13 +108,12 @@ async function catchUpMissedJobs() {
   const done = [];
   try {
     const ist = new Date(Date.now() + 5.5 * 3600e3);
-    const today = ist.toISOString().slice(0, 10);
     const dow = ist.getUTCDay();                       // 0 Sun .. 6 Sat (IST)
     const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    // Morning brief: the delivery rules (weekday, 07:30–12:00 IST, once per client
+    // per day, skipped_late alert) all live in briefDelivery.js, so just ask it.
     if (dow >= 1 && dow <= 5 && minutes >= 7 * 60 + 30) {
-      const { count } = await supabaseAdmin.from('morning_briefs')
-        .select('id', { count: 'exact', head: true }).eq('brief_date', today);
-      if (!count) { done.push('morning brief'); await runBriefOnce('morningBriefEngine(catch-up)'); }
+      done.push('morning brief check'); await runBriefOnce('morningBriefEngine(catch-up)', 'catch-up');
     }
     const { data: last } = await supabaseAdmin.from('instrument_scores')
       .select('scored_at').order('scored_at', { ascending: false }).limit(1);
@@ -205,7 +204,7 @@ function startSchedulers() {
 
   // ── 07:30 IST Mon–Fri — Morning brief (02:00 UTC) ──────────────────
   cron.schedule('0 2 * * 1-5', () => {
-    runBriefOnce('morningBriefEngine');
+    runBriefOnce('morningBriefEngine', 'cron');
   }, UTC);
   console.log('   ✓ Morning brief: 7:30 AM IST (Mon-Fri)');
 

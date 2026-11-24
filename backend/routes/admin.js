@@ -138,7 +138,7 @@ router.get('/trigger-track-record', makeTrigger(
 
 router.get('/trigger-morning-brief', makeTrigger(
   'morningBriefEngine', '📰',
-  () => require('../services/morningBriefEngine').generateAndSendMorningBrief));
+  () => () => require('../services/morningBriefEngine').generateAndSendMorningBrief({ trigger: 'admin' })));
 
 router.get('/trigger-opportunities', makeTrigger(
   'opportunityEngine', '💡',
@@ -181,6 +181,32 @@ router.all('/wake', async (req, res) => {
     console.error('❌ Wake-up failed:', e.message);
   } finally {
     _runningEngines.delete('wake');
+  }
+});
+
+/**
+ * Dry run of one client's morning brief: builds it exactly as the 07:30 run
+ * would and returns the email HTML — nothing is stored or sent.
+ *   GET /api/admin/brief-preview?client=<client uuid>[&format=json]
+ * Header: x-admin-key: <ADMIN_TRIGGER_KEY>
+ */
+router.get('/brief-preview', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  const clientId = String(req.query.client || '').trim();
+  if (!clientId) return res.status(400).json({ error: 'Pass ?client=<client id>.' });
+  try {
+    const { supabaseAdmin } = require('../../config/supabase');
+    const { data: client } = await supabaseAdmin.from('clients').select('*').eq('id', clientId).maybeSingle();
+    if (!client) return res.status(404).json({ error: 'No such client.' });
+    const engine = require('../services/morningBriefEngine');
+    const shared = await engine.getSharedSections();
+    const brief = await engine.buildBriefForClient(client, shared);
+    const email = require('../services/emailEngine').renderMorningBrief(client, brief);
+    if (req.query.format === 'json') return res.json({ subject: email.subject, text: email.text, brief });
+    res.set('Content-Type', 'text/html; charset=utf-8').send(email.html);
+  } catch (e) {
+    console.error('brief-preview:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -239,7 +265,7 @@ router.get('/trigger-all', async (req, res) => {
     ['trackRecordEngine',   () => require('../services/trackRecordEngine').runTrackRecordCheckpoints()],
     ['aiLeverEngine',       () => require('../services/aiLeverEngine').runAILeverScan()],
     ['opportunityEngine',   () => require('../services/opportunityEngine').runOpportunityEngine()],
-    ['morningBriefEngine',  () => require('../services/morningBriefEngine').generateAndSendMorningBrief()],
+    ['morningBriefEngine',  () => require('../services/morningBriefEngine').generateAndSendMorningBrief({ trigger: 'admin' })],
   ];
 
   for (const [name, fn] of sequence) {

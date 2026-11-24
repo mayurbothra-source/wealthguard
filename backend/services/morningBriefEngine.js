@@ -131,7 +131,7 @@ async function buildEducationPoint() {
 
 /** Today's date in IST (YYYY-MM-DD). brief_date is an IST calendar day. */
 function istDate(now = Date.now()) {
-  return new Date(now + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  return require('../lib/istTime').istDate(new Date(now));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -499,10 +499,12 @@ async function buildBriefForClient(client, shared) {
 }
 
 /** Writes the brief. brief_json is optional so a not-yet-migrated DB still works. */
-async function persistBrief(client, brief) {
+async function persistBrief(client, brief, date = istDate()) {
   const row = {
     client_id:        client.id,
-    brief_date:       istDate(),
+    // The delivery run passes its own IST date so a run that crosses midnight
+    // stores and marks the brief under the same day it is tracking.
+    brief_date:       date,
     market_snapshot:  brief.market_snapshot,
     portfolio_note:   brief.portfolio_note,
     top_signals:      brief.top_signals,
@@ -538,80 +540,17 @@ async function generateBriefForClient(clientId) {
 // MAIN ENGINE (07:30 IST, Mon–Fri)
 // ─────────────────────────────────────────────────────────────────────
 
-async function generateAndSendMorningBrief() {
+/**
+ * Builds today's briefs and emails them — once per client per IST day, between
+ * 07:30 and 12:00 IST. All the rules live in briefDelivery.js; every trigger
+ * (cron, catch-up, GitHub job, admin) comes through here.
+ */
+async function generateAndSendMorningBrief(opts = {}) {
   if (!supabaseAdmin) {
     console.log('📰 Morning brief: Supabase not configured, skipping.');
-    return;
+    return { status: 'no_database' };
   }
-
-  const start = Date.now();
-  console.log('📰 Generating morning briefs...');
-  let sent = 0, skipped = 0, failed = 0, stored = 0;
-
-  try {
-    const shared = await getSharedSections({ force: true });
-    console.log(`   Shared sections built (AI calls used: ${aiProvider.getUsage().google + aiProvider.getUsage().anthropic})`);
-
-    // EVERY client gets an in-app brief. This used to select only clients with
-    // onboarding_complete = true — a flag nothing ever set — so no brief was
-    // ever generated for anyone. Whether it is also EMAILED depends on having an
-    // address and an active/trial subscription.
-    const { data: clients } = await supabaseAdmin.from('clients').select('*').limit(5000);
-
-    if (!clients?.length) {
-      console.log('📰 No clients to brief.');
-      await reportRun({ engineName: 'morningBriefEngine', durationMs: Date.now() - start, itemsProcessed: 0, itemsExpected: 0 });
-      return;
-    }
-
-    // A second run on the same day (restart, wake-up ping) must not email anyone twice.
-    const alreadyEmailed = new Set();
-    try {
-      const { data: sentToday } = await supabaseAdmin.from('morning_briefs')
-        .select('client_id').eq('brief_date', istDate()).eq('email_sent', true);
-      (sentToday || []).forEach(r => alreadyEmailed.add(r.client_id));
-    } catch { /* if this lookup fails we fall back to the old behaviour */ }
-
-    for (const client of clients) {
-      if (alreadyEmailed.has(client.id)) { skipped++; continue; }
-      try {
-        const brief = await buildBriefForClient(client, shared);
-        const { ok } = await persistBrief(client, brief);
-        if (ok) stored++;
-        else console.warn(`   ⚠ Brief for ${client.full_name || client.id} could not be stored (run migration 002/006).`);
-
-        const emailable = ['active', 'trial'].includes(client.subscription_status);
-        const emailed = emailable ? await emailEngine.sendMorningBrief(client, brief) : false;
-        if (emailed) {
-          sent++;
-          const today = istDate();
-          await db.tryWrite('morning_briefs', 'update', c =>
-            c.from('morning_briefs').update({ email_sent: true, email_sent_at: new Date().toISOString() })
-              .eq('client_id', client.id).eq('brief_date', today));
-          await db.tryWrite('clients', 'update', c =>
-            c.from('clients').update({ last_brief_sent_at: new Date().toISOString() }).eq('id', client.id));
-        } else {
-          skipped++;
-        }
-      } catch (e) {
-        console.error(`   ❌ Brief failed for client ${client.id}: ${e.message}`);
-        failed++;
-      }
-    }
-
-    console.log(`📰 Morning briefs complete: ${stored} stored, ${sent} emailed, ${skipped} not emailed, ${failed} failed.`);
-    await reportRun({
-      engineName: 'morningBriefEngine', durationMs: Date.now() - start,
-      itemsProcessed: stored, itemsExpected: clients.length, itemsFailed: failed,
-      detail: `${stored} stored, ${sent} emailed, ${skipped} not emailed, AI: ${JSON.stringify(aiProvider.getUsage())}`,
-    });
-  } catch (e) {
-    console.error('📰 Morning brief engine error:', e.message);
-    await reportRun({
-      engineName: 'morningBriefEngine', durationMs: Date.now() - start,
-      itemsProcessed: stored, itemsExpected: 1, itemsFailed: failed + 1, detail: e.message,
-    });
-  }
+  return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, istDate, _test: { buildMarketSnapshot } };
+module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildMarketSnapshot } };
