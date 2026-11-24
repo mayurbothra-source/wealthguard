@@ -320,13 +320,20 @@ async function buildIdeas(riskScore, heldSymbols, now = new Date()) {
     }
     const measured = id => { const sc = scoreOf[id]; return !!sc && ((sc.price_data_points || 0) > 0 || sc.data_complete === true); };
 
-    // AI lever: instruments with an active flag carry the client-safe label only.
+    // AI lever: the client-safe label only, and only where the AI lever actually
+    // ran for that instrument — a live flag written by a successful Depth-3
+    // analysis (it carries an ai_lever_score). When the AI call failed, no flag
+    // is written, so the instrument shows its 9-lever signal with no AI label.
     const aiLabel = {};
     try {
       const { data: flags } = await supabaseAdmin.from('ai_instrument_flags')
-        .select('instrument_id, horizon_label, is_active').eq('is_active', true)
+        .select('instrument_id, horizon_label, is_active, ai_lever_score, expires_at').eq('is_active', true)
         .in('instrument_id', tradeable.map(i => i.id));
-      for (const f of flags || []) aiLabel[f.instrument_id] = `🤖 AI Influenced — ${f.horizon_label || 'Mid-Term'}`;
+      const nowIso = new Date().toISOString();
+      for (const f of flags || []) {
+        if (f.ai_lever_score == null || (f.expires_at && f.expires_at < nowIso)) continue;
+        aiLabel[f.instrument_id] = `🤖 AI Influenced — ${f.horizon_label || 'Mid-Term'}`;
+      }
     } catch { /* table absent → no labels */ }
 
     const newest = {};

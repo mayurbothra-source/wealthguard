@@ -35,6 +35,10 @@ const axios = require('axios');
 // ─────────────────────────────────────────────────────────────────────
 
 const GOOGLE_KEY    = process.env.GOOGLE_API_KEY    || null;
+// Optional second free Google AI Studio key, ideally from a DIFFERENT Google
+// Cloud project so it has its own free-tier quota. Used by the Gemini fallback
+// step; without it the fallback step uses GOOGLE_API_KEY.
+const GOOGLE_FALLBACK_KEY = process.env.GOOGLE_API_KEY_FALLBACK || null;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || null;
 const FORCED        = (process.env.AI_PROVIDER || '').toLowerCase() || null;
 
@@ -58,7 +62,6 @@ const REQUEST_TIMEOUT  = 45000;
 
 // Cached discovered model (per process)
 let _googleModel      = null;
-let _googleModelTried = false;
 
 // ── RATE LIMITING ────────────────────────────────────────────────────
 // Google's free tier allows roughly 15 requests/minute. Firing 100 calls
@@ -73,6 +76,15 @@ const MIN_CALL_GAP_MS      = 4500;   // ~13 calls/min, safely under the limit
 const BREAKER_THRESHOLD    = 3;      // consecutive 429s before opening
 const BREAKER_COOLDOWN_MS  = 60000;  // wait a full minute before retrying
 
+// SA4: retries. A Gemini 503 ("model overloaded") or 429 is usually gone
+// seconds later, but every one used to count as a failure. Each call now gets
+// up to GOOGLE_ATTEMPTS tries with exponential backoff before it falls back.
+const GOOGLE_ATTEMPTS = 3;
+let BACKOFF_BASE_MS   = 2000;    // 2 s, 4 s … (429: ×4 — the quota window needs longer)
+let MIN_GAP_MS        = MIN_CALL_GAP_MS;
+let _anthropicWarned  = false;
+const lastErrors = [];           // the last few full errors, for the health log
+
 let _lastCallAt        = 0;
 let _consecutive429s   = 0;
 let _breakerOpenUntil  = 0;
@@ -82,8 +94,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 /** Enforces the minimum gap between calls. */
 async function throttle() {
   const since = Date.now() - _lastCallAt;
-  if (since < MIN_CALL_GAP_MS) {
-    await sleep(MIN_CALL_GAP_MS - since);
+  if (since < MIN_GAP_MS) {
+    usage.throttleWaits++;
+    await sleep(MIN_GAP_MS - since);
   }
   _lastCallAt = Date.now();
 }
@@ -107,66 +120,140 @@ function recordSuccess() {
 }
 
 // Usage counters — surfaced in health logs
-const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0, rateLimited: 0, throttleWaits: 0 };
+const usage = { google: 0, anthropic: 0, failures: 0, fallbacks: 0, rateLimited: 0, throttleWaits: 0, retries: 0, googleFailures: 0, googleFallback: 0 };
 
 // ─────────────────────────────────────────────────────────────────────
 // GOOGLE MODEL AUTO-DISCOVERY
 // ─────────────────────────────────────────────────────────────────────
 
+/** Rank usable model ids: preference tier first, newest version first within a tier. */
+function rankGoogleModels(ids) {
+  const ver = id => parseFloat((id.match(/(\d+\.?\d*)/) || [0])[0]) || 0;
+  const tier = id => {
+    // 'flash-lite' must not also count as plain 'flash'
+    const i = GOOGLE_MODEL_PREFERENCE.findIndex(p => p === 'flash' ? id.includes('flash') && !id.includes('flash-lite') : id.includes(p));
+    return i < 0 ? GOOGLE_MODEL_PREFERENCE.length : i;
+  };
+  return [...ids].sort((a, b) => tier(a) - tier(b) || ver(b) - ver(a));
+}
+
+const _discovery = new Map();   // key -> { models: [...ranked], tried: ms }
+
 /**
- * Queries Google's ListModels endpoint and picks the best available model
- * that supports generateContent. Caches the result.
+ * Queries Google's ListModels endpoint and ranks the models that support
+ * generateContent. Cached per key; a failed discovery is retried after 5
+ * minutes (it used to give up for the life of the process).
  *
  * This is what makes the system immune to Google renaming models — which
  * has already broken this integration twice. No hardcoded name to go stale.
  */
-async function discoverGoogleModel() {
-  if (_googleModel) return _googleModel;
-  if (_googleModelTried && !_googleModel) return null; // already failed once
-  _googleModelTried = true;
-
-  if (!GOOGLE_KEY) return null;
-
+async function discoverGoogleModels(key = GOOGLE_KEY) {
+  if (!key) return [];
+  const d = _discovery.get(key);
+  if (d?.models?.length) return d.models;
+  if (d?.tried && Date.now() - d.tried < 5 * 60000) return [];
+  _discovery.set(key, { models: [], tried: Date.now() });
   try {
     const { data } = await axios.get(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${GOOGLE_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`,
       { timeout: 15000 }
     );
-
     const candidates = (data.models || [])
       .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
       .map(m => m.name.replace(/^models\//, ''))
       .filter(id => !GOOGLE_MODEL_EXCLUDE.some(bad => id.toLowerCase().includes(bad)));
-
     if (!candidates.length) {
       console.warn('   ⚠ AI provider: no usable Google models found');
-      return null;
+      return [];
     }
-
-    // Pick by preference order, preferring the highest version number within a tier
-    for (const pref of GOOGLE_MODEL_PREFERENCE) {
-      const matches = candidates.filter(id => id.includes(pref));
-      if (matches.length) {
-        // Sort descending so the newest version wins (e.g. 3.8 before 3.6)
-        matches.sort((a, b) => {
-          const va = parseFloat((a.match(/(\d+\.?\d*)/) || [0])[0]) || 0;
-          const vb = parseFloat((b.match(/(\d+\.?\d*)/) || [0])[0]) || 0;
-          return vb - va;
-        });
-        _googleModel = matches[0];
-        console.log(`   🤖 AI provider: auto-selected Google model "${_googleModel}"`);
-        return _googleModel;
-      }
+    const ranked = rankGoogleModels(candidates);
+    _discovery.set(key, { models: ranked, tried: Date.now() });
+    if (key === GOOGLE_KEY) {
+      _googleModel = ranked[0];
+      console.log(`   🤖 AI provider: auto-selected Google model "${ranked[0]}"${ranked[1] ? ` (fallback model "${ranked[1]}")` : ''}`);
     }
-
-    _googleModel = candidates[0];
-    console.log(`   🤖 AI provider: using Google model "${_googleModel}"`);
-    return _googleModel;
-
+    return ranked;
   } catch (e) {
-    console.warn(`   ⚠ AI provider: Google model discovery failed — ${e.message}`);
-    return null;
+    console.warn(`   ⚠ AI provider: Google model discovery failed — ${describeError(e)}`);
+    noteError('google', e);
+    return [];
   }
+}
+
+/** The primary Gemini model id (on GOOGLE_API_KEY). */
+async function discoverGoogleModel() {
+  const m = await discoverGoogleModels(GOOGLE_KEY);
+  return m[0] || null;
+}
+
+/**
+ * The Gemini fallback target: the next-ranked model — a different model is
+ * what helps against "503 model overloaded" — on GOOGLE_API_KEY_FALLBACK when
+ * set (its own free quota helps against 429s), else on the primary key.
+ * With a separate key and no primary model (bad primary key), its top model.
+ * Null when there is nothing different to try.
+ */
+async function googleFallbackTarget() {
+  const key = GOOGLE_FALLBACK_KEY || GOOGLE_KEY;
+  if (!key) return null;
+  const models = await discoverGoogleModels(key);
+  const primary = GOOGLE_KEY ? ((await discoverGoogleModels(GOOGLE_KEY))[0] || null) : null;
+  const model = models.find(m => m !== primary) || (GOOGLE_FALLBACK_KEY ? models[0] : null) || null;
+  return model ? { key, model, separateQuota: !!GOOGLE_FALLBACK_KEY } : null;
+}
+
+/**
+ * The full reason a call failed: HTTP status plus the provider's own error
+ * message (e.g. "503 UNAVAILABLE: The model is overloaded"). Never includes the
+ * request URL or headers, which carry the API key.
+ */
+function describeError(e) {
+  const st = e?.response?.status;
+  const body = e?.response?.data;
+  const apiMsg = body?.error?.message || body?.error?.status || (typeof body === 'string' ? body : '');
+  const base = st ? `HTTP ${st}${body?.error?.status ? ` ${body.error.status}` : ''}` : (e?.code || 'error');
+  const msg = String(apiMsg || e?.message || '').replace(/key=[^&\s]+/g, 'key=***').slice(0, 300);
+  return `${base}: ${msg}`;
+}
+
+function noteError(provider, e) {
+  lastErrors.push({ at: new Date().toISOString(), provider, error: describeError(e) });
+  if (lastErrors.length > 5) lastErrors.shift();
+}
+
+/** Worth another try: rate limits, server errors, timeouts, network drops. */
+function isRetryable(e) {
+  const st = e?.response?.status;
+  if (st === 429 || st === 500 || st === 502 || st === 503 || st === 504) return true;
+  if (!st && ['ECONNABORTED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND'].includes(e?.code)) return true;
+  return /Empty response from Google/.test(e?.message || '');
+}
+
+/**
+ * Gemini with up to GOOGLE_ATTEMPTS tries. Backoff doubles each time; a 429
+ * waits four times longer. A non-retryable error (bad key, bad request) stops
+ * at once — retrying it cannot help.
+ */
+async function callGoogleWithRetry(prompt, expectJSON, target = null) {
+  let lastErr;
+  for (let attempt = 1; attempt <= GOOGLE_ATTEMPTS; attempt++) {
+    try {
+      return await callGoogle(prompt, expectJSON, target);
+    } catch (e) {
+      lastErr = e;
+      usage.googleFailures++;
+      noteError('google', e);
+      const is429 = e.response?.status === 429;
+      if (is429) { usage.rateLimited++; if (!target?.separateQuota) recordRateLimit(); }
+      if (!isRetryable(e) || attempt === GOOGLE_ATTEMPTS || (!target?.separateQuota && breakerOpen())) break;
+      usage.retries++;
+      const wait = BACKOFF_BASE_MS * 2 ** (attempt - 1) * (is429 ? 4 : 1);
+      console.warn(`   ↻ Gemini${target ? ` fallback (${target.model})` : ''} attempt ${attempt}/${GOOGLE_ATTEMPTS} failed (${describeError(e)}) — retrying in ${Math.round(wait / 1000)}s`);
+      await sleep(wait);
+    }
+  }
+  lastErr.attempts = GOOGLE_ATTEMPTS;
+  throw lastErr;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -186,11 +273,13 @@ function extractGoogleText(data) {
     .join('');
 }
 
-async function callGoogle(prompt, expectJSON) {
-  const model = await discoverGoogleModel();
+async function callGoogle(prompt, expectJSON, target = null) {
+  const model = target ? target.model : await discoverGoogleModel();
+  const key = target ? target.key : GOOGLE_KEY;
   if (!model) throw new Error('No Google model available');
 
-  if (breakerOpen()) {
+  // The rate-limit breaker guards the primary key's quota; a separate key has its own.
+  if (!target?.separateQuota && breakerOpen()) {
     throw new Error('Rate limit cooldown active — skipping Google call');
   }
   await throttle();
@@ -199,7 +288,7 @@ async function callGoogle(prompt, expectJSON) {
     ? `${prompt}\n\nRespond ONLY with valid JSON. No markdown fences, no commentary before or after the JSON.`
     : prompt;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
   const body = { contents: [{ parts: [{ text: fullPrompt }] }] };
   // JSON mode: Gemini then returns bare JSON instead of prose / fenced code.
   if (expectJSON) body.generationConfig = { responseMimeType: 'application/json' };
@@ -224,7 +313,8 @@ async function callGoogle(prompt, expectJSON) {
     throw new Error(`Empty response from Google (finishReason: ${reason})`);
   }
   usage.google++;
-  recordSuccess();
+  if (target) usage.googleFallback++;
+  if (!target?.separateQuota) recordSuccess();
   return text.trim();
 }
 
@@ -296,25 +386,39 @@ function parseJSON(text) {
  * @returns {Promise<object|string|null>}  Parsed JSON, raw text, or null on total failure
  */
 async function ask(prompt, expectJSON = true) {
+  // Gemini (3 tries) → Gemini fallback model / second free key (3 tries) → Claude.
   const order = FORCED === 'anthropic'
-    ? ['anthropic', 'google']
-    : ['google', 'anthropic'];
+    ? ['anthropic', 'google', 'google_fallback']
+    : ['google', 'google_fallback', 'anthropic'];
 
-  let lastError = null;
+  let lastError = null, tried = 0;
 
   for (let i = 0; i < order.length; i++) {
     const provider = order[i];
 
-    // Skip providers with no key configured
-    if (provider === 'google'    && !GOOGLE_KEY)    continue;
-    if (provider === 'anthropic' && !ANTHROPIC_KEY) continue;
+    // A provider with no key is skipped. Anthropic is the optional fallback:
+    // without its key the AI lever simply runs without one (warned once).
+    if (provider === 'google' && !GOOGLE_KEY) continue;
+    let target = null;
+    if (provider === 'google_fallback') {
+      target = await googleFallbackTarget();
+      if (!target) continue;
+    }
+    if (provider === 'anthropic' && !ANTHROPIC_KEY) {
+      if (tried && !_anthropicWarned) {
+        _anthropicWarned = true;
+        console.warn('   ⚠ AI provider: Gemini (and its fallback) failed and ANTHROPIC_API_KEY is not set — continuing without the AI lever for this item');
+      }
+      continue;
+    }
+    tried++;
 
     try {
-      const text = provider === 'google'
-        ? await callGoogle(prompt, expectJSON)
-        : await callAnthropic(prompt, expectJSON);
+      const text = provider === 'anthropic'
+        ? await callAnthropic(prompt, expectJSON)
+        : await callGoogleWithRetry(prompt, expectJSON, target);
 
-      if (i > 0) {
+      if (tried > 1) {
         usage.fallbacks++;
         console.log(`   🤖 AI provider: fell back to ${provider} successfully`);
       }
@@ -325,33 +429,25 @@ async function ask(prompt, expectJSON = true) {
         // Show what came back so the next failure is diagnosable from the logs.
         const excerpt = text.replace(/\s+/g, ' ').slice(0, 200);
         pe.message = `${pe.message} from ${provider} (${text.length} chars): "${excerpt}"`;
+        noteError(provider, pe);
         throw pe;
       }
 
     } catch (e) {
       lastError = e;
-
-      // Track rate limiting specifically so the breaker can open
-      const is429 = e.response?.status === 429 || /429/.test(e.message);
-      if (is429 && provider === 'google') {
-        usage.rateLimited++;
-        recordRateLimit();
-      }
-
-      const isLast = i === order.length - 1;
-      // Only log the fallback attempt once per breaker cycle — otherwise a
-      // rate-limited run produces a hundred identical log lines
-      if (!isLast && !is429) {
-        console.warn(`   ⚠ AI provider ${provider} failed (${e.message}) — trying fallback`);
+      if (provider === 'anthropic') noteError('anthropic', e);
+      if (target) e.message = `[fallback ${target.model}] ${e.message}`;
+      if (i < order.length - 1) {
+        console.warn(`   ⚠ AI provider ${provider} failed${e.attempts ? ` ${e.attempts}×` : ''} (${describeError(e)}) — trying fallback`);
       }
     }
   }
 
   usage.failures++;
-  // Log the first few failures then go quiet — a rate-limited run should not
-  // produce hundreds of identical lines that bury the useful output
+  // Log the first few failures in full, then go quiet — the run summary and
+  // the health log carry the last five errors.
   if (usage.failures <= 3) {
-    console.warn(`   ⚠ AI provider: all providers failed — ${lastError?.message || 'unknown'}`);
+    console.warn(`   ⚠ AI provider: all providers failed — ${lastError ? describeError(lastError) : 'no provider configured'}`);
   } else if (usage.failures === 4) {
     console.warn(`   ⚠ AI provider: further failures suppressed (see summary at end of run)`);
   }
@@ -362,19 +458,20 @@ async function ask(prompt, expectJSON = true) {
  * Returns true if at least one provider is configured and usable.
  */
 function isConfigured() {
-  return !!(GOOGLE_KEY || ANTHROPIC_KEY);
+  return !!(GOOGLE_KEY || GOOGLE_FALLBACK_KEY || ANTHROPIC_KEY);
 }
 
 /**
  * Current usage counters — included in system_health_log entries.
  */
 function getUsage() {
-  return { ...usage, activeModel: _googleModel };
+  return { ...usage, activeModel: _googleModel, lastErrors: [...lastErrors] };
 }
 
 function resetUsage() {
   usage.google = 0; usage.anthropic = 0; usage.failures = 0;
   usage.fallbacks = 0; usage.rateLimited = 0; usage.throttleWaits = 0;
+  usage.retries = 0; usage.googleFailures = 0; usage.googleFallback = 0; lastErrors.length = 0; _anthropicWarned = false;
   _consecutive429s = 0; _breakerOpenUntil = 0;
 }
 
@@ -384,5 +481,11 @@ module.exports = {
   getUsage,
   resetUsage,
   discoverGoogleModel,   // exported for health checks
-  _test: { extractGoogleText, parseJSON },
+  _test: {
+    extractGoogleText, parseJSON, describeError, isRetryable,
+    /** Make backoff and throttling instant in tests. */
+    setTiming({ backoffMs, minGapMs }) { if (backoffMs != null) BACKOFF_BASE_MS = backoffMs; if (minGapMs != null) MIN_GAP_MS = minGapMs; },
+    resetDiscovery() { _googleModel = null; _discovery.clear(); },
+    rankGoogleModels,
+  },
 };
