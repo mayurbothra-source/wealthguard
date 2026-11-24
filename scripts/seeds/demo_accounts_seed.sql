@@ -66,7 +66,9 @@ last_price AS (
 INSERT INTO public.portfolios
   (client_id, instrument_id, instrument_name, asset_class, quantity, avg_buy_price_inr,
    stop_loss_price, buy_date, is_active, entry_source, notes)
-SELECT c.id, u.id, p.symbol, u.category, p.qty,
+-- instrument_id references the legacy `instruments` table, not instrument_universe;
+-- holdings are matched by instrument_name, so it stays NULL.
+SELECT c.id, NULL, p.symbol, u.category, p.qty,
        round((lp.price * p.cost_factor)::numeric, 2),
        CASE WHEN p.near_stop THEN round((lp.price * 0.99)::numeric, 2) ELSE NULL END,
        (now() - interval '45 days')::date, true, 'demo_seed', 'DEMO ONLY'
@@ -79,9 +81,10 @@ WHERE NOT EXISTS (
   WHERE x.client_id = c.id AND x.instrument_name = p.symbol AND x.entry_source = 'demo_seed');
 
 -- Check: 4 holdings and one near-stop per demo account
-SELECT c.full_name, count(*) AS holdings, count(x.stop_loss_price) AS near_stop,
-       (SELECT stated_risk_score FROM public.client_behavioural_profiles b WHERE b.client_id = c.id ORDER BY assessed_at DESC LIMIT 1) AS risk
-FROM public.clients c JOIN public.portfolios x ON x.client_id = c.id AND x.entry_source = 'demo_seed'
+SELECT c.full_name, count(x.id) AS holdings, count(x.stop_loss_price) AS near_stop, max(b.stated_risk_score) AS risk
+FROM public.clients c
+JOIN public.portfolios x ON x.client_id = c.id AND x.entry_source = 'demo_seed'
+LEFT JOIN public.client_behavioural_profiles b ON b.client_id = c.id AND b.version = 900
 GROUP BY c.full_name ORDER BY c.full_name;
 
 -- Demo accounts are in-app only (no email). Needs migration 019; skipped quietly without it.
