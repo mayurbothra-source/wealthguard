@@ -171,6 +171,21 @@ const eng = require('../backend/services/trackRecordEngine');
   const o2 = DB2.rows('recommendation_outcomes');
   ck('outcomes still written without the migration-016 columns', o2.length >= 3 && o2.every(o => o.outcome_status === undefined));
   ck('a SELL on a rising fund is wrong', o2.find(o => o.checkpoint_label === 'Monthly').direction_correct === false);
+  // ── Only ONE pending column: the others must still be written (24 Nov bug) ──
+  console.log('\nOne column not migrated yet');
+  const DB3 = require('./_fakeDb')();
+  DB3.rejectColumns.recommendation_outcomes = new Set(['price_at_checkpoint']);
+  DB3.seed('instrument_universe', [{ symbol: 'MF-DEBT', price_source: 'mfapi', amfi_code: '1001' }]);
+  DB3.seed('recommendations', [{ id: 'y', client_id: null, instrument_name: 'MF-DEBT', action: 'BUY',
+    entry_price_inr: closeOn('2026-10-01'), generated_at: '2026-10-01T04:00:00.000Z' }]);
+  const save3 = DB.from; DB.from = DB3.from;
+  await eng.runTrackRecordCheckpoints({ now });
+  DB.from = save3;
+  const o3 = DB3.rows('recommendation_outcomes');
+  ck('a missing price_at_checkpoint column drops only that column', o3.length >= 3 && o3.every(o => o.price_at_checkpoint === undefined));
+  ck('…checkpoint_date, outcome_status, price_as_of and 14-Day return are still written',
+    o3.every(o => o.checkpoint_date && o.outcome_status && o.run_label) && o3.some(o => o.checkpoint_label === '14-Day' && o.return_14d_pct != null));
+
   // ── SA2: outcome_correct on the recommendation ──
   console.log('\nSA2 outcome_correct');
   ck('rollup: any wrong checkpoint → false', eng.rollupOutcome([{ direction_correct: true }, { direction_correct: false }]) === false);

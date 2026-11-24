@@ -123,29 +123,25 @@ async function selectAll(build) {
 }
 
 /**
- * Insert outcome rows in chunks. If migration 016 has not run, PostgREST
- * rejects unknown columns; the chunk is retried without them, so a checkpoint
- * is never lost to a pending migration. A unique-key clash (another run got
- * there first) falls back to row-by-row inserts and skips the clashing rows.
+ * Insert outcome rows in chunks. If a newer column has not been migrated yet,
+ * PostgREST rejects the statement and names the column; ONLY that column is
+ * dropped and the write retried, so one pending migration (e.g. 018's
+ * price_at_checkpoint) cannot blank out every other new column.
+ * (Before 24 Nov 2026 the first missing column dropped all of them.)
+ * A unique-key clash (another run got there first) falls back to row-by-row
+ * inserts and skips the clashing rows.
  */
 async function insertOutcomes(rows, state) {
   let written = 0;
   for (let i = 0; i < rows.length; i += 100) {
-    let chunk = rows.slice(i, i + 100);
-    if (state.dropNewColumns) chunk = chunk.map(stripNew);
-    let { error } = await supabaseAdmin.from('recommendation_outcomes').insert(chunk);
-    if (error && !state.dropNewColumns && isMissingColumn(error)) {
-      state.dropNewColumns = true;
-      console.warn(`   ⚠ recommendation_outcomes: migration 016 not applied — writing without [${NEW_COLUMNS.join(', ')}]`);
-      chunk = chunk.map(stripNew);
-      ({ error } = await supabaseAdmin.from('recommendation_outcomes').insert(chunk));
-    }
+    const chunk = rows.slice(i, i + 100);
+    let error = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes').insert(chunk.map(r => omit(r, cols))));
     if (!error) { written += chunk.length; continue; }
     if (error.code === '23505') {
       for (const r of chunk) {
-        const one = await supabaseAdmin.from('recommendation_outcomes').insert(r);
-        if (!one.error) written++;
-        else if (one.error.code !== '23505') console.error(`   ❌ outcome insert failed: ${one.error.message}`);
+        const e1 = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes').insert(omit(r, cols)));
+        if (!e1) written++;
+        else if (e1.code !== '23505') console.error(`   ❌ outcome insert failed: ${e1.message}`);
       }
       continue;
     }
@@ -154,11 +150,33 @@ async function insertOutcomes(rows, state) {
   return written;
 }
 
-function stripNew(r) {
+/** Runs write(missingColumns), dropping each column PostgREST reports missing, one at a time. */
+async function tolerantWrite(state, write) {
+  state.missing = state.missing || new Set();
+  for (let tries = 0; tries <= NEW_COLUMNS.length; tries++) {
+    const { error } = await write(state.missing);
+    if (!error) return null;
+    if (!isMissingColumn(error)) return error;
+    const col = missingColumnName(error);
+    if (!col || state.missing.has(col) || !NEW_COLUMNS.includes(col)) return error;
+    state.missing.add(col);
+    console.warn(`   ⚠ recommendation_outcomes.${col} does not exist yet (pending migration) — writing without it`);
+  }
+  return { message: 'too many missing columns' };
+}
+
+function missingColumnName(error) {
+  const m = /'([a-z0-9_]+)' column|column "?([a-z0-9_]+)"? (?:of relation \S+ )?does not exist/i.exec(String(error.message || ''));
+  return m ? (m[1] || m[2]) : null;
+}
+
+function omit(r, cols) {
+  if (!cols || !cols.size) return r;
   const c = { ...r };
-  for (const k of NEW_COLUMNS) delete c[k];
+  for (const k of cols) delete c[k];
   return c;
 }
+function stripNew(r) { return omit(r, new Set(NEW_COLUMNS)); }
 function isMissingColumn(error) {
   const m = String(error.message || '').toLowerCase();
   return error.code === 'PGRST204' || error.code === '42703' || m.includes('column') && (m.includes('does not exist') || m.includes('could not find'));
@@ -370,12 +388,11 @@ async function runTrackRecordCheckpoints(opts = {}) {
     }
   }
 
-  const state = { dropNewColumns: false };
+  const state = { missing: new Set() };
   const written = await insertOutcomes(toInsert, state);
   let updated = 0;
   for (const { id, row } of toRetry) {
-    const { error } = await supabaseAdmin.from('recommendation_outcomes')
-      .update(state.dropNewColumns ? stripNew(row) : row).eq('id', id);
+    const error = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes').update(omit(row, cols)).eq('id', id));
     if (!error) updated++;
   }
 
