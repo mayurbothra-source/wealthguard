@@ -202,14 +202,18 @@ async function notifyClientsForAlert(alert, instrument) {
       .select('id, full_name, email, email_alerts_enabled')
       .in('id', holdings.map(h => h.client_id));
 
-    // One email per client per flash alert, logged in alert_deliveries (WS5).
-    const { deliverAlert } = require('./holdingAlerts');
-    const demoClients = new Set(holdings.filter(h => h.entry_source === 'demo_seed').map(h => h.client_id));
-    for (const client of (clients || [])) {
-      deliverAlert(client, {
-        key: `flash:${alert.id}`, type: 'flash_alert', instrumentId: instrument.id, demo: demoClients.has(client.id),
-        title: `${instrument.name} ${alert.move_pct > 0 ? '+' : ''}${Number(alert.move_pct).toFixed(1)}% this hour`, body,
-      }).catch(() => {});
+    // Email only on a FALL (rises stay in-app), at most once per instrument per
+    // client per IST day, logged in alert_deliveries.
+    if (alert.move_pct <= -THRESHOLD_EQUITY) {
+      const { deliverAlert } = require('./holdingAlerts');
+      const { istDate } = require('../lib/istTime');
+      const demoClients = new Set(holdings.filter(h => h.entry_source === 'demo_seed').map(h => h.client_id));
+      for (const client of (clients || [])) {
+        await deliverAlert(client, {
+          key: `fall:${instrument.symbol}:${istDate()}`, type: 'flash_alert', instrumentId: instrument.id, demo: demoClients.has(client.id),
+          title: `${instrument.name} fell ${Math.abs(Number(alert.move_pct)).toFixed(1)}% in the last hour`, body,
+        }, { noInApp: true }).catch(() => {});
+      }
     }
 
     return holdings.length;
@@ -217,6 +221,52 @@ async function notifyClientsForAlert(alert, instrument) {
     console.warn('   ⚠ Could not notify clients:', e.message);
     return 0;
   }
+}
+
+/**
+ * Index falls: if Nifty 50 or Sensex is down ≥1% (THRESHOLD_INDEX) against the
+ * reading about an hour earlier, every subscriber with alerts on gets ONE email
+ * per index per IST day. Rises do not alert. Readings are kept in market_cache
+ * (index_hourly_v1); a comparison needs a reading 40–100 minutes old.
+ */
+const INDEX_FALL_KEYS = { nifty: 'Nifty 50', sensex: 'Sensex' };
+async function runIndexFallScan({ now = new Date(), snapshot = null } = {}) {
+  if (!supabaseAdmin) return { fired: [] };
+  const { istDate } = require('../lib/istTime');
+  const snap = snapshot || await require('./indexData').getIndexSnapshot({ now });
+  const { data: row } = await supabaseAdmin.from('market_cache').select('data').eq('cache_key', 'index_hourly_v1').maybeSingle();
+  const prev = (row && row.data) || {};
+  const next = { ...prev };
+  const fired = [];
+  for (const [key, label] of Object.entries(INDEX_FALL_KEYS)) {
+    const x = snap[key];
+    if (!x || x.price == null || x.status !== 'live' || x.unverified) continue;   // never alert on stale or doubtful numbers
+    const p = prev[key];
+    const ageMin = p ? (now - new Date(p.at)) / 60000 : null;
+    if (p && ageMin >= 40 && ageMin <= 100) {
+      const move = ((x.price - p.price) / p.price) * 100;
+      if (move <= -THRESHOLD_INDEX) fired.push({ key, label, move: Math.round(move * 100) / 100, price: x.price });
+    }
+    if (!p || ageMin >= 40) next[key] = { price: x.price, at: now.toISOString() };
+  }
+  await supabaseAdmin.from('market_cache').upsert({ cache_key: 'index_hourly_v1', data: next, updated_at: now.toISOString() }, { onConflict: 'cache_key' });
+  if (!fired.length) return { fired };
+
+  const { deliverAlert } = require('./holdingAlerts');
+  const { data: clients } = await supabaseAdmin.from('clients').select('*').limit(5000);
+  const subs = (clients || []).filter(c => ['active', 'trial'].includes(c.subscription_status));
+  for (const f of fired) {
+    console.log(`   ⚡ INDEX FALL: ${f.label} ${f.move}% in the last hour — alerting ${subs.length} subscriber(s)`);
+    for (const c of subs) {
+      await deliverAlert(c, {
+        key: `index_fall:${f.key}:${istDate(now)}`, type: 'index_fall',
+        title: `${f.label} fell ${Math.abs(f.move).toFixed(1)}% in the last hour`,
+        body: `${f.label} is at ${Number(f.price).toLocaleString('en-IN')}, down ${Math.abs(f.move).toFixed(1)}% in about an hour. ` +
+              'A sharp market fall is not by itself a reason to sell. Open WealthGuard to see whether any of your holdings need attention. Not investment advice.',
+      }).catch(() => {});
+    }
+  }
+  return { fired };
 }
 
 async function isMarketHours() {
@@ -275,6 +325,10 @@ async function runFlashAlertScan() {
     || (currentVix && currentVix > VIX_ELEVATED);
 
   let alertsFired = 0;
+  try {
+    const idx = await runIndexFallScan();
+    alertsFired += idx.fired.length;
+  } catch (e) { console.warn(`   ⚠ index fall scan: ${e.message}`); }
 
   for (const instrument of instruments) {
     // Skip instruments with no price feed
@@ -326,4 +380,4 @@ async function runFlashAlertScan() {
   });
 }
 
-module.exports = { runFlashAlertScan, isMarketHours, _test: { notifyClientsForAlert } };
+module.exports = { runFlashAlertScan, isMarketHours, _test: { notifyClientsForAlert }, runIndexFallScan };

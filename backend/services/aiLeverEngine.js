@@ -575,9 +575,13 @@ async function runAILeverScan() {
   await reportRun({
     engineName:     'aiLeverEngine',
     durationMs:     Date.now() - scanStart,
-    itemsProcessed: eventsDetected,
+    // Measured in AI calls: a few Gemini 503s out of many successful calls is a
+    // degraded run, not a failure. It used to divide per-instrument errors by
+    // the number of news EVENTS (e.g. 7 errors vs 5 events) and email a
+    // "high failure rate" alert on an ordinary day.
+    itemsProcessed: aiUsage.google + aiUsage.anthropic,
     itemsExpected:  null,   // zero events on a quiet news day is valid
-    itemsFailed:    errors.length,
+    itemsFailed:    aiUsage.failures + (errors.some(e => e.startsWith('Main scan')) ? 1 : 0),
     detail:         `${flagsGenerated} flags, ${criticalFires} critical, AI: ${JSON.stringify(aiUsage)}`,
   });
 }
