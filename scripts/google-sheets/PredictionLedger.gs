@@ -2,9 +2,9 @@
  * WealthGuard — Prediction Ledger (Google Apps Script, bound to the ledger sheet).
  *
  * Pulls every house prediction and its Weekly / Monthly / Quarterly / Annual
- * results from the WealthGuard backend and writes them to the "Predictions"
- * tab — each row green when the prediction was right, red when wrong — and the accuracy
- * scores to the "Accuracy" tab.
+ * results from the WealthGuard backend and writes them to per-month tabs
+ * (e.g. "Sep 2026", "Oct 2026", "Nov 2026") — each row green when the
+ * prediction was right, red when wrong — plus a combined "Accuracy" tab.
  *
  * SETUP (once — see docs/PREDICTION_LEDGER.md):
  *   1. Extensions → Apps Script → paste this file → Save.
@@ -21,6 +21,7 @@
 
 var GREEN = '#d9ead3', RED = '#f4cccc', GREEN_CELL = '#b6d7a8', RED_CELL = '#ea9999', HEADER = '#1b5e3f';
 var HEAD = ['Date', 'Instrument', 'Prediction', 'Entry price (₹)', 'Weekly', 'Monthly', 'Quarterly', 'Annual', 'Overall'];
+var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 function syncLedger() {
   var props = PropertiesService.getScriptProperties();
@@ -28,7 +29,7 @@ function syncLedger() {
   if (!url || !token) throw new Error('Set LEDGER_URL and LEDGER_TOKEN in Project Settings → Script properties.');
 
   var data = fetchWithWake_(url, token);
-  writePredictions_(data);
+  writeMonthlyPredictions_(data);
   writeAccuracy_(data);
 }
 
@@ -63,22 +64,39 @@ function sheet_(name) {
   return ss.getSheetByName(name) || ss.insertSheet(name);
 }
 
-function writePredictions_(data) {
-  var sh = sheet_('Predictions');
-  var rows = data.rows.map(function (r) {
-    return [r.date, r.instrument, r.prediction, r.entry == null ? '' : r.entry, r.weekly, r.monthly, r.quarterly, r.annual, r.overall];
+/** Group rows by "Mon YYYY" and write one tab per month, newest month first. */
+function writeMonthlyPredictions_(data) {
+  var buckets = {};
+  var order = [];
+  data.rows.forEach(function (r) {
+    var parts = String(r.date).split('-');
+    var key = MONTHS[+parts[1] - 1] + ' ' + parts[0];   // "Nov 2026"
+    if (!buckets[key]) { buckets[key] = []; order.push(key); }
+    buckets[key].push([r.date, r.instrument, r.prediction, r.entry == null ? '' : r.entry, r.weekly, r.monthly, r.quarterly, r.annual, r.overall]);
   });
-  sh.clear();
-  sh.getRange(1, 1, 1, HEAD.length).setValues([HEAD]).setFontWeight('bold').setFontColor('#ffffff').setBackground(HEADER);
-  sh.setFrozenRows(1);
-  if (!rows.length) return;
-  var range = sh.getRange(2, 1, rows.length, HEAD.length);
-  range.setValues(rows);
 
-  applyColours_(sh, rows.length);
-  sh.getRange(2, 4, rows.length, 1).setNumberFormat('#,##0.00');
-  sh.autoResizeColumns(1, HEAD.length);
-  if (!sh.getFilter()) sh.getRange(1, 1, rows.length + 1, HEAD.length).createFilter();
+  // Remove the old single "Predictions" tab if it still exists.
+  var ss = SpreadsheetApp.getActive();
+  var old = ss.getSheetByName('Predictions');
+  if (old && order.length) { try { ss.deleteSheet(old); } catch (e) { /* only sheet — ignore */ } }
+
+  order.forEach(function (month) {
+    var sh = sheet_(month);
+    var rows = buckets[month];
+    sh.clear();
+    sh.getRange(1, 1, 1, HEAD.length).setValues([HEAD]).setFontWeight('bold').setFontColor('#ffffff').setBackground(HEADER);
+    sh.setFrozenRows(1);
+    if (!rows.length) return;
+    sh.getRange(2, 1, rows.length, HEAD.length).setValues(rows);
+    applyColours_(sh, rows.length);
+    sh.getRange(2, 4, rows.length, 1).setNumberFormat('#,##0.00');
+    sh.autoResizeColumns(1, HEAD.length);
+    if (!sh.getFilter()) sh.getRange(1, 1, rows.length + 1, HEAD.length).createFilter();
+  });
+
+  // Move Accuracy tab to the front so it's the landing page.
+  var acc = ss.getSheetByName('Accuracy');
+  if (acc) { ss.setActiveSheet(acc); ss.moveActiveSheet(1); }
 }
 
 /**
