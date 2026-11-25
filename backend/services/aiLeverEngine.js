@@ -47,7 +47,12 @@ function classifyHorizon(days) {
 // ── GEMINI HELPER ─────────────────────────────────────────────
 async function askGemini(prompt, expectJSON = true) {
   const result = await aiProvider.ask(prompt, expectJSON);
-  if (result === null) throw new Error('All AI providers unavailable');
+  if (result === null) {
+    // Carry the real cause (e.g. "HTTP 503 UNAVAILABLE: The model is overloaded")
+    // into the scan's error list, not just a count.
+    const last = (aiProvider.getUsage().lastErrors || []).slice(-1)[0];
+    throw new Error(`All AI providers unavailable${last ? ` — ${last.provider}: ${last.error}` : ''}`);
+  }
   return result;
 }
 
@@ -575,10 +580,15 @@ async function runAILeverScan() {
   await reportRun({
     engineName:     'aiLeverEngine',
     durationMs:     Date.now() - scanStart,
-    itemsProcessed: eventsDetected,
+    // Measured in AI calls: a few Gemini 503s out of many successful calls is a
+    // degraded run, not a failure. It used to divide per-instrument errors by
+    // the number of news EVENTS (e.g. 7 errors vs 5 events) and email a
+    // "high failure rate" alert on an ordinary day.
+    itemsProcessed: aiUsage.google + aiUsage.anthropic,
     itemsExpected:  null,   // zero events on a quiet news day is valid
-    itemsFailed:    errors.length,
-    detail:         `${flagsGenerated} flags, ${criticalFires} critical, AI: ${JSON.stringify(aiUsage)}`,
+    itemsFailed:    aiUsage.failures + (errors.some(e => e.startsWith('Main scan')) ? 1 : 0),
+    detail:         `${flagsGenerated} flags, ${criticalFires} critical, ${errors.length} errors` +
+                    `${errors.length ? ` (first: ${errors[0].slice(0, 200)})` : ''}, AI: ${JSON.stringify(aiUsage)}`,
   });
 }
 

@@ -86,21 +86,22 @@ async function logEmail(clientId, to, type, subject, status, errorDetail) {
 }
 
 /**
- * Sends an email. Never throws — returns true/false.
+ * Sends an email. Never throws. Returns { ok, id, error, skipped } where `id` is
+ * the provider's message id (Resend) when the send succeeded.
  */
-async function send({ to, subject, html, text, clientId = null, type = 'general' }) {
+async function sendDetailed({ to, subject, html, text, clientId = null, type = 'general' }) {
   if (!RESEND_KEY) {
     console.warn('   ⚠ Email: RESEND_API_KEY not set — skipping send');
     await logEmail(clientId, to, type, subject, 'skipped', 'RESEND_API_KEY not configured');
-    return false;
+    return { ok: false, skipped: true, error: 'RESEND_API_KEY not configured' };
   }
   if (!to) {
     await logEmail(clientId, to, type, subject, 'skipped', 'No recipient address');
-    return false;
+    return { ok: false, skipped: true, error: 'No recipient address' };
   }
 
   try {
-    await axios.post(
+    const res = await axios.post(
       RESEND_URL,
       { from: FROM, to: [to], subject, html, text: text || undefined },
       {
@@ -112,15 +113,20 @@ async function send({ to, subject, html, text, clientId = null, type = 'general'
       }
     );
     await logEmail(clientId, to, type, subject, 'sent', null);
-    return true;
+    return { ok: true, id: res?.data?.id || null };
   } catch (e) {
     const detail = e.response
       ? `HTTP ${e.response.status} — ${JSON.stringify(e.response.data).slice(0, 200)}`
       : e.message;
     console.warn(`   ⚠ Email send failed to ${to}: ${detail}`);
     await logEmail(clientId, to, type, subject, 'failed', detail);
-    return false;
+    return { ok: false, error: detail };
   }
+}
+
+/** Sends an email. Never throws — returns true/false. */
+async function send(args) {
+  return (await sendDetailed(args)).ok;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -150,20 +156,48 @@ async function sendAuthCode(client, code) {
 
 async function sendMorningBrief(client, brief) {
   if (!client.email || client.email_brief_enabled === false) {
-    await logEmail(client.id, client.email, 'morning_brief', 'Morning Brief', 'skipped',
-      !client.email ? 'No email on file' : 'Client opted out');
-    return false;
+    const why = !client.email ? 'No email on file' : 'Client opted out';
+    await logEmail(client.id, client.email, 'morning_brief', 'Morning Brief', 'skipped', why);
+    return { ok: false, skipped: true, error: why };
   }
+  const { subject, html, text } = renderMorningBrief(client, brief);
+  // Detailed result so delivery tracking can store the provider's message id.
+  return sendDetailed({ to: client.email, subject, html, text, clientId: client.id, type: 'morning_brief' });
+}
 
-  const dateStr = new Date().toLocaleDateString('en-IN',
-    { weekday: 'long', day: 'numeric', month: 'long' });
+/**
+ * The exact email (subject, HTML, plain text) for a brief — used to send it and
+ * by the admin preview, so what the admin sees is what the client receives.
+ */
+function renderMorningBrief(client, brief, now = new Date()) {
+  const dateStr = require('../lib/istTime').istLongDate(now);
 
   const sections = [];
-  if (brief.market_snapshot) {
+  if (brief.market_snapshot || brief.market_figures?.length) {
+    // Level, day change and as-of time for each index; stale, unverified and
+    // missing figures say so plainly.
+    const figs = (brief.market_figures || []).map(f => {
+      const col = f.change_pct == null ? '#6E7A71' : f.change_pct >= 0 ? '#2E7D52' : '#A23B2E';
+      const warn = f.status !== 'live' || f.unverified;
+      return `<tr>
+        <td style="padding:4px 10px 4px 0;font-weight:600;">${esc(f.label)}</td>
+        <td style="padding:4px 10px 4px 0;">${f.level ? esc(f.level) : '—'}</td>
+        <td style="padding:4px 10px 4px 0;color:${col};">${f.change ? esc(f.change) : ''}</td>
+        <td style="padding:4px 0;font-size:11px;color:${warn ? '#A23B2E' : '#6E7A71'};">${esc(f.note)}</td></tr>`;
+    }).join('');
     sections.push(`<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">Market Snapshot</h3>
-      <p style="margin:0 0 18px;">${brief.market_snapshot}</p>`);
+      ${figs ? `<table role="presentation" style="margin:0 0 8px;font-size:13px;border-collapse:collapse;">${figs}</table>` : ''}
+      ${brief.market_snapshot ? `<p style="margin:0 0 18px;">${esc(brief.market_snapshot)}</p>` : ''}`);
   }
+
   const H3 = t => `<h3 style="margin:0 0 6px;font-size:13px;color:#1B5E3F;text-transform:uppercase;letter-spacing:.04em;">${t}</h3>`;
+  // SA6: the honest track record sits right after the market snapshot, before any ideas.
+  if (brief.track_record?.text) {
+    const tr = brief.track_record;
+    sections.push(`${H3('Our track record')}<p style="margin:0 0 4px;font-size:13px;">${esc(tr.text)}</p>${tr.disclaimer
+      ? `<p style="margin:0 0 18px;font-size:11px;color:#6E7A71;">${esc(tr.disclaimer.replace(/ https?:\/\/\S+$/, ''))} <a href="${esc(tr.methodology_url)}" style="color:#1B5E3F;">methodology</a></p>`
+      : '<div style="margin:0 0 18px;"></div>'}`);
+  }
   if (brief.today_action) {
     sections.push(`<div style="background:#E8F5EE;border-radius:8px;padding:12px 14px;margin:0 0 18px;font-size:14px;"><strong>Today:</strong> ${esc(brief.today_action)}</div>`);
   }
@@ -175,7 +209,21 @@ async function sendMorningBrief(client, brief) {
   if (brief.portfolio_note) {
     sections.push(`${H3('Your Portfolio')}
       <p style="margin:0 0 8px;">${esc(brief.portfolio_note)}</p>${
-      brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
+      brief.portfolio?.holdings?.length ? (() => {
+        const p = brief.portfolio;
+        const inr = n => `₹${Math.abs(n).toLocaleString('en-IN')}`;
+        const sc = { EXIT: '#A23B2E', REVIEW: '#B7791F', HOLD: '#2E7D52' };
+        const head = p.value != null
+          ? `<p style="margin:0 0 6px;font-size:13px;">Value <strong>${inr(p.value)}</strong>${p.day_change != null ? ` · today ${p.day_change >= 0 ? '+' : '−'}${inr(p.day_change)}` : ''}${p.pnl != null ? ` · gain/loss ${p.pnl >= 0 ? '+' : '−'}${inr(p.pnl)} (${p.pnl_pct}%)` : ''}</p>`
+          : '<p style="margin:0 0 6px;font-size:13px;">Prices for your holdings could not be fetched this morning.</p>';
+        const rows = p.holdings.map(r => `<tr>
+          <td style="padding:4px 8px 4px 0;font-weight:700;color:${sc[r.status]};">${r.status}</td>
+          <td style="padding:4px 8px 4px 0;"><strong>${esc(r.symbol)}</strong></td>
+          <td style="padding:4px 8px 4px 0;">${r.price != null ? `₹${esc(r.price)}` : '—'}</td>
+          <td style="padding:4px 8px 4px 0;color:${(r.pnl ?? 0) >= 0 ? '#2E7D52' : '#A23B2E'};">${r.pnl != null ? `${r.pnl >= 0 ? '+' : '−'}${inr(r.pnl)} (${r.pnl_pct}%)` : ''}</td>
+          <td style="padding:4px 0;font-size:11px;color:#6E7A71;">${esc(r.reasons.join('; '))}</td></tr>`).join('');
+        return `${head}<table role="presentation" style="margin:0 0 18px;font-size:13px;border-collapse:collapse;">${rows}</table>`;
+      })() : brief.holding_actions?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${brief.holding_actions.map(h => `<li style="margin:0 0 4px;"><strong>${esc(h.symbol)}</strong> — ${esc(h.action || 'no signal')}: ${esc(h.advice)}</li>`).join('')}</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
   }
   if (brief.starting_plan?.goals?.length) {
     const { fmtINR } = require('./startingPlan');
@@ -194,8 +242,20 @@ async function sendMorningBrief(client, brief) {
     const label = a => a === 'BUY' ? 'BUY' : a === 'WATCH' ? 'WATCHING — not a buy yet' : a;
     sections.push(`${H3('Ideas worth a look')}${brief.ideas_note ? `<p style="margin:0 0 8px;">${esc(brief.ideas_note)}</p>` : ''}${
       brief.ideas?.length ? `<ul style="margin:0 0 18px;padding-left:18px;">${
-      brief.ideas.map(i => `<li style="margin:0 0 8px;"><strong>${esc(i.symbol)}</strong>${i.name && i.name !== i.symbol ? ` <span style="color:#6E7A71;">${esc(i.name)}</span>` : ''} <span style="font-size:11px;color:${i.action === 'BUY' ? '#2E7D52' : '#6E7A71'};">${esc(label(i.action))}</span>${i.entry ? `<div style="font-size:12px;color:#6E7A71;">Price ~₹${esc(i.entry)}${i.target ? ` · Target ₹${esc(i.target)}` : ''}${i.stop ? ` · Stop-loss ₹${esc(i.stop)}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : ''}${i.rationale ? `<div style="font-size:12px;color:#3A463E;margin-top:2px;">${esc(i.rationale)}</div>` : ''}</li>`).join('')
+      brief.ideas.map(i => `<li style="margin:0 0 10px;"><strong>${esc(i.symbol)}</strong>${i.name && i.name !== i.symbol ? ` <span style="color:#6E7A71;">${esc(i.name)}</span>` : ''} <span style="font-size:11px;color:${i.action === 'BUY' ? '#2E7D52' : '#6E7A71'};">${esc(label(i.action))}</span>${i.ai_label ? ` <span style="font-size:11px;background:#EEF1FB;color:#3B4A8C;border-radius:8px;padding:1px 6px;">${esc(i.ai_label)}</span>` : ''}${i.confidence ? ` <span style="font-size:11px;color:#6E7A71;">· Confidence: ${esc(i.confidence)}</span>` : ''}${i.why ? `<div style="font-size:13px;color:#16211B;margin-top:2px;">${esc(i.why)}</div>` : ''}${i.levels_ok ? `<div style="font-size:12px;color:#3A463E;margin-top:2px;">Entry ${esc(i.entry_zone || `~₹${i.entry}`)} · Target ₹${esc(i.target)} · Stop-loss ₹${esc(i.stop)}${i.reward_risk ? ` · Reward:risk ${esc(Number(i.reward_risk).toFixed(1))}` : ''}${i.horizon_days ? ` · ${esc(i.horizon_days)}-day view` : ''}</div>` : (i.horizon_days ? `<div style="font-size:12px;color:#6E7A71;margin-top:2px;">${esc(i.horizon_days)}-day view · no target or stop-loss until it qualifies</div>` : '')}${i.rationale ? `<div style="font-size:12px;color:#6E7A71;margin-top:2px;">${esc(i.rationale)}</div>` : ''}</li>`).join('')
       }</ul>` : '<div style="margin:0 0 18px;"></div>'}`);
+  }
+  if (brief.cautions?.length) {
+    sections.push(`${H3('Consider avoiding or exiting')}<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.cautions.map(c => `<li style="margin:0 0 8px;"><strong>${esc(c.symbol)}</strong>${c.name && c.name !== c.symbol ? ` <span style="color:#6E7A71;">${esc(c.name)}</span>` : ''} <span style="font-size:11px;color:#A23B2E;">SELL</span>${c.why ? `<div style="font-size:13px;color:#16211B;margin-top:2px;">${esc(c.why)}</div>` : ''}</li>`).join('')
+    }</ul><p style="margin:-10px 0 18px;font-size:11px;color:#6E7A71;">If you hold one of these, it is shown under Your Portfolio with what to do.</p>`);
+  }
+  if (brief.no_ideas?.text) {
+    sections.push(`${H3('Why no new ideas today')}<p style="margin:0 0 18px;font-size:13px;">${esc(brief.no_ideas.text)}</p>`);
+  }
+  if (brief.opportunities?.length) {
+    sections.push(`${H3('Opportunities')}<ul style="margin:0 0 18px;padding-left:18px;">${
+      brief.opportunities.map(o => `<li style="margin:0 0 6px;"><strong>${esc(o.headline)}</strong>${o.detail ? `<div style="font-size:12px;color:#6E7A71;">${esc(o.detail)}</div>` : ''}</li>`).join('')}</ul>`);
   }
   if (!brief.ideas && brief.top_signals?.length) {
     const rows = brief.top_signals.map(s => `
@@ -224,19 +284,12 @@ async function sendMorningBrief(client, brief) {
   const html = wrapHTML(
     'Your Morning Brief',
     `<p style="margin:0 0 4px;font-size:12px;color:#6E7A71;">${dateStr}</p>
-     <h2 style="margin:0 0 18px;font-family:Georgia,serif;font-size:19px;color:#16211B;">Good morning, ${client.full_name?.split(' ')[0] || 'there'}</h2>
+     <h2 style="margin:0 0 18px;font-family:Georgia,serif;font-size:19px;color:#16211B;">${(() => { const f = String(client.full_name || '').trim().split(/\s+/)[0]; return f ? `Good morning, ${esc(f)}` : 'Hello'; })()}</h2>
      ${sections.join('')}`,
     'You are receiving this because you have morning briefs enabled. You can turn them off in your profile settings.'
   );
 
-  return send({
-    to:       client.email,
-    subject:  `WealthGuard Morning Brief — ${dateStr}`,
-    html,
-    text:     brief.full_text || undefined,
-    clientId: client.id,
-    type:     'morning_brief',
-  });
+  return { subject: `WealthGuard Morning Brief — ${dateStr}`, html, text: brief.full_text || undefined };
 }
 
 async function sendFlashAlert(client, alert) {
@@ -265,6 +318,17 @@ async function sendFlashAlert(client, alert) {
     clientId: client.id,
     type:     'flash_alert',
   });
+}
+
+/** Stop-loss / critical-risk alert about a holding. Returns { ok, id, error }. */
+async function sendHoldingAlert(client, ev) {
+  const html = wrapHTML(
+    ev.title,
+    `<h2 style="margin:0 0 10px;font-family:Georgia,serif;font-size:19px;color:#A23B2E;">${esc(ev.title)}</h2>
+     <p style="margin:0 0 12px;">${esc(ev.body)}</p>`,
+    'You are receiving this because you hold this instrument and have alerts enabled.'
+  );
+  return sendDetailed({ to: client.email, subject: `🔔 ${ev.title} — WealthGuard`, html, text: ev.body, clientId: client.id, type: ev.type || 'holding_alert' });
 }
 
 async function sendPaymentGraceNotice(client, stage, daysRemaining) {
@@ -356,6 +420,9 @@ function isConfigured() {
 module.exports = {
   send,
   sendMorningBrief,
+  renderMorningBrief,
+  sendDetailed,
+  sendHoldingAlert,
   sendAuthCode,
   sendFlashAlert,
   sendPaymentGraceNotice,

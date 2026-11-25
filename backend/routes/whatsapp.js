@@ -119,7 +119,8 @@ async function getPortfolioSummary(clientId) {
 async function generateConversationalResponse(text, clientId, clientName) {
   // Simple pattern matching for common queries
   if (text.includes('MARKET') || text.includes('NIFTY')) {
-    return `📈 *Market Update*\n\nNifty 50 is mildly bullish today. VIX at 13.4 — calm conditions. FII net buyers. Your portfolio risk status is GREEN.\n\nFor your specific actions today, check the morning brief or reply *DETAILS*.`;
+    // No canned numbers: this reply used to claim "VIX at 13.4" whatever the market did.
+    return `📈 *Market Update*\n\nToday's Nifty, Sensex and India VIX levels — each with the time it was measured — are in your morning brief.\n\nFor your specific actions today, open the brief or reply *DETAILS*.`;
   }
   if (text.includes('GOLD') || text.includes('SGB')) {
     return `🥇 *Gold Update*\n\nGold momentum is strong. There's a High Conviction BUY signal on Sovereign Gold Bond 2026. 2.5% interest + price appreciation + tax-free at maturity.\n\nReply *DETAILS* for full analysis.`;

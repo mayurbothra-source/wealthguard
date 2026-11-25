@@ -77,10 +77,10 @@ async function safeRun(label, fn) {
 
 /** Only one morning-brief run at a time (the 7:30 cron and a wake-up catch-up can overlap). */
 let _briefRunning = false;
-async function runBriefOnce(label) {
+async function runBriefOnce(label, trigger = 'cron') {
   if (_briefRunning) { console.log(`   ↺ ${label}: a brief run is already in progress — skipping`); return; }
   _briefRunning = true;
-  try { await safeRun(label, generateAndSendMorningBrief); } finally { _briefRunning = false; }
+  try { await safeRun(label, () => generateAndSendMorningBrief({ trigger })); } finally { _briefRunning = false; }
 }
 
 /** Did this engine report a run since midnight IST (today)? Used so wake-ups never repeat a daily job. */
@@ -108,13 +108,12 @@ async function catchUpMissedJobs() {
   const done = [];
   try {
     const ist = new Date(Date.now() + 5.5 * 3600e3);
-    const today = ist.toISOString().slice(0, 10);
     const dow = ist.getUTCDay();                       // 0 Sun .. 6 Sat (IST)
     const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    // Morning brief: the delivery rules (weekday, 07:30–12:00 IST, once per client
+    // per day, skipped_late alert) all live in briefDelivery.js, so just ask it.
     if (dow >= 1 && dow <= 5 && minutes >= 7 * 60 + 30) {
-      const { count } = await supabaseAdmin.from('morning_briefs')
-        .select('id', { count: 'exact', head: true }).eq('brief_date', today);
-      if (!count) { done.push('morning brief'); await runBriefOnce('morningBriefEngine(catch-up)'); }
+      done.push('morning brief check'); await runBriefOnce('morningBriefEngine(catch-up)', 'catch-up');
     }
     const { data: last } = await supabaseAdmin.from('instrument_scores')
       .select('scored_at').order('scored_at', { ascending: false }).limit(1);
@@ -186,6 +185,7 @@ async function _runDueJobs() {
     if (isMarketHours()) {
       done.push('market data'); await safeRun('marketData(wake)', refreshAllMarketData);
       if (!(await ranTodayIST('flashAlertEngine', 45))) { done.push('flash alerts'); await safeRun('flashAlertEngine(wake)', runFlashAlertScan); }
+      done.push('holding alerts'); await safeRun('holdingAlerts(wake)', () => require('./holdingAlerts').runHoldingAlertScan());
     }
     if (await eveningJobDue('aiLeverEngine', 18 * 60, 14)) {
       done.push('AI lever scan'); await safeRun('aiLeverEngine(wake)', runAILeverScan);
@@ -205,9 +205,15 @@ function startSchedulers() {
 
   // ── 07:30 IST Mon–Fri — Morning brief (02:00 UTC) ──────────────────
   cron.schedule('0 2 * * 1-5', () => {
-    runBriefOnce('morningBriefEngine');
+    runBriefOnce('morningBriefEngine', 'cron');
   }, UTC);
   console.log('   ✓ Morning brief: 7:30 AM IST (Mon-Fri)');
+
+  // ── 08:30 IST Mon–Fri — Admin daily summary (03:00 UTC) ────────────
+  cron.schedule('0 3 * * 1-5', () => {
+    safeRun('dailySummary', () => require('./systemHealth').sendDailySummary());
+  }, UTC);
+  console.log('   ✓ Admin daily summary: 8:30 AM IST (Mon-Fri)');
 
   // ── 09:00 IST daily — Subscription lifecycle (03:30 UTC) ───────────
   cron.schedule('30 3 * * *', () => {
@@ -223,9 +229,12 @@ function startSchedulers() {
 
   // ── Every hour at :05 during market hours — Flash alerts ───────────
   cron.schedule('5 * * * *', async () => {
-    if (isMarketHours()) await safeRun('flashAlertEngine', runFlashAlertScan);
+    if (isMarketHours()) {
+      await safeRun('flashAlertEngine', runFlashAlertScan);
+      await safeRun('holdingAlerts', () => require('./holdingAlerts').runHoldingAlertScan());
+    }
   });
-  console.log('   ✓ Flash alert scan: Every hour during market hours');
+  console.log('   ✓ Flash alert + stop-loss / critical-risk scan: Every hour during market hours');
 
   // ── 16:30 IST Mon–Fri — EOD + track record (11:00 UTC) ─────────────
   cron.schedule('0 11 * * 1-5', () => {

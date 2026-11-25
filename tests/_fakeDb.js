@@ -10,12 +10,14 @@ function makeDb() {
   const T = {};              // table -> rows
   let seq = 1;
   const rejectColumns = {};  // table -> Set of columns that "do not exist"
+  const missingTables = new Set();  // tables that "do not exist yet" (migration not run)
   const rows = t => (T[t] = T[t] || []);
 
   function builder(table) {
     const q = { op: 'select', filters: [], order: null, lim: null, payload: null, head: false, count: false, onConflict: null, single: null };
     const match = r => q.filters.every(f => f(r));
     const run = () => {
+      if (missingTables.has(table)) return { data: null, count: null, error: { code: '42P01', message: `relation "public.${table}" does not exist` } };
       const bad = q.payload && [].concat(q.payload).flatMap(Object.keys).find(k => rejectColumns[table]?.has(k));
       if (bad) return { data: null, error: { code: 'PGRST204', message: `Could not find the '${bad}' column of '${table}' in the schema cache` } };
 
@@ -24,6 +26,18 @@ function makeDb() {
         // unique (code, client_id) on discount_code_usage, like the migration adds
         if (table === 'discount_code_usage') {
           for (const r of list) if (rows(table).some(x => x.code === r.code && x.client_id === r.client_id))
+            return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+        }
+        if (table === 'brief_deliveries') {
+          for (const r of list) if (rows(table).some(x => x.client_id === r.client_id && x.ist_date === r.ist_date))
+            return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+        }
+        if (table === 'alert_deliveries') {
+          for (const r of list) if (rows(table).some(x => x.client_id === r.client_id && x.event_key === r.event_key))
+            return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
+        }
+        if (table === 'recommendation_outcomes') {
+          for (const r of list) if (r.checkpoint_label && rows(table).some(x => x.recommendation_id === r.recommendation_id && x.checkpoint_label === r.checkpoint_label))
             return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
         }
         if (table === 'payment_events') {
@@ -53,6 +67,7 @@ function makeDb() {
       let out = rows(table).filter(match);
       if (q.order) out = [...out].sort((a, b) => (a[q.order.k] > b[q.order.k] ? 1 : -1) * (q.order.asc ? 1 : -1));
       if (q.lim != null) out = out.slice(0, q.lim);
+      if (q.rng) out = out.slice(q.rng[0], q.rng[1] + 1);
       if (q.head) return { data: null, count: out.length, error: null };
       if (q.single === 'single') return out.length ? { data: out[0], error: null } : { data: null, error: { message: 'no rows' } };
       if (q.single === 'maybe') return { data: out[0] || null, error: null };
@@ -80,6 +95,8 @@ function makeDb() {
       },
       order(k, o) { q.order = { k, asc: o?.ascending !== false }; return api; },
       limit(n) { q.lim = n; return api; },
+      range(a, b) { q.rng = [a, b]; return api; },
+      lte(k, v) { q.filters.push(r => r[k] <= v); return api; },
       single() { q.single = 'single'; return api; },
       maybeSingle() { q.single = 'maybe'; return api; },
       then(res, rej) { return Promise.resolve(run()).then(res, rej); },
@@ -87,6 +104,6 @@ function makeDb() {
     return api;
   }
 
-  return { from: builder, T, rows, rejectColumns, seed(t, list) { rows(t).push(...list.map(r => ({ id: r.id || `${t[0]}${seq++}`, ...r }))); } };
+  return { from: builder, T, rows, rejectColumns, missingTables, seed(t, list) { rows(t).push(...list.map(r => ({ id: r.id || `${t[0]}${seq++}`, ...r }))); } };
 }
 module.exports = makeDb;

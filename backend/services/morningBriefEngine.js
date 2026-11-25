@@ -56,28 +56,58 @@ function fmtINR(n) {
 // SHARED SECTIONS (generated once per day, reused for all clients)
 // ─────────────────────────────────────────────────────────────────────
 
-async function buildMarketSnapshot(snapshot, aiEvents) {
-  const nifty = snapshot?.nifty;
-  const vix   = snapshot?.vix;
-  const regime = snapshot?.vixRegime;
+/**
+ * Nifty, Sensex and India VIX as the client sees them: level, day change, and
+ * when the number was true — with an honest label when it is not live
+ * ("as of <date>"), unverified (sanity check failed), or missing.
+ */
+/**
+ * The market regime stored with each brief, from India VIX:
+ * < 15 Low volatility · 15–20 Moderate · 20–30 Elevated · > 30 High.
+ * (A label for the record only; the risk gate keeps its own VIX bands.)
+ */
+function marketRegimeLabel(vix) {
+  if (vix == null || !isFinite(vix)) return null;
+  if (vix < 15) return 'Low volatility';
+  if (vix <= 20) return 'Moderate';
+  if (vix <= 30) return 'Elevated';
+  return 'High';
+}
 
-  // Deterministic facts — always accurate, never AI-invented.
-  // Values tagged source:'demo' are placeholders, not market data, and are
-  // never shown. A 'supabase_cache' value is a real earlier reading and says so.
-  const fmtTime = iso => new Date(iso).toLocaleString('en-IN',
+function buildMarketFigures(snapshot) {
+  const fmtWhen = iso => new Date(iso).toLocaleString('en-IN',
     { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
-  const asOf = q => q?.source === 'supabase_cache' && q.as_of ? ` (last reading, ${fmtTime(q.as_of)})` : '';
-  const facts = [];
-  if (nifty?.price != null && nifty.source !== 'demo') {
-    const dir = (nifty.change_pct ?? 0) >= 0 ? 'up' : 'down';
-    facts.push(`Nifty 50 is ${dir} ${Math.abs(nifty.change_pct ?? 0).toFixed(2)}% at ${Number(nifty.price).toLocaleString('en-IN')}${asOf(nifty)}`);
-  }
-  if (vix != null && snapshot?.vixSource && snapshot.vixSource !== 'demo') {
-    facts.push(`India VIX is at ${Number(vix).toFixed(1)} (${regime?.regime || 'normal'})${asOf({ source: snapshot.vixSource, as_of: snapshot.vixAsOf })}`);
-  }
-  if (snapshot?.sensex?.price != null && snapshot.sensex.source !== 'demo') {
-    facts.push(`Sensex at ${Number(snapshot.sensex.price).toLocaleString('en-IN')}`);
-  }
+  const fmtDay = iso => new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' });
+  const legacy = {
+    nifty: snapshot?.nifty && { label: 'Nifty 50', price: snapshot.nifty.price, change_pct: snapshot.nifty.change_pct, as_of: snapshot.nifty.as_of,
+                                status: snapshot.nifty.source === 'demo' || snapshot.nifty.price == null ? 'missing' : (snapshot.nifty.status || 'live'), unverified: !!snapshot.nifty.unverified },
+    sensex: snapshot?.sensex && { label: 'Sensex', price: snapshot.sensex.price, change_pct: snapshot.sensex.change_pct, as_of: snapshot.sensex.as_of,
+                                  status: snapshot.sensex.source === 'demo' || snapshot.sensex.price == null ? 'missing' : (snapshot.sensex.status || 'live'), unverified: !!snapshot.sensex.unverified },
+    vix: { label: 'India VIX', price: snapshot?.vix ?? null, change_pct: null, as_of: snapshot?.vixAsOf || null,
+           status: snapshot?.vix == null || snapshot?.vixSource === 'demo' ? 'missing' : (snapshot?.vixStatus || 'live'), unverified: false },
+  };
+  const src = snapshot?.indices || legacy;
+  return ['nifty', 'sensex', 'vix'].map(k => {
+    const x = src[k] || { label: legacy[k]?.label || k, price: null, status: 'missing' };
+    const missing = x.status === 'missing' || x.price == null;
+    const level = missing ? null : Number(x.price).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    const chg = x.change_pct == null || missing ? null : `${x.change_pct >= 0 ? '▲' : '▼'} ${Math.abs(x.change_pct).toFixed(2)}%`;
+    let note = '';
+    if (missing) note = 'not available today';
+    else if (x.status === 'stale') note = `not live — as of ${fmtDay(x.as_of)}`;
+    else if (x.as_of) note = `as of ${fmtWhen(x.as_of)} IST`;
+    if (!missing && x.unverified) note += `${note ? ' · ' : ''}unverified`;
+    const line = missing ? `${x.label}: not available today` : `${x.label} ${level}${chg ? ` ${chg}` : ''} (${note})`;
+    return { key: k, label: x.label, price: missing ? null : Number(x.price), level, change: chg, change_pct: missing ? null : x.change_pct, as_of: x.as_of || null,
+             status: missing ? 'missing' : x.status, unverified: !missing && !!x.unverified, note, line };
+  });
+}
+
+async function buildMarketSnapshot(snapshot, aiEvents) {
+  // Deterministic facts — always accurate, never AI-invented. Only figures that
+  // passed the trust checks go to the AI, labelled with when they were true.
+  const figures = buildMarketFigures(snapshot);
+  const facts = figures.filter(f => f.status !== 'missing' && !f.unverified).map(f => f.line);
   if (!facts.length) {
     return 'Live market data could not be fetched this morning, so we are not quoting index levels rather than show numbers that may be wrong.';
   }
@@ -96,6 +126,7 @@ ${eventLine ? `\nAI-detected events: ${aiEvents.map(e => `${e.title} (${e.severi
 
 Write 2-3 plain sentences summarising where the market stands today. Be factual and calm.
 Do not give investment advice. Do not use jargon. Do not invent any numbers not listed above.
+If a figure says "not live", say it is an earlier reading, not today's.
 
 Return JSON: {"snapshot": "your text here"}`;
 
@@ -131,7 +162,7 @@ async function buildEducationPoint() {
 
 /** Today's date in IST (YYYY-MM-DD). brief_date is an IST calendar day. */
 function istDate(now = Date.now()) {
-  return new Date(now + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  return require('../lib/istTime').istDate(new Date(now));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -166,7 +197,7 @@ async function getHoldings(clientId) {
   try {
     const { data } = await supabaseAdmin
       .from('portfolios')
-      .select('instrument_name, quantity, avg_buy_price_inr')
+      .select('*')
       .eq('client_id', clientId).eq('is_active', true);
     return data || [];
   } catch { return []; }
@@ -225,91 +256,221 @@ function buildPortfolioNote(holdings, actions) {
  * BUYs first. If there are none, say so plainly — "no trade" is a valid, honest
  * answer for a capital-preservation product — and show what is closest.
  */
-async function buildIdeas(riskScore, heldSymbols) {
+const ASSET_CLASS = {
+  large_cap_equity: 'equity', mid_cap_equity: 'equity', small_cap_equity: 'equity',
+  large_cap_fund: 'equity', flexi_mid_fund: 'equity',
+  index_etf: 'etf', gold: 'gold', debt_fund: 'debt', bond_gsec: 'debt',
+};
+const LEVERS = ['technical', 'fundamental', 'management', 'sentiment', 'institutional', 'sector_timing', 'macro_pestle', 'competitive', 'risk_adjusted'];
+
+/** Confidence band from the risk-adjusted lever (0–10). Client-safe: no number shown. */
+const confidenceBand = s => (s == null ? null : s >= 7 ? 'High' : s >= 5 ? 'Medium' : 'Low');
+
+/** One plain-English line from the strongest of the 9 levers, no jargon. */
+function whyLine(score) {
+  if (!score) return null;
+  const best = LEVERS.filter(k => score[k] != null).sort((x, y) => score[y] - score[x])[0];
+  if (!best) return null;
+  const phrase = require('./instrumentEngine').leverPhrase(best, Number(score[best]));
+  return phrase ? `Why now: ${phrase}.` : null;
+}
+
+/** For a SELL: one plain line from the WEAKEST lever — why we would stay away. */
+function cautionLine(score) {
+  if (!score) return null;
+  const worst = LEVERS.filter(k => score[k] != null).sort((x, y) => score[x] - score[y])[0];
+  if (!worst) return null;
+  const phrase = require('./instrumentEngine').leverPhrase(worst, Number(score[worst]));
+  return phrase ? `Why: ${phrase}.` : null;
+}
+
+/** Pick up to n ideas, best of each asset class first, so one class cannot crowd out the rest. */
+function pickAcrossClasses(sorted, n) {
+  const picked = [], seenClass = new Set();
+  for (const s of sorted) {
+    const c = ASSET_CLASS[s._category] || 'other';
+    if (!seenClass.has(c)) { picked.push(s); seenClass.add(c); }
+    if (picked.length === n) return picked;
+  }
+  for (const s of sorted) { if (!picked.includes(s)) picked.push(s); if (picked.length === n) break; }
+  return picked;
+}
+
+/**
+ * New ideas that fit the client's risk band and that they do not already hold.
+ * BUYs first, drawn across equity, ETFs, gold and debt. If none qualify, says
+ * why in counts ("N screened, 0 passed, main reason …") and shows the closest
+ * WATCH items, clearly labelled as not a buy.
+ */
+async function buildIdeas(riskScore, heldSymbols, now = new Date()) {
   try {
     const allowedCats = RISK_CATEGORY_MAP[riskBand(riskScore)];
     const { data: instruments } = await supabaseAdmin
       .from('instrument_universe')
-      .select('id, symbol, name, category, price_source')
+      .select('*')
       .in('category', allowedCats).eq('status', 'active');
+    const { priceModeOf, priceIsFresh } = require('./signalLevels');
+    const screened = instruments || [];
     // A statically-priced instrument (e.g. RBI Floating Rate Bond) has no market
     // price and cannot be bought or sold on an exchange, so it is never an "idea".
-    const tradeable = (instruments || []).filter(i => !['static', 'static_reference'].includes(i.price_source));
-    if (!tradeable.length) return { ideas: [], note: 'Our instrument list is being refreshed.' };
+    const tradeable = screened.filter(i => priceModeOf(i) !== 'static');
+    if (!screened.length) return { ideas: [], note: 'Our instrument list is being refreshed.', no_ideas: null };
 
     const meta = Object.fromEntries(tradeable.map(i => [i.symbol, i]));
-    const since = new Date(Date.now() - 10 * 86400000).toISOString();
-    const { data: sigs } = await supabaseAdmin
+    const since = new Date(now.getTime() - 10 * 86400000).toISOString();
+    const { data: sigs } = tradeable.length ? await supabaseAdmin
       .from('recommendations')
-      .select('instrument_name, action, confidence_score, signal_tier, rationale_short, rationale_text, entry_price_inr, target_price_inr, stop_loss_inr, horizon_days, generated_at')
+      // '*' so the brief keeps working whether or not migration 012's columns exist yet.
+      .select('*')
       .in('instrument_name', Object.keys(meta))
-      .is('client_id', null).eq('is_active', true).eq('risk_gate_passed', true)
+      .is('client_id', null).eq('is_active', true)
       // Only FRESH signals. Without this, a signal from an old scoring run stayed "active"
       // forever and kept being sold as a new idea (three month-old bond BUYs were).
       .gte('generated_at', since)
-      .order('generated_at', { ascending: false }).limit(300);
+      .order('generated_at', { ascending: false }).limit(300) : { data: [] };
 
-    // Only signals whose score was measured from the instrument's own price
-    // history. A run where Yahoo refused most requests scores everything on
-    // category defaults — those numbers say nothing about the instrument.
-    const measured = new Set();
+    // Latest score per instrument: was it measured on real prices, and its levers.
+    const scoreOf = {};
     try {
-      const ids = tradeable.map(i => i.id);
       const { data: scores } = await supabaseAdmin
-        .from('instrument_scores')
-        .select('instrument_id, scored_at, price_data_points, data_complete')
-        .in('instrument_id', ids).gte('scored_at', since)
+        .from('instrument_scores').select('*')
+        .in('instrument_id', tradeable.map(i => i.id)).gte('scored_at', since)
         .order('scored_at', { ascending: false }).limit(2000);
-      const seen = new Set();
-      for (const sc of scores || []) {
-        if (seen.has(sc.instrument_id)) continue;          // newest score per instrument
-        seen.add(sc.instrument_id);
-        if ((sc.price_data_points || 0) > 0 || sc.data_complete === true) measured.add(sc.instrument_id);
-      }
+      for (const sc of scores || []) if (!scoreOf[sc.instrument_id]) scoreOf[sc.instrument_id] = sc;
     } catch (e) {
-      console.warn(`   ⚠ buildIdeas: could not check score quality — ${e.message}`);
+      console.warn(`   ⚠ buildIdeas: could not read scores — ${e.message}`);
     }
+    const measured = id => { const sc = scoreOf[id]; return !!sc && ((sc.price_data_points || 0) > 0 || sc.data_complete === true); };
+
+    // AI lever: the client-safe label only, and only where the AI lever actually
+    // ran for that instrument — a live flag written by a successful Depth-3
+    // analysis (it carries an ai_lever_score). When the AI call failed, no flag
+    // is written, so the instrument shows its 9-lever signal with no AI label.
+    const aiLabel = {};
+    try {
+      const { data: flags } = await supabaseAdmin.from('ai_instrument_flags')
+        .select('instrument_id, horizon_label, is_active, ai_lever_score, expires_at').eq('is_active', true)
+        .in('instrument_id', tradeable.map(i => i.id));
+      const nowIso = new Date().toISOString();
+      for (const f of flags || []) {
+        if (f.ai_lever_score == null || (f.expires_at && f.expires_at < nowIso)) continue;
+        aiLabel[f.instrument_id] = `🤖 AI Influenced — ${f.horizon_label || 'Mid-Term'}`;
+      }
+    } catch { /* table absent → no labels */ }
 
     const newest = {};
-    for (const s of sigs || []) {
-      const inst = meta[s.instrument_name];
-      if (!inst || !measured.has(inst.id)) continue;
-      if (!newest[s.instrument_name]) newest[s.instrument_name] = s;   // one per instrument
+    for (const s of sigs || []) if (!newest[s.instrument_name]) newest[s.instrument_name] = s;   // one per instrument
+    const held = new Set(heldSymbols);
+
+    // ── Why nothing passed: client-safe counts only ──────────────────────
+    const blockers = { 'price not live or not recent': screened.length - tradeable.length,
+                       'not enough price history to measure': 0, 'held back by our risk checks': 0,
+                       'possible gain too small for the risk': 0, 'score below our buy level': 0 };
+    for (const i of tradeable) {
+      const s = newest[i.symbol];
+      if (!measured(i.id)) { blockers['not enough price history to measure']++; continue; }
+      if (!s) { blockers['not enough price history to measure']++; continue; }
+      if (s.action === 'BUY' && s.risk_gate_passed) continue;
+      if (/reward:risk/.test(s.downgrade_reason || '')) blockers['possible gain too small for the risk']++;
+      else if (/stale|static|unknown|no current price/.test(s.downgrade_reason || '')) blockers['price not live or not recent']++;
+      else if (s.risk_gate_passed === false) blockers['held back by our risk checks']++;
+      else blockers['score below our buy level']++;
     }
+
+    const levelsTrusted = s => s.target_price_inr != null && s.stop_loss_inr != null
+      && priceModeOf(meta[s.instrument_name]) !== 'static'
+      && priceIsFresh(s.price_as_of, new Date(s.generated_at));
+    const toIdea = s => {
+      const inst = meta[s.instrument_name] || {};
+      const sc = scoreOf[inst.id];
+      const ok = levelsTrusted(s);
+      const entry = Number(s.entry_price_inr) || null;
+      const mode = priceModeOf(inst);
+      return {
+        symbol: s.instrument_name,
+        name: inst.name || s.instrument_name,
+        asset_class: ASSET_CLASS[inst.category] || 'other',
+        action: s.action,
+        high_conviction: s.signal_tier === 'high_conviction',
+        why: whyLine(sc),
+        rationale: short(s.rationale_text || s.rationale_short || '', 220),
+        confidence: confidenceBand(sc?.risk_adjusted),
+        ai_label: aiLabel[inst.id] || null,
+        entry,
+        // Entry zone: ±1% around the last traded price; a fund simply buys at the day's NAV.
+        entry_zone: !ok || !entry ? null : mode === 'daily_nav' ? "at the day's NAV"
+          : `₹${(entry * 0.99).toFixed(2)}–₹${(entry * 1.01).toFixed(2)}`,
+        levels_ok: ok,
+        target: ok ? s.target_price_inr : null,
+        stop: ok ? s.stop_loss_inr : null,
+        reward_risk: ok && s.reward_risk != null ? Number(s.reward_risk) : null,
+        horizon_days: s.horizon_days,
+      };
+    };
+
     const usable = Object.values(newest)
+      .filter(s => meta[s.instrument_name] && measured(meta[s.instrument_name].id) && !held.has(s.instrument_name))
+      .map(s => ({ ...s, _category: meta[s.instrument_name].category }))
       .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0));
 
+    // SELL calls are shown, not hidden (FIX-7) — framed as "consider avoiding /
+    // exiting", for instruments the client does NOT hold (held ones already show
+    // EXIT / REVIEW under Your Portfolio). Only where the price is genuinely
+    // current: a SELL on a feed that stopped updating (dead AMFI codes) is not a
+    // call we can stand behind, so it is left out.
+    const cautions = Object.values(newest)
+      .filter(s => s.action === 'SELL' && meta[s.instrument_name] && measured(meta[s.instrument_name].id)
+        && !held.has(s.instrument_name) && priceModeOf(meta[s.instrument_name]) !== 'static'
+        && priceIsFresh(s.price_as_of, new Date(s.generated_at)))
+      .sort((a, b) => (a.confidence_score || 0) - (b.confidence_score || 0))
+      .slice(0, 3)
+      .map(s => {
+        const inst = meta[s.instrument_name];
+        return { symbol: s.instrument_name, name: inst.name || s.instrument_name, asset_class: ASSET_CLASS[inst.category] || 'other',
+                 action: 'SELL', label: 'Consider avoiding or exiting', why: cautionLine(scoreOf[inst.id]), horizon_days: s.horizon_days };
+      });
+
+    const buys = pickAcrossClasses(usable.filter(s => s.action === 'BUY' && s.risk_gate_passed), 3).map(toIdea);
+    if (buys.length) return { ideas: buys, note: null, no_ideas: null, cautions };
+
+    const top = Object.entries(blockers).sort((x, y) => y[1] - x[1])[0];
+    const no_ideas = {
+      screened: screened.length, passed: 0,
+      top_blocker: top && top[1] > 0 ? top[0] : null, top_blocker_count: top ? top[1] : 0,
+      blockers,
+      text: `${screened.length} instruments screened for your profile, 0 passed all our checks today.` +
+            (top && top[1] > 0 ? ` Main reason: ${top[0]} (${top[1]}).` : ''),
+    };
     if (!usable.length) {
-      return {
-        ideas: [],
-        note: 'No ideas today. Our weekly analysis has not completed with live price data, and we would rather say nothing than suggest something we have not properly measured.',
-      };
+      return { ideas: [], no_ideas, cautions,
+        note: 'No ideas today. Our weekly analysis has not completed with live price data, and we would rather say nothing than suggest something we have not properly measured.' };
     }
-
-    const held = new Set(heldSymbols);
-    const toIdea = s => ({
-      symbol: s.instrument_name,
-      name: meta[s.instrument_name]?.name || s.instrument_name,
-      action: s.action,
-      high_conviction: s.signal_tier === 'high_conviction',
-      rationale: short(s.rationale_text || s.rationale_short || '', 220),
-      entry: s.entry_price_inr, target: s.target_price_inr, stop: s.stop_loss_inr,
-      horizon_days: s.horizon_days,
-    });
-
-    const buys = usable.filter(s => s.action === 'BUY' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
-    if (buys.length) return { ideas: buys, note: null };
-
-    const radar = usable.filter(s => s.action === 'WATCH' && !held.has(s.instrument_name)).slice(0, 3).map(toIdea);
+    const radar = pickAcrossClasses(usable.filter(s => s.action === 'WATCH'), 3).map(toIdea);
     return {
-      ideas: radar,
+      ideas: radar, no_ideas, cautions,
       note: 'No new BUY signals pass our risk checks for your profile today. Waiting is a valid position — we only ask you to act when the evidence is strong.' +
             (radar.length ? ' These are on our watchlist — not a recommendation to buy yet:' : ''),
     };
   } catch (e) {
     console.warn(`   ⚠ buildIdeas: ${e.message}`);
-    return { ideas: [], note: null };
+    return { ideas: [], note: null, no_ideas: null };
   }
+}
+
+/** Builder and Wealth Builder include opportunities (min_tier in the opportunities table). */
+const TIER_RANK = { starter: 1, builder: 2, wealth_builder: 3 };
+async function buildOpportunities(plan) {
+  try {
+    const { data } = await supabaseAdmin.from('opportunities')
+      .select('symbol, instrument_name, headline, detail, min_tier, expires_at')
+      .eq('is_active', true).order('generated_at', { ascending: false }).limit(10);
+    const rank = TIER_RANK[plan] || 0;
+    return (data || [])
+      .filter(o => rank >= (TIER_RANK[o.min_tier] || 2))
+      .filter(o => !o.expires_at || new Date(o.expires_at) > new Date())
+      .slice(0, 3)
+      .map(o => ({ symbol: o.symbol, name: o.instrument_name, headline: short(o.headline, 140), detail: short(o.detail, 200) }));
+  } catch { return []; }
 }
 
 async function buildNews() {
@@ -341,7 +502,73 @@ async function buildGoalNote(clientId) {
   } catch { return null; }
 }
 
-function decideTodayAction(holdings, actions, ideas) {
+/** Current prices for holdings, memoised for 30 minutes so N clients cost one fetch per instrument. */
+const _px = new Map();
+async function priceOf(inst) {
+  const hit = _px.get(inst.symbol);
+  if (hit && Date.now() - hit.at < 30 * 60e3) return hit.v;
+  let v = null;
+  try { v = await require('./instrumentEngine').fetchInstrumentPrice(inst); } catch { v = null; }
+  _px.set(inst.symbol, { at: Date.now(), v });
+  return v;
+}
+
+/**
+ * Value, day change, P&L and a HOLD / REVIEW / EXIT status for each holding,
+ * tied to our current signal, the stop-loss and any CRITICAL AI flag.
+ */
+async function buildPortfolio(holdings, actions) {
+  if (!holdings.length) return null;
+  const { holdingStatus } = require('./holdingAlerts');
+  const symbols = [...new Set(holdings.map(h => h.instrument_name))];
+  const { data: insts } = await supabaseAdmin.from('instrument_universe').select('*').in('symbol', symbols);
+  const inst = Object.fromEntries((insts || []).map(i => [i.symbol, i]));
+  let critical = new Set();
+  try {
+    const ids = (insts || []).map(i => i.id);
+    const { data: flags } = ids.length ? await supabaseAdmin.from('ai_instrument_flags').select('instrument_id, risk_level, is_active')
+      .eq('is_active', true).eq('risk_level', 'CRITICAL').in('instrument_id', ids) : { data: [] };
+    critical = new Set((flags || []).map(f => f.instrument_id));
+  } catch { /* no flags table → no critical flags */ }
+  const act = Object.fromEntries(actions.map(a => [a.symbol, a]));
+
+  let value = 0, cost = 0, dayChange = 0, priced = 0;
+  const rows = [];
+  for (const h of holdings) {
+    const i = inst[h.instrument_name] || { symbol: h.instrument_name };
+    const q = i.id ? await priceOf(i) : null;
+    const price = q?.price ?? null;
+    const qty = Number(h.quantity) || 0, avg = Number(h.avg_buy_price_inr) || 0;
+    const a = act[h.instrument_name];
+    const stop = Number(h.stop_loss_price) || (a?.action === 'BUY' ? Number(a.stop) : null) || null;
+    const st = holdingStatus({ price, stop, signalAction: a?.action, aiCritical: critical.has(i.id) });
+    const val = price != null ? qty * price : null;
+    const chgPct = price != null && q?.change_pct != null && q.source !== 'mfapi_live' ? Number(q.change_pct) : null;
+    const dayAbs = val != null && chgPct != null ? val - val / (1 + chgPct / 100) : null;
+    if (val != null) { value += val; cost += qty * avg; priced++; if (dayAbs != null) dayChange += dayAbs; }
+    rows.push({
+      symbol: h.instrument_name, name: i.name || h.instrument_name, quantity: qty, avg_price: avg,
+      price, value: val != null ? Math.round(val) : null,
+      day_change_pct: chgPct,
+      pnl: val != null ? Math.round(val - qty * avg) : null,
+      pnl_pct: val != null && avg > 0 ? Math.round(((price - avg) / avg) * 10000) / 100 : null,
+      stop, signal: a?.action || null, status: st.status, reasons: st.reasons,
+    });
+  }
+  return {
+    holdings: rows, priced, total: holdings.length,
+    value: priced ? Math.round(value) : null,
+    day_change: priced ? Math.round(dayChange) : null,
+    pnl: priced ? Math.round(value - cost) : null,
+    pnl_pct: priced && cost > 0 ? Math.round(((value - cost) / cost) * 10000) / 100 : null,
+    exits: rows.filter(r => r.status === 'EXIT').map(r => r.symbol),
+    reviews: rows.filter(r => r.status === 'REVIEW').map(r => r.symbol),
+  };
+}
+
+function decideTodayAction(holdings, actions, ideas, portfolio = null) {
+  if (portfolio?.exits?.length) return `Stop-loss reached on ${portfolio.exits.join(', ')} — review ${portfolio.exits.length > 1 ? 'these holdings' : 'this holding'} today.`;
+  if (portfolio?.reviews?.length) return `Review ${portfolio.reviews.join(', ')} — details under Your Portfolio.`;
   const sells = actions.filter(a => a.action === 'SELL');
   if (sells.length) return `Review ${sells.map(s => s.symbol).join(', ')} — our signal on ${sells.length > 1 ? 'them has' : 'it has'} turned negative.`;
   if (ideas.length && ideas[0].action === 'BUY') {
@@ -371,7 +598,14 @@ function getSharedSections({ force = false } = {}) {
     const snapshot = await refreshAllMarketData();
     const news = await buildNews();
     const marketSnapshot = await buildMarketSnapshot(snapshot, news);
-    return { marketSnapshot, news, educationPoint: await buildEducationPoint(), dataNotes: [] };
+    const marketFigures = buildMarketFigures(snapshot);
+    let trackRecord = null;
+    try { trackRecord = await require('./trackRecordSummary').getTrackRecordSummary(); } catch (e) { console.warn(`   ⚠ track record summary: ${e.message}`); }
+    // VIX as shown in the email, stored on every brief row (vix_at_brief, market_regime).
+    const vixFig = marketFigures.find(f => f.key === 'vix');
+    const vixAtBrief = vixFig && vixFig.status !== 'missing' && vixFig.price != null ? Number(vixFig.price) : null;
+    return { marketSnapshot, marketFigures, news, trackRecord, vixAtBrief, marketRegime: marketRegimeLabel(vixAtBrief),
+             educationPoint: await buildEducationPoint(), dataNotes: [] };
   })();
   _shared = { key, at: Date.now(), promise };
   promise.catch(() => { if (_shared && _shared.promise === promise) _shared = null; });
@@ -455,22 +689,34 @@ async function buildBriefForClient(client, shared) {
     getRiskScore(client.id), getHoldings(client.id), buildGoalNote(client.id),
   ]);
   const actions = await buildHoldingActions(holdings);
-  const { ideas, note: ideasNote } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
+  const { ideas, note: ideasNote, no_ideas: noIdeas, cautions = [] } = await buildIdeas(riskScore, holdings.map(h => h.instrument_name));
+  // Tier: only what the code already defines — opportunities carry min_tier 'builder'.
+  const tierPlan = require('../lib/entitlements').entitlementFromRow(client).plan;
+  const opportunities = await buildOpportunities(tierPlan);
   const portfolioNote = buildPortfolioNote(holdings, actions);
+  const portfolio = await buildPortfolio(holdings, actions);
   // A client with nothing logged gets a starting plan built from their profile and goals.
   const plan = holdings.length ? null : await buildStartingPlanForClient(client.id, riskScore);
   const todayAction = plan
     ? 'Your starting plan is below — monthly amounts for each goal and where to put them. Add what you buy as holdings and we will track it every morning.'
-    : decideTodayAction(holdings, actions, ideas);
+    : decideTodayAction(holdings, actions, ideas, portfolio);
 
   const brief = {
     market_snapshot: shared.marketSnapshot,
+    market_figures:  shared.marketFigures || [],
     news:            shared.news,
     today_action:    todayAction,
     portfolio_note:  portfolioNote,
     holding_actions: actions,
+    portfolio,
     ideas,
     ideas_note:      ideasNote,
+    no_ideas:        noIdeas,
+    cautions,
+    opportunities,
+    track_record:    shared.trackRecord || null,
+    vix_at_brief:    shared.vixAtBrief ?? null,
+    market_regime:   shared.marketRegime ?? null,
     top_signals:     ideas.map(i => ({ symbol: i.symbol, action: i.action, rationale: i.rationale })),
     goal_note:       goalNote,
     starting_plan:   plan,
@@ -483,13 +729,24 @@ async function buildBriefForClient(client, shared) {
     '',
     `TODAY: ${todayAction}`,
     '',
-    'MARKET SNAPSHOT', shared.marketSnapshot,
+    'MARKET SNAPSHOT', ...(shared.marketFigures || []).map(f => `• ${f.line}`), shared.marketSnapshot,
+    shared.trackRecord ? `\nOUR TRACK RECORD\n${shared.trackRecord.text}${shared.trackRecord.disclaimer ? `\n${shared.trackRecord.disclaimer}` : ''}` : '',
     shared.news.length ? `\nIN THE NEWS\n${shared.news.map(n => `• ${n.title}${n.severity ? ` (${n.severity})` : ''}`).join('\n')}` : '',
     `\nYOUR PORTFOLIO\n${portfolioNote}`,
     plan ? `\nYOUR STARTING PLAN\n${startingPlan.planToText(plan)}` : '',
-    actions.length ? actions.map(a => `• ${a.symbol} — ${a.action || 'no signal'}: ${a.advice}`).join('\n') : '',
+    portfolio ? [
+      portfolio.value != null ? `Value ₹${portfolio.value.toLocaleString('en-IN')}${portfolio.day_change != null ? `, today ${portfolio.day_change >= 0 ? '+' : '−'}₹${Math.abs(portfolio.day_change).toLocaleString('en-IN')}` : ''}${portfolio.pnl != null ? `, gain/loss ${portfolio.pnl >= 0 ? '+' : '−'}₹${Math.abs(portfolio.pnl).toLocaleString('en-IN')} (${portfolio.pnl_pct}%)` : ''}` : 'Prices for your holdings could not be fetched this morning.',
+      ...portfolio.holdings.map(r => `• ${r.status} — ${r.symbol}${r.price != null ? ` ₹${r.price}` : ''}${r.pnl_pct != null ? ` (${r.pnl_pct >= 0 ? '+' : ''}${r.pnl_pct}%)` : ''}${r.reasons.length ? `: ${r.reasons.join('; ')}` : ''}`),
+    ].join('\n') : '',
     ideas.length || ideasNote ? `\nIDEAS WORTH A LOOK${ideasNote ? `\n${ideasNote}` : ''}` : '',
-    ideas.length ? ideas.map(i => `• ${i.symbol} (${i.action})${i.entry ? ` entry ~₹${i.entry}` : ''}${i.target ? `, target ₹${i.target}` : ''}${i.stop ? `, stop-loss ₹${i.stop}` : ''}`).join('\n') : '',
+    ideas.length ? ideas.map(i => [
+      `• ${i.symbol} (${i.action === 'WATCH' ? 'watching — not a buy yet' : i.action})${i.ai_label ? ` ${i.ai_label}` : ''}${i.confidence ? ` · confidence ${i.confidence}` : ''}`,
+      i.why ? `  ${i.why}` : '',
+      i.levels_ok ? `  Entry ${i.entry_zone || `~₹${i.entry}`}, target ₹${i.target}, stop-loss ₹${i.stop}, reward:risk ${Number(i.reward_risk).toFixed(1)}, ${i.horizon_days}-day view` : '',
+    ].filter(Boolean).join('\n')).join('\n') : '',
+    noIdeas ? `WHY NO NEW IDEAS TODAY\n${noIdeas.text}` : '',
+    cautions.length ? `\nCONSIDER AVOIDING OR EXITING\n${cautions.map(c => `• ${c.symbol} — ${c.label}${c.why ? `. ${c.why}` : ''}`).join('\n')}` : '',
+    opportunities.length ? `\nOPPORTUNITIES\n${opportunities.map(o => `• ${o.headline}`).join('\n')}` : '',
     goalNote ? `\nYOUR GOALS\n${goalNote}` : '',
     `\nLEARN SOMETHING TODAY\n${shared.educationPoint}`,
     '\nNot investment advice. WealthGuard is not a SEBI-registered investment adviser.',
@@ -499,10 +756,12 @@ async function buildBriefForClient(client, shared) {
 }
 
 /** Writes the brief. brief_json is optional so a not-yet-migrated DB still works. */
-async function persistBrief(client, brief) {
+async function persistBrief(client, brief, date = istDate()) {
   const row = {
     client_id:        client.id,
-    brief_date:       istDate(),
+    // The delivery run passes its own IST date so a run that crosses midnight
+    // stores and marks the brief under the same day it is tracking.
+    brief_date:       date,
     market_snapshot:  brief.market_snapshot,
     portfolio_note:   brief.portfolio_note,
     top_signals:      brief.top_signals,
@@ -511,9 +770,11 @@ async function persistBrief(client, brief) {
     full_text:        brief.full_text,
     whatsapp_message: brief.full_text,     // the column the in-app tab already reads
     ai_provider:      aiProvider.isConfigured() ? 'ai' : 'template',
+    vix_at_brief:     brief.vix_at_brief ?? null,
+    market_regime:    brief.market_regime ?? null,
     brief_json:       { ...brief, generated_at: new Date().toISOString() },
   };
-  const r = await db.writeTolerant('morning_briefs', 'upsert', row, ['brief_json'],
+  const r = await db.writeTolerant('morning_briefs', 'upsert', row, ['brief_json', 'vix_at_brief', 'market_regime'],
     { onConflict: 'client_id,brief_date' });
   return { ok: r.ok, row };
 }
@@ -538,80 +799,17 @@ async function generateBriefForClient(clientId) {
 // MAIN ENGINE (07:30 IST, Mon–Fri)
 // ─────────────────────────────────────────────────────────────────────
 
-async function generateAndSendMorningBrief() {
+/**
+ * Builds today's briefs and emails them — once per client per IST day, between
+ * 07:30 and 12:00 IST. All the rules live in briefDelivery.js; every trigger
+ * (cron, catch-up, GitHub job, admin) comes through here.
+ */
+async function generateAndSendMorningBrief(opts = {}) {
   if (!supabaseAdmin) {
     console.log('📰 Morning brief: Supabase not configured, skipping.');
-    return;
+    return { status: 'no_database' };
   }
-
-  const start = Date.now();
-  console.log('📰 Generating morning briefs...');
-  let sent = 0, skipped = 0, failed = 0, stored = 0;
-
-  try {
-    const shared = await getSharedSections({ force: true });
-    console.log(`   Shared sections built (AI calls used: ${aiProvider.getUsage().google + aiProvider.getUsage().anthropic})`);
-
-    // EVERY client gets an in-app brief. This used to select only clients with
-    // onboarding_complete = true — a flag nothing ever set — so no brief was
-    // ever generated for anyone. Whether it is also EMAILED depends on having an
-    // address and an active/trial subscription.
-    const { data: clients } = await supabaseAdmin.from('clients').select('*').limit(5000);
-
-    if (!clients?.length) {
-      console.log('📰 No clients to brief.');
-      await reportRun({ engineName: 'morningBriefEngine', durationMs: Date.now() - start, itemsProcessed: 0, itemsExpected: 0 });
-      return;
-    }
-
-    // A second run on the same day (restart, wake-up ping) must not email anyone twice.
-    const alreadyEmailed = new Set();
-    try {
-      const { data: sentToday } = await supabaseAdmin.from('morning_briefs')
-        .select('client_id').eq('brief_date', istDate()).eq('email_sent', true);
-      (sentToday || []).forEach(r => alreadyEmailed.add(r.client_id));
-    } catch { /* if this lookup fails we fall back to the old behaviour */ }
-
-    for (const client of clients) {
-      if (alreadyEmailed.has(client.id)) { skipped++; continue; }
-      try {
-        const brief = await buildBriefForClient(client, shared);
-        const { ok } = await persistBrief(client, brief);
-        if (ok) stored++;
-        else console.warn(`   ⚠ Brief for ${client.full_name || client.id} could not be stored (run migration 002/006).`);
-
-        const emailable = ['active', 'trial'].includes(client.subscription_status);
-        const emailed = emailable ? await emailEngine.sendMorningBrief(client, brief) : false;
-        if (emailed) {
-          sent++;
-          const today = istDate();
-          await db.tryWrite('morning_briefs', 'update', c =>
-            c.from('morning_briefs').update({ email_sent: true, email_sent_at: new Date().toISOString() })
-              .eq('client_id', client.id).eq('brief_date', today));
-          await db.tryWrite('clients', 'update', c =>
-            c.from('clients').update({ last_brief_sent_at: new Date().toISOString() }).eq('id', client.id));
-        } else {
-          skipped++;
-        }
-      } catch (e) {
-        console.error(`   ❌ Brief failed for client ${client.id}: ${e.message}`);
-        failed++;
-      }
-    }
-
-    console.log(`📰 Morning briefs complete: ${stored} stored, ${sent} emailed, ${skipped} not emailed, ${failed} failed.`);
-    await reportRun({
-      engineName: 'morningBriefEngine', durationMs: Date.now() - start,
-      itemsProcessed: stored, itemsExpected: clients.length, itemsFailed: failed,
-      detail: `${stored} stored, ${sent} emailed, ${skipped} not emailed, AI: ${JSON.stringify(aiProvider.getUsage())}`,
-    });
-  } catch (e) {
-    console.error('📰 Morning brief engine error:', e.message);
-    await reportRun({
-      engineName: 'morningBriefEngine', durationMs: Date.now() - start,
-      itemsProcessed: stored, itemsExpected: 1, itemsFailed: failed + 1, detail: e.message,
-    });
-  }
+  return require('./briefDelivery').deliverMorningBriefs(opts);
 }
 
-module.exports = { generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, istDate, _test: { buildMarketSnapshot } };
+module.exports = { marketRegimeLabel, generateAndSendMorningBrief, generateBriefForClient, buildBriefForClient, persistBrief, getSharedSections, istDate, _test: { buildPortfolio, resetPriceCache: () => _px.clear(), buildMarketSnapshot, buildMarketFigures, buildIdeas, pickAcrossClasses, whyLine, cautionLine, confidenceBand } };

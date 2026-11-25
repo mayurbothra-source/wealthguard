@@ -455,8 +455,34 @@ function scoreInstrument(instrument, macroData, metrics) {
   };
 }
 
+/**
+ * THE SIGNAL DECISION — one place, pure, tested (SA5).
+ *
+ *   static reference price          → WATCH  ("Reference (price not live)")
+ *   no own price history (no-data)  → WATCH
+ *   composite >= 70                 → BUY
+ *   composite 50–69                 → WATCH
+ *   composite <  50                 → SELL
+ *
+ * The AI lever (the 10th) is NOT an input. It is stored separately as
+ * ai_instrument_flags and never gated BUY (Nov 2026 audit, H11 rejected), so
+ * a failed AI scan cannot block a BUY and a successful one cannot create one.
+ * Thresholds are the frozen September 2026 values — not lowered.
+ * Statically-priced fixed income (G-Secs, SDLs, T-bills, capital-gain bonds,
+ * RBI floaters, SGB, digital gold) can never be BUY or SELL: a fixed reference
+ * price has no market behaviour to call.
+ */
+const BUY_AT = 70, WATCH_AT = 50;
+function decideAction({ composite, insufficient_data, price_source }) {
+  if (price_source === 'static') return { action: 'WATCH', reason: 'Reference (price not live)' };
+  if (insufficient_data) return { action: 'WATCH', reason: 'no price history of its own — no directional call' };
+  if (composite >= BUY_AT) return { action: 'BUY', reason: null };
+  if (composite >= WATCH_AT) return { action: 'WATCH', reason: null };
+  return { action: 'SELL', reason: null };
+}
+
 module.exports = {
-  scoreInstrument,
+  scoreInstrument, decideAction, BUY_AT, WATCH_AT,
   leverTechnical, leverFundamental, leverManagement, leverSentiment,
   leverInstitutional, leverSectorTiming, leverMacro, leverCompetitive,
   leverRiskAdjusted,

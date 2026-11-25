@@ -1,0 +1,46 @@
+# FIX-4: fresh market data + the full scoring pass BEFORE the 07:30 IST brief,
+# so the brief is built from today's signals (data → scoring → brief).
+# The endpoint starts the run in the background (it takes 10–40 minutes) and is
+# idempotent: a run that finished in the last 6 hours answers "fresh".
+#
+# Needs repository secret JOB_SECRET (falls back to ADMIN_TRIGGER_KEY).
+name: morning-scoring
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '15 0 * * 1-5'   # 05:45 IST
+    - cron: '50 0 * * 1-5'   # 06:20 IST — backup (GitHub often starts late or skips)
+concurrency:
+  group: morning-scoring
+  cancel-in-progress: false
+jobs:
+  scoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Warm the server, then start today's scoring run
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL || 'https://wealthguard-backend.onrender.com' }}
+          JOB_SECRET: ${{ secrets.JOB_SECRET || secrets.ADMIN_TRIGGER_KEY }}
+        run: |
+          set -u
+          BACKEND_URL="$(printf '%s' "$BACKEND_URL" | tr -d '[:space:]')"; BACKEND_URL="${BACKEND_URL%/}"
+          JOB_SECRET="$(printf '%s' "$JOB_SECRET" | tr -d '[:space:]')"
+          if [ -z "$JOB_SECRET" ]; then echo "::error::JOB_SECRET (or ADMIN_TRIGGER_KEY) secret is not set"; exit 1; fi
+          warm=0
+          for i in 1 2 3 4 5; do
+            if curl -sS --max-time 90 -o /dev/null -w "%{http_code}\n" "$BACKEND_URL/healthz" | grep -q '^200$'; then warm=1; break; fi
+            sleep $((i * 10))
+          done
+          if [ "$warm" != 1 ]; then echo "::error::Server did not wake after 5 tries"; exit 1; fi
+          for i in 1 2 3; do
+            code=$(curl -sS --max-time 60 -o body.json -w "%{http_code}" -X POST \
+                   -H "x-job-secret: $JOB_SECRET" "$BACKEND_URL/api/jobs/morning-scoring" || echo 000)
+            echo "HTTP $code: $(cat body.json 2>/dev/null)"
+            case "$code" in
+              200|202) exit 0 ;;
+              401|403|503) echo "::error::Endpoint refused the secret or is misconfigured"; exit 1 ;;
+            esac
+            sleep $((i * 20))
+          done
+          echo "::error::Morning scoring endpoint never returned success"; exit 1

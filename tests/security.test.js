@@ -282,7 +282,8 @@ function call(method, path, body, token, headers = {}) {
   DB.rows('morning_briefs').length = 0;
   const email = require('../backend/services/emailEngine'); const sent = [];
   email.sendMorningBrief = async (c) => { sent.push(c.id); return true; };
-  await require('../backend/services/morningBriefEngine').generateAndSendMorningBrief();
+  // A fixed weekday 07:31 IST, so the test does not depend on when it is run.
+  await require('../backend/services/morningBriefEngine').generateAndSendMorningBrief({ now: new Date('2026-11-13T02:01:00Z') });
   const briefed = new Set(DB.rows('morning_briefs').map(b => b.client_id));
   ck('the 07:30 engine now stores a brief for EVERY client (not only onboarding_complete ones)', ['A', 'B', 'N'].every(id => briefed.has(id)));
   ck('…and emails only entitled subscribers', sent.includes('A') && !sent.includes('B'), JSON.stringify(sent));

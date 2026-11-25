@@ -1,0 +1,33 @@
+# SA5 dry run — GitHub Actions run 45202070883 (job 137787894207), 23 Nov 2026 15:09–15:21 UTC
+# https://github.com/mayurbothra-source/wealthguard/actions/runs/45202070883
+# Per-date SELL lists are abbreviated here; the full list is in the run log / artifact sa5-simulation-log.
+SA5 dry run — 2026-11-23T15:09:52.209Z — 120 instruments, dates 2026-10-05, 2026-10-12, 2026-10-19, 2026-10-26, 2026-11-02, 2026-11-09, 2026-11-16, 2026-11-20
+Inputs: production lever code, BUY >= 70 / WATCH 50-69 / SELL < 50 (unchanged), macro as production, no fundamentals, no AI lever, no risk gate.
+
+Price history fetched: 63 instruments; failed: 44 (AAVAS: HTTP 429; ADANIPORTS: HTTP 429; ASIANPAINT: HTTP 429; ASTRAL: HTTP 429; AXISBANK: HTTP 429; AXISELSS: no AMFI code; AXISGOLD: HTTP 429; BAJFINANCE: HTTP 429; ICICIBAETF: no AMFI code; MF-HDFC-BAL: no AMFI code; MIRGOLD: HTTP 429; MOM100: HTTP 429; MOSNIFW100: HTTP 429; MPHASIS: HTTP 429; NESTLEIND: HTTP 429; NIFTYBEES: HTTP 429; NYKAA: HTTP 429; PERSISTENT: HTTP 429; PIIND: HTTP 429; POLICYBZR: HTTP 429; POLYCAB: HTTP 429; POWERGRID: HTTP 429; RELIANCE: HTTP 429; ROUTE: HTTP 429; RVNL: HTTP 429; SBIGOLD: HTTP 429; SBIN: HTTP 429; SBINIFTY: HTTP 429; SCHAEFFLER: HTTP 429; SILVERETF: HTTP 429; SOLARINDS: HTTP 429; SUNPHARMA: HTTP 429; SUPREMEIND: HTTP 429; SYNGENE: HTTP 429; TANLA: HTTP 429; TATACOMM: HTTP 429; TATAPOWER: HTTP 429; TCS: HTTP 429; TIINDIA: HTTP 429; TITAN: HTTP 429; VOLTAS: HTTP 429; WIPRO: HTTP 429; ZENSARTECH: HTTP 429; ZOMATO: HTTP 429)
+History ends before 1 Nov (dead codes / delisted?): MF-AXIS-BC (last 2016-01-19), MF-AXIS-SD (last 2014-01-16), MF-FRK-PRM (last 2011-10-21), MF-HDFC-MC (last 2018-06-01), MF-NIP-MC (last 2016-03-02), MF-SBI-STD (last 2014-05-02)
+
+── 2026-10-05: 100 active instruments, 49 measured — BUY 0, WATCH 71, SELL 29
+   top measured composites: MF-MIRAE-LC 69, BHARATBOND30 64, BHARATBOND32 63, KOTAKBANK 62, GOLDBEES 61, HDFCGOLD 61, MF-IDFC-STB 58, MF-UTI-FX 56
+── 2026-10-12: 100 active instruments, 49 measured — BUY 0, WATCH 72, SELL 28
+   top measured composites: KOTAKBANK 66, MF-MIRAE-LC 66, BHARATBOND30 63, BHARATBOND32 63, GOLDBEES 61, HDFCGOLD 61, MF-IDFC-STB 56, MF-KOT-LQ 56
+── 2026-10-19: 100 active instruments, 49 measured — BUY 0, WATCH 78, SELL 22
+   top measured composites: KOTAKBANK 66, BHARATBOND30 63, BHARATBOND32 63, MF-KOT-STB 63, ITBEES 61, LTTS 60, GOLDBEES 59, HDFCGOLD 59
+── 2026-10-26: 100 active instruments, 49 measured — BUY 0, WATCH 70, SELL 30
+   top measured composites: BHARATBOND30 63, ITBEES 63, KOTAKBANK 63, LTTS 63, MF-KOT-STB 63, BHARATBOND32 61, ICICIBANK 59, GOLDBEES 58
+── 2026-11-02: 100 active instruments, 49 measured — BUY 0, WATCH 81, SELL 19
+   top measured composites: KOTAKBANK 67, BHARATBOND30 64, BHARATBOND32 64, LTTS 64, MF-KOT-STB 62, ITBEES 61, BHARTIARTL 60, LT 59
+── 2026-11-09: 100 active instruments, 49 measured — BUY 1, WATCH 90, SELL 9
+   top measured composites: KOTAKBANK 71, BHARATBOND30 69, BHARATBOND32 69, ICICIBANK 69, LTTS 64, BANKBEES 63, BHARTIARTL 63, MF-AXIS-MC 63
+   BUY KOTAKBANK [large_cap_equity] 71 — tech 9 fund 7 mgmt 7 sent 10 inst 4 sector 7 macro 6 comp 9 risk 5
+── 2026-11-16: 100 active instruments, 49 measured — BUY 1, WATCH 91, SELL 8
+   top measured composites: KOTAKBANK 71, BHARATBOND30 69, BHARATBOND32 69, ICICIBANK 69, BHARTIARTL 67, BANKBEES 64, LTTS 64, MF-ICICI-ST 64
+   BUY KOTAKBANK [large_cap_equity] 71 — tech 7 fund 7 mgmt 7 sent 10 inst 4 sector 7 macro 6 comp 9 risk 7
+── 2026-11-20: 100 active instruments, 49 measured — BUY 2, WATCH 88, SELL 10
+   top measured composites: KOTAKBANK 72, ICICIBANK 71, BHARATBOND30 69, BHARATBOND32 69, BANKBEES 68, MF-ICICI-ST 68, BHARTIARTL 67, HDFCSENSEX 67
+   BUY ICICIBANK [large_cap_equity] 71 — tech 7 fund 7 mgmt 7 sent 10 inst 4 sector 8 macro 6 comp 8 risk 7
+   BUY KOTAKBANK [large_cap_equity] 72 — tech 7 fund 7 mgmt 7 sent 10 inst 4 sector 8 macro 6 comp 9 risk 7
+
+Totals over 8 dates: BUY 4, WATCH 641, SELL 155
+Distinct instruments with a BUY: 2 (KOTAKBANK, ICICIBANK)
+…of which equity / equity MF / index / gold: 2 (KOTAKBANK, ICICIBANK)

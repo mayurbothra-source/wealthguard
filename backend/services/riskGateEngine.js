@@ -126,6 +126,20 @@ async function runRiskGate(instrument, proposedAction, composite, context, sessi
   }
 
   // ─── GATE 1: VIX gate ─────────────────────────────────────────────
+  // Unknown VIX (every source failed, nothing stored) is treated like an
+  // elevated one for volatile categories: capital preservation first. There is
+  // no hard-coded default VIX any more, so this case is real.
+  if (proposedAction === 'BUY' && vix == null && VOLATILE_CATEGORIES.includes(cat)) {
+    await logGateDecision(instrument, proposedAction, true, 'vix',
+      `India VIX unavailable with volatile category ${cat}`, composite, null);
+    session.vetoCount++;
+    return {
+      action:  'WATCH',
+      vetoed:  true,
+      caution: false,
+      reason:  'We could not confirm current market volatility, so higher-risk instruments are held at WATCH for now.',
+    };
+  }
   if (proposedAction === 'BUY' && vix != null) {
     if (vix >= VIX_CRISIS) {
       await logGateDecision(instrument, proposedAction, true, 'vix',
