@@ -135,17 +135,21 @@ async function insertOutcomes(rows, state) {
   let written = 0;
   for (let i = 0; i < rows.length; i += 100) {
     const chunk = rows.slice(i, i + 100);
-    let error = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes').insert(chunk.map(r => omit(r, cols))));
+    let error = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes')
+      .upsert(chunk.map(r => omit(r, cols)), { onConflict: 'recommendation_id,checkpoint_label', ignoreDuplicates: true })
+      .select('id'));
     if (!error) { written += chunk.length; continue; }
     if (error.code === '23505') {
       for (const r of chunk) {
-        const e1 = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes').insert(omit(r, cols)));
+        const e1 = await tolerantWrite(state, cols => supabaseAdmin.from('recommendation_outcomes')
+          .upsert(omit(r, cols), { onConflict: 'recommendation_id,checkpoint_label', ignoreDuplicates: true })
+          .select('id'));
         if (!e1) written++;
         else if (e1.code !== '23505') console.error(`   ❌ outcome insert failed: ${e1.message}`);
       }
       continue;
     }
-    console.error(`   ❌ outcome insert failed for ${chunk.length} rows: ${error.message}`);
+    console.error(`   ❌ outcome insert failed for ${chunk.length} rows: ${error.message} [code=${error.code}]`);
   }
   return written;
 }
@@ -154,8 +158,10 @@ async function insertOutcomes(rows, state) {
 async function tolerantWrite(state, write) {
   state.missing = state.missing || new Set();
   for (let tries = 0; tries <= NEW_COLUMNS.length; tries++) {
-    const { error } = await write(state.missing);
+    const res = await write(state.missing);
+    const { error } = res;
     if (!error) return null;
+    if (tries === 0) console.warn(`   ⚠ tolerantWrite attempt ${tries}: code=${error.code} msg=${String(error.message).slice(0, 120)}`);
     if (!isMissingColumn(error)) return error;
     const col = missingColumnName(error);
     if (!col || state.missing.has(col) || !NEW_COLUMNS.includes(col)) return error;
@@ -389,6 +395,7 @@ async function runTrackRecordCheckpoints(opts = {}) {
   }
 
   const state = { missing: new Set() };
+  console.log(`📋 Inserting ${toInsert.length} new outcomes, retrying ${toRetry.length} existing...`);
   const written = await insertOutcomes(toInsert, state);
   let updated = 0;
   for (const { id, row } of toRetry) {
