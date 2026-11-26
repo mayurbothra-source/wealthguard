@@ -3,9 +3,9 @@
  * 07:30 cron, start-up catch-up, the GitHub job endpoint, the admin trigger).
  *
  * Rules
- *   - Mon–Fri only (IST). Never before 07:30 IST. Never after 12:00 IST — a
- *     brief that would arrive at lunchtime is skipped, recorded as
- *     `skipped_late`, and the admin is alerted.
+ *   - Mon–Fri only (IST). Never before 07:30 IST. Never after 16:00 IST — a
+ *     brief that arrives too late is skipped, recorded as `skipped_late`,
+ *     and the admin is alerted.
  *   - Exactly one email per client per IST date. Each send is claimed first in
  *     `brief_deliveries` (unique client_id + ist_date), so two triggers racing
  *     each other cannot both send. A failed send is retried by a later trigger,
@@ -22,7 +22,7 @@ const db = require('../lib/db');
 const { istDate, istMinutes, isIstWeekday } = require('../lib/istTime');
 
 const SEND_FROM_MIN = 7 * 60 + 30;   // 07:30 IST
-const LATE_CUTOFF_MIN = 12 * 60;     // 12:00 IST
+const LATE_CUTOFF_MIN = 16 * 60;     // 16:00 IST (GitHub Actions cron runs 6-8h late on the free tier)
 const MAX_ATTEMPTS = 3;
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 
@@ -167,11 +167,11 @@ async function deliverMorningBriefs({ trigger = 'cron', now = new Date(), ignore
         });   // a conflict means a row already exists — fine
       }
     }
-    console.warn(`   ⏰ Morning brief skipped_late: ${pending.length} client(s) not emailed (after 12:00 IST)`);
+    console.warn(`   ⏰ Morning brief skipped_late: ${pending.length} client(s) not emailed (after 16:00 IST)`);
     await reportRun({
       engineName: 'morningBriefDelivery', durationMs: Date.now() - start,
       itemsProcessed: 0, itemsExpected: pending.length, itemsFailed: pending.length,
-      detail: `skipped_late: no brief sent by 12:00 IST on ${date} (trigger: ${trigger}). Check the morning-brief GitHub workflow.`,
+      detail: `skipped_late: no brief sent by 16:00 IST on ${date} (trigger: ${trigger}). Check the morning-brief GitHub workflow.`,
     });
     return { ...base, status: 'skipped_late', eligible: eligible.length, pending: pending.length, sent: 0 };
   }

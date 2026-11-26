@@ -8,7 +8,7 @@
  *
  * Responses (JSON { status, date, ... }):
  *   200  sent | already_sent | not_a_brief_day | too_early
- *   409  skipped_late   (after 12:00 IST — nothing sent, admin alerted; the workflow fails on purpose)
+ *   409  skipped_late   (after 16:00 IST — nothing sent, admin alerted; the workflow fails on purpose)
  *   502  failed         (every send attempted this time failed)
  *   500  error
  */
@@ -86,6 +86,11 @@ router.post('/morning-scoring', requireJobSecret, async (req, res) => {
     const run = require('../lib/keepAwake').during('morning-scoring', async () => {
       await require('../services/marketData').refreshAllMarketData();
       await require('../services/instrumentEngine').runInstrumentScoringEngine();
+      // Chain: after scoring finishes, deliver today's brief (the brief endpoint
+      // is idempotent, so this is safe even if the morning-brief workflow also fires).
+      console.log('📋 Scoring complete — chaining to morning brief delivery...');
+      try { await require('../services/morningBriefEngine').generateAndSendMorningBrief({ trigger: 'post-scoring' }); }
+      catch (e) { console.error('❌ chained brief delivery:', e.message); }
     }).catch(e => console.error('❌ morning scoring:', e.message))
       .finally(() => { _scoring = null; });
     _scoring = { since, run };

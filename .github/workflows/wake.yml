@@ -1,6 +1,6 @@
 # Wakes the free-plan Render server on a schedule so the daily jobs actually run.
 # The morning brief has its own workflow (morning-brief.yml); a wake-up later in the
-# day still checks for a missed brief, but never sends after 12:00 IST.
+# day still checks for a missed brief, but never sends after 16:00 IST.
 # Needs one GitHub repository secret (Settings > Secrets and variables > Actions):
 #   ADMIN_TRIGGER_KEY  the same value as ADMIN_TRIGGER_KEY in Render
 # The backend URL is public, so it is set below (a BACKEND_URL variable can override it).
