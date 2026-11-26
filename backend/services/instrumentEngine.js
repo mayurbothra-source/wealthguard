@@ -411,7 +411,9 @@ async function convertScoreToRecommendation(instrument, composite, levers, entry
     rewardRisk = lv.rewardRisk ?? null;
     if (lv.ok) {
       targetPrice = lv.target; stopLoss = lv.stop;
-      expectedPct = parseFloat(((Math.abs(lv.target - entryPrice) / entryPrice) * 100).toFixed(2));
+      if (lv.target != null && entryPrice > 0) {
+        expectedPct = parseFloat(((Math.abs(lv.target - entryPrice) / entryPrice) * 100).toFixed(2));
+      }
     } else if (action === 'BUY') {
       action = 'WATCH'; tier = 'standard'; downgradeReason = lv.reason;
       console.log(`   ↓ ${instrument.symbol}: BUY → WATCH (${lv.reason})`);

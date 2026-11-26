@@ -67,12 +67,14 @@ const YAHOO_HEADERS = {
 // Yahoo tolerates automated requests but not a burst of 120. The weekly
 // scoring run has plenty of time, so pace it.
 const IS_TEST = process.env.NODE_ENV === 'test';
-const FETCH_GAP_MS      = IS_TEST ? 0 : 1500;   // slower, but the run is kept awake now
-// When Yahoo answers 429 (too many requests) or a server error, wait and try again
-// (on the second host too) instead of giving up. The 2 Nov run lost 74 of 120
-// instruments to 429s with no retry, so most of the universe scored identically.
-const RETRY_WAITS_MS    = IS_TEST ? [0, 0, 0] : [4000, 10000, 25000];
-const SECOND_PASS_WAIT_MS = IS_TEST ? 0 : 30000;
+const FETCH_GAP_MS      = IS_TEST ? 0 : 2500;   // 2.5s between requests (was 1.5s)
+// First-pass retries are SHORT — save heavy retries for the second pass so the
+// first pass completes faster and trips the rate limiter fewer times.
+const RETRY_WAITS_MS    = IS_TEST ? [0, 0, 0] : [5000, 15000, 40000];
+const SECOND_PASS_WAIT_MS = IS_TEST ? 0 : 120000;  // 2 min cooldown before retrying (was 30s)
+// After this many consecutive 429s, pause all fetching to let the rate limit window reset.
+const RATE_LIMIT_PAUSE_AFTER = 3;
+const RATE_LIMIT_PAUSE_MS    = IS_TEST ? 0 : 60000;  // 60s global backoff
 const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const REQUEST_TIMEOUT_MS = 10000;
 const CACHE_MAX_AGE_HRS  = 30;   // one scoring cycle plus slack
@@ -387,6 +389,7 @@ async function buildMetrics(instruments, opts = {}) {
   };
 
   const retryList = [];
+  let consecutive429s = 0;
   for (const inst of instruments) {
     const symbol = inst.symbol;
     if (!symbol) continue;
@@ -431,6 +434,18 @@ async function buildMetrics(instruments, opts = {}) {
       priceReason = reason;
       if (closes) priceStats = computePriceStats(closes);
       await sleep(FETCH_GAP_MS);
+      // Global rate-limit detection: when Yahoo returns multiple 429s in a row,
+      // pause the entire run instead of hammering each instrument in turn.
+      if (!closes && reason && reason.includes('429')) {
+        consecutive429s++;
+        if (consecutive429s >= RATE_LIMIT_PAUSE_AFTER) {
+          console.log(`   ⏸ ${consecutive429s} consecutive 429s — pausing ${RATE_LIMIT_PAUSE_MS / 1000}s`);
+          await sleep(RATE_LIMIT_PAUSE_MS);
+          consecutive429s = 0;
+        }
+      } else {
+        consecutive429s = 0;
+      }
     }
 
     // Fundamentals only make sense for a listed company. A fund, ETF, bond or

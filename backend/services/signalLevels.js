@@ -97,6 +97,16 @@ function computeLevels({ action, entry, horizonDays, instrument, priceAsOf, stat
   const target = action === 'SELL' ? r2(entry * (1 - upMove)) : r2(entry * (1 + upMove));
   const stop = action === 'SELL' ? r2(entry * (1 + downMove)) : r2(entry * (1 - downMove));
   if (rewardRisk < MIN_REWARD_RISK) {
+    // Debt funds and bond ETFs have structurally low reward:risk on short
+    // horizons because accrual (upside) is tiny relative to even their small
+    // volatility. A 7%/year debt fund over 14 days accrues ~0.27% — the R:R
+    // can never reach 1.5. Rather than permanently blocking BUY on every
+    // debt instrument, publish BUY without target/stop levels and let the
+    // score speak for itself.
+    if (isDebt) {
+      return { ok: true, target: null, stop: null, rewardRisk, method: 'accrual (no levels — low volatility)',
+               reason: null };
+    }
     return { ok: false, rewardRisk, method, reason: `reward:risk ${rewardRisk.toFixed(2)} is below ${MIN_REWARD_RISK}` };
   }
   return { ok: true, target, stop, rewardRisk, method };
