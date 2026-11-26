@@ -10,6 +10,9 @@
 name: morning-brief
 on:
   workflow_dispatch: {}
+  workflow_run:
+    workflows: ["morning-scoring"]
+    types: [completed]
   schedule:
     - cron: '45 1 * * 1-5'   # 07:15 IST — warms the server, waits for 07:30, sends
     - cron: '15 2 * * 1-5'   # 07:45 IST — backup
